@@ -20,6 +20,7 @@ interface LocationSearchProps {
     lng: number;
     bounds?: [[number, number], [number, number]];
   }) => void;
+  onInputChange?: (value: string) => void;
   placeholder?: string;
   className?: string;
   defaultValue?: string;
@@ -27,6 +28,7 @@ interface LocationSearchProps {
 
 const LocationSearch = ({
   onLocationSelect,
+  onInputChange,
   placeholder = "Search any location in Africa...",
   className,
   defaultValue = "",
@@ -37,6 +39,11 @@ const LocationSearch = ({
   const [showResults, setShowResults] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+
+  const handleQueryChange = (val: string) => {
+    setQuery(val);
+    onInputChange?.(val);
+  };
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -162,7 +169,7 @@ const LocationSearch = ({
         <Input
           type="text"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => handleQueryChange(e.target.value)}
           placeholder={placeholder}
           className="pl-10 pr-10"
           onFocus={() => results.length > 0 && setShowResults(true)}
@@ -176,7 +183,7 @@ const LocationSearch = ({
             size="icon"
             className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
             onClick={() => {
-              setQuery("");
+              handleQueryChange("");
               setResults([]);
             }}
           >

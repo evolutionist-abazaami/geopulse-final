@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
-import { lovable } from "@/integrations/lovable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
@@ -50,30 +49,36 @@ const Auth = () => {
     return password.length >= 6;
   };
 
-  const handleGoogleSignIn = async () => {
+  const handleOAuthSignIn = async (provider: "google" | "apple") => {
     setIsLoading(true);
     try {
-      const result = await lovable.auth.signInWithOAuth("google", {
-        redirect_uri: window.location.origin,
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: {
+          redirectTo: `${window.location.origin}/`,
+        },
       });
 
-      if (result.redirected) {
-        // Page is redirecting to OAuth provider
-        return;
-      }
-
-      if (result.error) {
-        toast.error(result.error.message || "Failed to sign in with Google");
+      if (error) {
+        toast.error(error.message || `Failed to sign in with ${provider === "apple" ? "Apple" : "Google"}`);
         setIsLoading(false);
         return;
       }
 
-      toast.success("Successfully signed in with Google!");
+      toast.success(`Redirecting to ${provider === "apple" ? "Apple" : "Google"} for sign-in...`);
     } catch (error) {
-      console.error("Google signin error:", error);
+      console.error(`${provider} signin error:`, error);
       toast.error("An unexpected error occurred. Please try again.");
       setIsLoading(false);
     }
+  };
+
+  const handleGoogleSignIn = async () => {
+    await handleOAuthSignIn("google");
+  };
+
+  const handleAppleSignIn = async () => {
+    await handleOAuthSignIn("apple");
   };
 
   const handleMagicLinkSignIn = async (e: React.FormEvent) => {
@@ -122,7 +127,7 @@ const Auth = () => {
 
     try {
       const { error } = await supabase.auth.resetPasswordForEmail(resetEmail, {
-        redirectTo: `${window.location.origin}/auth?reset=true`,
+        redirectTo: `${window.location.origin}/reset-password`,
       });
 
       if (error) {
@@ -352,7 +357,7 @@ const Auth = () => {
             <Button
               type="button"
               variant="outline"
-              className="w-full mb-4 flex items-center justify-center gap-2"
+              className="w-full mb-3 flex items-center justify-center gap-2"
               onClick={handleGoogleSignIn}
               disabled={isLoading}
             >
@@ -375,6 +380,19 @@ const Auth = () => {
                 />
               </svg>
               Continue with Google
+            </Button>
+
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full mb-4 flex items-center justify-center gap-2"
+              onClick={handleAppleSignIn}
+              disabled={isLoading}
+            >
+              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M16.36 8.94c-.03-1.76 1.44-2.6 1.5-2.64-.82-1.2-2.1-1.37-2.56-1.38-1.09-.11-2.13.64-2.69.64-.56 0-1.43-.62-2.35-.6-1.21.01-2.33.7-2.95 1.78-1.27 2.2-.32 5.46 1.02 7.24.68.98 1.49 2.08 2.56 2.04 1.03-.04 1.42-.66 2.67-.66 1.25 0 1.61.66 2.71.64 1.12-.02 1.82-.99 2.5-1.97.78-1.14 1.11-2.24 1.13-2.3-.02-.01-2.16-.83-2.16-3.33ZM14.2 2.83c.48-.58.8-1.39.71-2.2-.69.03-1.52.46-2.01 1.04-.44.51-.83 1.33-.73 2.11.77.06 1.55-.39 2.03-0.95Z"/>
+              </svg>
+              Continue with Apple
             </Button>
 
             {/* Divider */}

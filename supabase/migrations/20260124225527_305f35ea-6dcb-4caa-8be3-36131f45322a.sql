@@ -1,7 +1,7 @@
 -- Create a table for shared reports (publicly accessible via unique link)
-CREATE TABLE public.shared_reports (
+CREATE TABLE IF NOT EXISTS public.shared_reports (
   id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
-  share_id TEXT NOT NULL UNIQUE DEFAULT encode(gen_random_bytes(12), 'hex'),
+  share_id TEXT NOT NULL UNIQUE DEFAULT md5(random()::text || clock_timestamp()::text),
   report_type TEXT NOT NULL DEFAULT 'comparison',
   title TEXT NOT NULL,
   location_name TEXT NOT NULL,

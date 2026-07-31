@@ -78,6 +78,119 @@ function validateClassificationType(value: unknown): ClassificationType | null {
   return value as ClassificationType;
 }
 
+async function exchangeServiceAccountToken(params: { clientEmail: string; privateKey: string; projectId: string }) {
+  const { clientEmail, privateKey, projectId } = params;
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const payload = {
+    iss: clientEmail,
+    scope: 'https://www.googleapis.com/auth/earthengine https://www.googleapis.com/auth/cloud-platform',
+    aud: 'https://oauth2.googleapis.com/token',
+    exp: now + 3600,
+    iat: now,
+  };
+
+  const encodedHeader = btoa(JSON.stringify(header)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  const encodedPayload = btoa(JSON.stringify(payload)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+
+  const pemBody = privateKey
+    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
+    .replace(/-----END PRIVATE KEY-----/g, '')
+    .replace(/\\n/g, '\n')
+    .replace(/\n/g, '')
+    .trim();
+
+  const derBuffer = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    derBuffer,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(signingInput));
+  const encodedSignature = btoa(String.fromCharCode(...new Uint8Array(signature)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+  const jwt = `${signingInput}.${encodedSignature}`;
+
+  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: jwt,
+    }),
+  });
+
+  if (!tokenResponse.ok) {
+    const errorText = await tokenResponse.text();
+    throw new Error(`Google OAuth token exchange failed for project ${projectId}: ${tokenResponse.status} ${errorText}`);
+  }
+
+  const tokenData = await tokenResponse.json() as { access_token?: string };
+  if (!tokenData.access_token) {
+    throw new Error(`Google OAuth token exchange succeeded but no access token was returned for project ${projectId}`);
+  }
+
+  return { accessToken: tokenData.access_token, projectId };
+}
+
+async function getEarthEngineContext(env: Record<string, string | undefined>) {
+  const rawValue = env.GOOGLE_EARTH_ENGINE_API_KEY?.trim();
+
+  if (!rawValue) {
+    return {
+      available: false,
+      provider: 'missing',
+      projectId: null as string | null,
+      message: 'Google Earth Engine credentials are not configured.',
+    };
+  }
+
+  if (rawValue.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(rawValue) as Record<string, unknown>;
+      const privateKey = typeof parsed.private_key === 'string' ? parsed.private_key : '';
+      const clientEmail = typeof parsed.client_email === 'string' ? parsed.client_email : '';
+      const projectId = typeof parsed.project_id === 'string' ? parsed.project_id : '';
+
+      if (!privateKey || !clientEmail || !projectId) {
+        return {
+          available: false,
+          provider: 'service_account',
+          projectId: projectId || null,
+          message: 'Google Earth Engine service account JSON is missing required fields (private_key, client_email, or project_id).',
+        };
+      }
+
+      const authResult = await exchangeServiceAccountToken({ clientEmail, privateKey, projectId });
+      return {
+        available: true,
+        provider: 'service_account',
+        projectId: authResult.projectId,
+        message: `Earth Engine service account authentication succeeded for project ${authResult.projectId}.`,
+      };
+    } catch (error) {
+      return {
+        available: false,
+        provider: 'service_account',
+        projectId: null,
+        message: `Earth Engine service account authentication failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
+  }
+
+  return {
+    available: false,
+    provider: 'api_key',
+    projectId: null,
+    message: 'The configured Earth Engine value is not a service account JSON. Provide a service account JSON with private_key/client_email/project_id for authenticated access.',
+  };
+}
+
 function buildFallbackAnalysis(params: {
   eventTypes: string[];
   region: string;
@@ -184,26 +297,16 @@ serve(async (req) => {
     }
     
     const supabase = createClient(supabaseUrl, supabaseKey);
-    // Require authentication for satellite analysis
+    // Optional authentication check - support both guest users and logged-in users
     const authHeader = req.headers.get("authorization");
-    if (!authHeader) {
-      return new Response(
-        JSON.stringify({ error: "Authentication required. Please sign in to use satellite analysis." }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    let user = null;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.replace("Bearer ", "");
+      const { data } = await supabase.auth.getUser(token);
+      user = data?.user || null;
     }
     
-    const token = authHeader.replace("Bearer ", "");
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-    
-    if (authError || !user) {
-      return new Response(
-        JSON.stringify({ error: "Invalid or expired authentication token. Please sign in again." }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-    
-    console.log(`Analysis request - User: ${user.id}`);
+    console.log(`Analysis request - User: ${user ? user.id : 'Guest'}`);
 
     const body = await req.json();
     
@@ -226,6 +329,7 @@ serve(async (req) => {
     
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
     const GOOGLE_EARTH_ENGINE_KEY = Deno.env.get("GOOGLE_EARTH_ENGINE_API_KEY");
+    const earthEngineContext = await getEarthEngineContext(Deno.env.toObject());
     
     if (!GEMINI_API_KEY) {
       throw new Error("GEMINI_API_KEY not configured");
@@ -426,7 +530,7 @@ LANDSAT DATA REQUIREMENTS:
 - Target 90%+ cloud detection accuracy using QA band
 - Include radiometric and geometric quality metrics
 
-${GOOGLE_EARTH_ENGINE_KEY ? "Access imagery via Google Earth Engine when available." : ""}`;
+${earthEngineContext.available ? `Access imagery via Google Earth Engine using authenticated service account access for project ${earthEngineContext.projectId}.` : `Google Earth Engine is unavailable for this request: ${earthEngineContext.message}`}`;
 
     const requestBody = JSON.stringify({
       systemInstruction: { parts: [{ text: systemPrompt }] },

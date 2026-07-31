@@ -445,45 +445,13 @@ Clean, modern design with data visualization elements.
 Professional scientific poster style, 16:9 aspect ratio.`;
     }
 
-    // Image generation via Lovable AI Gateway (primary) with direct Gemini as fallback.
-    // The Gateway uses LOVABLE_API_KEY which has higher quota than the free Gemini tier.
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    // Image generation via direct Gemini API.
     const model = "gemini-2.5-flash-image";
     let imageUrl: string | null = null;
     let description = "";
     let lastStatus = 0;
 
-    // --- Attempt 1: Lovable AI Gateway ---
-    if (LOVABLE_API_KEY) {
-      try {
-        const gwRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${LOVABLE_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: `google/${model}`,
-            messages: [{ role: "user", content: prompt }],
-            modalities: ["image", "text"],
-          }),
-        });
-        lastStatus = gwRes.status;
-        if (gwRes.ok) {
-          const gwData = await gwRes.json();
-          const msg = gwData?.choices?.[0]?.message;
-          const img = msg?.images?.[0]?.image_url?.url;
-          if (img) imageUrl = img;
-          if (typeof msg?.content === "string") description = msg.content;
-        } else {
-          console.error(`Lovable Gateway error: ${gwRes.status}`, (await gwRes.text()).slice(0, 200));
-        }
-      } catch (e) {
-        console.error("Lovable Gateway request failed:", e);
-      }
-    }
-
-    // --- Attempt 2: Direct Gemini fallback ---
+    // --- Direct Gemini generation ---
     if (!imageUrl) {
       const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
       const requestBody = JSON.stringify({

@@ -66,7 +66,7 @@ const TimeLapseAnimation = ({ onFrameChange, mapCenter }: TimeLapseAnimationProp
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      const authToken = session?.access_token || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+      const authToken = session?.access_token || (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "").trim();
 
       const frameRequests = generateTimeFrames().map(async (frame, index) => {
         // Stagger requests to avoid rate limiting

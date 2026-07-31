@@ -12,6 +12,7 @@ import GeoSearch from "./pages/GeoSearch";
 import Dashboard from "./pages/Dashboard";
 import Analytics from "./pages/Analytics";
 import Auth from "./pages/Auth";
+import ResetPassword from "./pages/ResetPassword";
 import EarlyWarning from "./pages/EarlyWarning";
 import SharedReport from "./pages/SharedReport";
 import NotFound from "./pages/NotFound";
@@ -43,6 +44,7 @@ const App = () => (
                     <Route path="/analytics" element={<Analytics />} />
                     <Route path="/early-warning" element={<EarlyWarning />} />
                     <Route path="/auth" element={<Auth />} />
+                    <Route path="/reset-password" element={<ResetPassword />} />
                     <Route path="*" element={<NotFound />} />
                   </Routes>
                 </div>

@@ -90,6 +90,11 @@ const getSeverityColor = (severity: string): string => {
   }
 };
 
+const safeFixed = (val: any, decimals: number = 1): string => {
+  const num = Number(val);
+  return isNaN(num) ? "0" : num.toFixed(decimals);
+};
+
 const ClassificationResults = ({ classificationResults, changeDetection }: ClassificationResultsProps) => {
   if (!classificationResults && !changeDetection) return null;
 
@@ -107,7 +112,7 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
               <h4 className="font-semibold">Classification Results</h4>
             </div>
             <Badge variant="outline" className="capitalize">
-              {classificationResults.method?.replace(/_/g, ' ')}
+              {classificationResults.method?.replace(/_/g, ' ') || "Supervised"}
             </Badge>
           </div>
 
@@ -124,7 +129,7 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
                     <span className="text-xs text-muted-foreground">Overall Accuracy</span>
                   </div>
                   <p className="text-xl font-bold text-green-700 dark:text-green-400">
-                    {classificationResults.accuracy_metrics?.overall_accuracy?.toFixed(1)}%
+                    {safeFixed(classificationResults.accuracy_metrics?.overall_accuracy, 1)}%
                   </p>
                 </div>
                 <div className="p-3 bg-blue-50 dark:bg-blue-950/30 rounded-lg">
@@ -133,7 +138,7 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
                     <span className="text-xs text-muted-foreground">Kappa Coefficient</span>
                   </div>
                   <p className="text-xl font-bold text-blue-700 dark:text-blue-400">
-                    {classificationResults.accuracy_metrics?.kappa_coefficient?.toFixed(2)}
+                    {safeFixed(classificationResults.accuracy_metrics?.kappa_coefficient, 2)}
                   </p>
                 </div>
               </div>
@@ -141,18 +146,18 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
               {/* Class Breakdown */}
               <div className="space-y-2">
                 <p className="text-xs font-medium text-muted-foreground">
-                  Land Cover Classes ({classificationResults.num_classes})
+                  Land Cover Classes ({classificationResults.num_classes || classificationResults.classes?.length || 0})
                 </p>
                 <div className="space-y-2 max-h-48 overflow-y-auto">
                   {classificationResults.classes?.slice(0, 10).map((cls, i) => (
                     <div key={i} className="flex items-center gap-2">
-                      <div className={`w-3 h-3 rounded ${getClassColor(cls.name)}`} />
+                      <div className={`w-3 h-3 rounded ${getClassColor(cls.name || '')}`} />
                       <span className="text-sm flex-1 truncate">{cls.name}</span>
                       <span className="text-xs text-muted-foreground">
-                        {cls.area_km2?.toFixed(1)} km²
+                        {safeFixed(cls.area_km2, 1)} km²
                       </span>
                       <Badge variant="secondary" className="text-xs">
-                        {cls.area_percent?.toFixed(1)}%
+                        {safeFixed(cls.area_percent, 1)}%
                       </Badge>
                     </div>
                   ))}
@@ -166,9 +171,9 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
                   {classificationResults.classes?.map((cls, i) => (
                     <div
                       key={i}
-                      className={`${getClassColor(cls.name)} h-full`}
-                      style={{ width: `${cls.area_percent}%` }}
-                      title={`${cls.name}: ${cls.area_percent?.toFixed(1)}%`}
+                      className={`${getClassColor(cls.name || '')} h-full`}
+                      style={{ width: `${Math.max(0, Number(cls.area_percent) || 0)}%` }}
+                      title={`${cls.name}: ${safeFixed(cls.area_percent, 1)}%`}
                     />
                   ))}
                 </div>
@@ -187,7 +192,7 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
               <h4 className="font-semibold">Change Detection</h4>
             </div>
             <Badge variant="outline" className="capitalize">
-              {changeDetection.method?.replace(/_/g, ' ')}
+              {changeDetection.method?.replace(/_/g, ' ') || "Detection"}
             </Badge>
           </div>
 
@@ -201,13 +206,13 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
                 <div className="p-3 bg-orange-50 dark:bg-orange-950/30 rounded-lg">
                   <span className="text-xs text-muted-foreground">Changed Area</span>
                   <p className="text-lg font-bold text-orange-700 dark:text-orange-400">
-                    {changeDetection.total_changed_area_km2?.toFixed(1)} km²
+                    {safeFixed(changeDetection.total_changed_area_km2, 1)} km²
                   </p>
                 </div>
                 <div className="p-3 bg-red-50 dark:bg-red-950/30 rounded-lg">
                   <span className="text-xs text-muted-foreground">Change Rate</span>
                   <p className="text-lg font-bold text-red-700 dark:text-red-400">
-                    {changeDetection.change_percent?.toFixed(1)}%
+                    {safeFixed(changeDetection.change_percent, 1)}%
                   </p>
                 </div>
               </div>
@@ -218,13 +223,13 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
                   <span>Changed</span>
                   <span>No Change</span>
                 </div>
-                <Progress value={changeDetection.change_percent} className="h-3" />
+                <Progress value={Number(changeDetection.change_percent) || 0} className="h-3" />
               </div>
 
               <Separator />
 
               {/* Major Changes */}
-              {changeDetection.major_changes?.length > 0 && (
+              {changeDetection.major_changes && changeDetection.major_changes.length > 0 && (
                 <div className="space-y-2">
                   <p className="text-xs font-medium text-muted-foreground flex items-center gap-1">
                     <AlertTriangle className="h-3 w-3" />
@@ -236,7 +241,7 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
                         <span className="text-sm truncate flex-1">{change.type}</span>
                         <div className="flex items-center gap-2">
                           <span className="text-xs text-muted-foreground">
-                            {change.area_km2?.toFixed(1)} km²
+                            {safeFixed(change.area_km2, 1)} km²
                           </span>
                           <Badge className={`text-xs ${getSeverityColor(change.severity)}`}>
                             {change.severity}
@@ -249,7 +254,7 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
               )}
 
               {/* Change Matrix Transitions */}
-              {changeDetection.change_matrix?.length > 0 && (
+              {changeDetection.change_matrix && changeDetection.change_matrix.length > 0 && (
                 <div className="space-y-2">
                   <p className="text-xs font-medium text-muted-foreground">Top Transitions</p>
                   <div className="space-y-1 max-h-32 overflow-y-auto">
@@ -259,7 +264,7 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
                         <ArrowRight className="h-3 w-3 text-muted-foreground flex-shrink-0" />
                         <span className="truncate flex-1">{entry.to_class}</span>
                         <Badge variant="outline" className="text-xs flex-shrink-0">
-                          {entry.percent?.toFixed(1)}%
+                          {safeFixed(entry.percent, 1)}%
                         </Badge>
                       </div>
                     ))}

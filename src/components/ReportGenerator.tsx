@@ -49,7 +49,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${session?.access_token || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+            "Authorization": `Bearer ${session?.access_token || (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "").trim()}`,
           },
           body: JSON.stringify({
             visualizationType: type,

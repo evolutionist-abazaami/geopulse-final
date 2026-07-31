@@ -87,10 +87,17 @@ const indexConfig = {
   },
 };
 
+// Safe numeric formatter
+const safeNumFixed = (val: any, decimals: number = 2): string => {
+  const num = Number(val);
+  return isNaN(num) ? "0.00" : num.toFixed(decimals);
+};
+
 // Normalize index value to 0-100 for progress bar
-const normalizeValue = (value: number, indexKey: string): number => {
-  // Most indices range from -1 to 1
-  const normalized = ((value + 1) / 2) * 100;
+const normalizeValue = (value: any, indexKey: string): number => {
+  const num = Number(value);
+  const safeVal = isNaN(num) ? 0 : num;
+  const normalized = ((safeVal + 1) / 2) * 100;
   return Math.max(0, Math.min(100, normalized));
 };
 
@@ -137,7 +144,7 @@ const SpectralIndicesDisplay = ({ spectralIndices, landsatInfo }: SpectralIndice
                   </Tooltip>
                 </div>
                 <span className={`font-bold ${config.color}`}>
-                  {data.mean?.toFixed(3)}
+                  {safeNumFixed(data.mean, 3)}
                 </span>
               </div>
 
@@ -155,9 +162,9 @@ const SpectralIndicesDisplay = ({ spectralIndices, landsatInfo }: SpectralIndice
 
               {/* Stats row */}
               <div className="flex justify-between text-xs text-muted-foreground">
-                <span>Min: {data.min?.toFixed(2)}</span>
-                <span>Mean: {data.mean?.toFixed(2)}</span>
-                <span>Max: {data.max?.toFixed(2)}</span>
+                <span>Min: {safeNumFixed(data.min, 2)}</span>
+                <span>Mean: {safeNumFixed(data.mean, 2)}</span>
+                <span>Max: {safeNumFixed(data.max, 2)}</span>
               </div>
             </div>
           );
