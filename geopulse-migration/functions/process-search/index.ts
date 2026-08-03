@@ -33,35 +33,24 @@ serve(async (req) => {
     
     const supabase = createClient(supabaseUrl, supabaseKey);
     const authHeader = req.headers.get("authorization");
-    
-    if (!authHeader) {
-      return new Response(
-        JSON.stringify({ error: "Authentication required" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-    
-    const token = authHeader.replace("Bearer ", "");
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-    
-    if (authError || !user) {
-      return new Response(
-        JSON.stringify({ error: "Invalid or expired authentication token" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    let user = null;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.replace("Bearer ", "");
+      const { data } = await supabase.auth.getUser(token);
+      user = data?.user || null;
     }
 
     // Parse and validate input
     const body = await req.json();
     const query = validateQuery(body.query);
-    
+
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-    
+
     if (!GEMINI_API_KEY) {
       throw new Error("GEMINI_API_KEY not configured");
     }
 
-    console.log(`Processing search query for user ${user.id}: ${query.substring(0, 100)}...`);
+    console.log(`Processing search query for user ${user?.id || 'anonymous'}: ${query.substring(0, 100)}...`);
 
     // Prepare system prompt for natural language search
     const systemPrompt = `You are an AI assistant specialized in geospatial search and environmental data interpretation.
@@ -171,18 +160,20 @@ Consider satellite data availability and relevance.`;
       timestamp: new Date().toISOString(),
     };
 
-    // Store in database with authenticated user
-    await supabase.from("search_queries").insert({
-      user_id: user.id,
-      query: query,
-      ai_interpretation: result.interpretation,
-      results: {
-        findings: result.findings,
-        locations: result.locations,
-        recommendations: result.recommendations,
-      },
-      confidence_level: result.confidenceLevel,
-    });
+    // Store in database if authenticated user
+    if (user) {
+      await supabase.from("search_queries").insert({
+        user_id: user.id,
+        query: query,
+        ai_interpretation: result.interpretation,
+        results: {
+          findings: result.findings,
+          locations: result.locations,
+          recommendations: result.recommendations,
+        },
+        confidence_level: result.confidenceLevel,
+      });
+    }
 
     return new Response(JSON.stringify(result), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },

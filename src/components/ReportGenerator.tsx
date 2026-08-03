@@ -16,6 +16,24 @@ interface ReportGeneratorProps {
   region?: string;
 }
 
+/**
+ * jsPDF's built-in fonts (helvetica etc.) only support WinAnsi/Latin-1 glyphs.
+ * Arrows and other symbols outside that range (which show up in AI-generated
+ * findings/trend data, e.g. "↑↑", "→") render as garbled characters instead of
+ * throwing, so they must be swapped for ASCII-safe equivalents before any
+ * pdf.text()/splitTextToSize() call.
+ */
+const sanitizeForPdf = (text: unknown): string => {
+  if (text === null || text === undefined) return "";
+  return String(text)
+    .replace(/↑↑/g, "STRONG UP")
+    .replace(/↑/g, "UP")
+    .replace(/↓/g, "DOWN")
+    .replace(/↔/g, "<->")
+    .replace(/→/g, "FLAT")
+    .replace(/[^ -ÿ\n\r\t]/g, "?"); // replace anything else outside Latin-1 (unsupported by jsPDF standard fonts)
+};
+
 // Advanced visualization types available
 const ADVANCED_VIZ_TYPES = [
   { id: 'terrain_3d', label: '3D Terrain', icon: Mountain, description: 'Dramatic 3D terrain with elevation' },
@@ -239,7 +257,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
 
       // Helper functions
       const addWrappedText = (text: string, x: number, y: number, maxWidth: number, lineHeight: number = 5): number => {
-        const lines = pdf.splitTextToSize(text, maxWidth);
+        const lines = pdf.splitTextToSize(sanitizeForPdf(text), maxWidth);
         const maxLines = Math.floor((pageHeight - y - 25) / lineHeight);
         const displayLines = lines.slice(0, Math.min(lines.length, maxLines));
         pdf.text(displayLines, x, y);
@@ -279,7 +297,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
         
         let xPos = margin;
         headers.forEach((header, i) => {
-          pdf.text(header, xPos + cellPadding, currentY + 5.5);
+          pdf.text(sanitizeForPdf(header), xPos + cellPadding, currentY + 5.5);
           xPos += colWidths[i];
         });
         
@@ -303,12 +321,13 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
           xPos = margin;
           row.forEach((cell, i) => {
             // Check if this is a status column (last column typically)
-            if (i === row.length - 1 && (cell.includes('↑') || cell.includes('↓') || cell.includes('→') || cell === 'MODERATE' || cell === 'HIGH' || cell === 'LOW' || cell === 'CRITICAL')) {
-              if (cell.includes('↑↑') || cell === 'HIGH' || cell === 'CRITICAL') {
+            const displayCell = sanitizeForPdf(cell);
+            if (i === row.length - 1 && (displayCell.includes('UP') || displayCell.includes('DOWN') || displayCell === 'FLAT' || displayCell === 'MODERATE' || displayCell === 'HIGH' || displayCell === 'LOW' || displayCell === 'CRITICAL')) {
+              if (displayCell.includes('STRONG UP') || displayCell === 'HIGH' || displayCell === 'CRITICAL') {
                 pdf.setTextColor(220, 38, 38);
-              } else if (cell.includes('↑') || cell === 'MODERATE') {
+              } else if (displayCell.includes('UP') || displayCell === 'MODERATE') {
                 pdf.setTextColor(234, 179, 8);
-              } else if (cell.includes('↓') || cell === 'LOW') {
+              } else if (displayCell.includes('DOWN') || displayCell === 'LOW') {
                 pdf.setTextColor(34, 197, 94);
               } else {
                 pdf.setTextColor(75, 85, 99);
@@ -317,7 +336,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
               pdf.setTextColor(75, 85, 99);
             }
             
-            const truncatedText = pdf.splitTextToSize(cell, colWidths[i] - cellPadding * 2)[0] || cell;
+            const truncatedText = pdf.splitTextToSize(displayCell, colWidths[i] - cellPadding * 2)[0] || displayCell;
             pdf.text(truncatedText, xPos + cellPadding, currentY + 5.5);
             xPos += colWidths[i];
           });
@@ -561,7 +580,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(10);
         pdf.setTextColor(17, 24, 39);
-        pdf.text(`${index + 1}. ${title}:`, margin, yPos);
+        pdf.text(`${index + 1}. ${sanitizeForPdf(title)}:`, margin, yPos);
         yPos += 5;
         
         pdf.setFont("helvetica", "normal");
@@ -723,11 +742,11 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
           String(p.label || p.period || "Period"),
           p.changePercent !== undefined ? `${parseFloat(p.changePercent).toFixed(1)}%` : "N/A",
           p.rate || (p.changePercent !== undefined && p.months ? `${(parseFloat(p.changePercent) / parseFloat(p.months)).toFixed(2)}%/month` : "N/A"),
-          p.trend || (parseFloat(p.changePercent) > 5 ? "↑" : parseFloat(p.changePercent) < -5 ? "↓" : "→"),
+          p.trend || (parseFloat(p.changePercent) > 5 ? "UP" : parseFloat(p.changePercent) < -5 ? "DOWN" : "FLAT"),
         ]);
       } else {
         temporalRows = [
-          ["Full Study Period", `${changePercent.toFixed(1)}%`, "Cumulative", changePercent > 10 ? "↑↑" : changePercent > 0 ? "↑" : changePercent < 0 ? "↓" : "→"],
+          ["Full Study Period", `${changePercent.toFixed(1)}%`, "Cumulative", changePercent > 10 ? "STRONG UP" : changePercent > 0 ? "UP" : changePercent < 0 ? "DOWN" : "FLAT"],
         ];
       }
       yPos = addTableWithBorders(temporalHeaders, temporalRows, yPos, [50, 45, 40, 35]);

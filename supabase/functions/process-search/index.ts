@@ -50,7 +50,7 @@ serve(async (req) => {
       throw new Error("GEMINI_API_KEY not configured");
     }
 
-    console.log(`Processing search query for user ${user.id}: ${query.substring(0, 100)}...`);
+    console.log(`Processing search query for user ${user?.id || 'anonymous'}: ${query.substring(0, 100)}...`);
 
     // Prepare system prompt for natural language search
     const systemPrompt = `You are an AI assistant specialized in geospatial search and environmental data interpretation.

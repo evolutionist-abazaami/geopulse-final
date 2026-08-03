@@ -51,23 +51,14 @@ serve(async (req) => {
     }
     
     const supabase = createClient(supabaseUrl, supabaseKey);
-    // Require authentication for visualization generation
+    // Authentication is optional: GeoSearch/ReportGenerator are public, unauthenticated
+    // features, so a missing/invalid session must not block visualization generation.
     const authHeader = req.headers.get("authorization");
-    if (!authHeader) {
-      return new Response(
-        JSON.stringify({ error: "Authentication required. Please sign in to generate visualizations." }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-    
-    const token = authHeader.replace("Bearer ", "");
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-    
-    if (authError || !user) {
-      return new Response(
-        JSON.stringify({ error: "Invalid or expired authentication token. Please sign in again." }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    let user = null;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.replace("Bearer ", "");
+      const { data } = await supabase.auth.getUser(token);
+      user = data?.user || null;
     }
 
     const body = await req.json();

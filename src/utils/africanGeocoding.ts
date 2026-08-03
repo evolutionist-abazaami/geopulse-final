@@ -9,6 +9,8 @@ export interface AfricanLocation {
   type: string;
   description: string;
   keywords: string[];
+  /** True for the entry that should be preferred when a query only names the country (no specific city). */
+  isCapital?: boolean;
 }
 
 export const AFRICAN_LOCATIONS: AfricanLocation[] = [
@@ -33,7 +35,8 @@ export const AFRICAN_LOCATIONS: AfricanLocation[] = [
     lng: -5.2767, 
     type: "city", 
     description: "Political capital surrounded by agricultural zones and savannah-forest transition corridors.",
-    keywords: ["yamoussoukro", "lacs"]
+    keywords: ["yamoussoukro", "lacs"],
+    isCapital: true
   },
 
   // GHANA
@@ -57,7 +60,8 @@ export const AFRICAN_LOCATIONS: AfricanLocation[] = [
     lng: -0.1870, 
     type: "city", 
     description: "Capital of Ghana, coastal urban area experiencing severe Odaw river basin flooding and coastal erosion.",
-    keywords: ["accra", "odaw", "korle", "greater accra", "tema", "circle", "mallam"]
+    keywords: ["accra", "odaw", "korle", "greater accra", "tema", "circle", "mallam"],
+    isCapital: true
   },
   { 
     name: "Tamale, Northern Region, Ghana", 
@@ -103,7 +107,8 @@ export const AFRICAN_LOCATIONS: AfricanLocation[] = [
     lng: 7.3986, 
     type: "city", 
     description: "Federal capital territory in central Nigeria, surrounded by granite hills and urban development corridors.",
-    keywords: ["abuja", "fct", "garki", "wuse"]
+    keywords: ["abuja", "fct", "garki", "wuse"],
+    isCapital: true
   },
 
   // KENYA
@@ -264,20 +269,62 @@ function extractPlaceNameFromQuery(query: string): string {
 }
 
 /**
+ * Escapes regex special characters so a keyword can be safely used inside a RegExp.
+ */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Whole-word/phrase containment check. Plain `string.includes()` false-positives on
+ * substrings (e.g. "somalia".includes("mali") === true), which previously caused
+ * queries about Somalia to be mismatched to Bamako, Mali. Boundaries are any
+ * non-alphanumeric character (or start/end of string), which correctly handles
+ * multi-word keywords like "cote d'ivoire" too.
+ */
+function containsWord(haystack: string, needle: string): boolean {
+  if (!needle) return false;
+  const pattern = new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(needle)}(?:$|[^a-z0-9])`, "i");
+  return pattern.test(` ${haystack} `);
+}
+
+/**
  * Intelligent African Location & Query Parser
  */
 export function parseAfricanQuery(query: string) {
   const q = query.toLowerCase().trim();
 
-  // 1. Check keyword lists in AFRICAN_LOCATIONS database
-  let matchedLocation = AFRICAN_LOCATIONS.find(loc => 
-    loc.keywords.some(kw => q.includes(kw)) ||
-    q.includes(loc.city?.toLowerCase() || "___") || 
-    q.includes(loc.country.toLowerCase()) || 
-    q.includes(loc.name.toLowerCase())
-  );
+  // 1. Keyword matches (most specific signal - landmarks, districts, city aliases).
+  //    Prefer the longest matching keyword so e.g. "greater accra" outranks a shorter
+  //    incidental match, and so unrelated countries can never match via substring bleed.
+  const keywordMatches = AFRICAN_LOCATIONS
+    .flatMap(loc => loc.keywords.map(kw => ({ loc, kw })))
+    .filter(({ kw }) => containsWord(q, kw))
+    .sort((a, b) => b.kw.length - a.kw.length);
 
-  // 2. Extract event type from query
+  let matchedLocation: AfricanLocation | undefined = keywordMatches[0]?.loc;
+
+  // 2. City name match (e.g. query says "Kumasi" but that word isn't in the keyword list).
+  if (!matchedLocation) {
+    matchedLocation = AFRICAN_LOCATIONS.find(loc => loc.city && containsWord(q, loc.city.toLowerCase()));
+  }
+
+  // 3. Full location name match.
+  if (!matchedLocation) {
+    matchedLocation = AFRICAN_LOCATIONS.find(loc => containsWord(q, loc.name.toLowerCase()));
+  }
+
+  // 4. Country-only match (no specific city named). Multiple cities can share a country
+  //    (e.g. Ghana has Kumasi, Accra, Tamale, Takoradi) - picking array-order-first here
+  //    previously sent every generic "Ghana" query to Kumasi. Prefer the capital instead.
+  if (!matchedLocation) {
+    const countryMatches = AFRICAN_LOCATIONS.filter(loc => containsWord(q, loc.country.toLowerCase()));
+    if (countryMatches.length > 0) {
+      matchedLocation = countryMatches.find(loc => loc.isCapital) || countryMatches[0];
+    }
+  }
+
+  // 5. Extract event type from query
   let eventType = "flooding";
   if (q.includes("deforest") || q.includes("tree") || q.includes("timber") || q.includes("forest")) {
     eventType = "deforestation";
@@ -293,7 +340,7 @@ export function parseAfricanQuery(query: string) {
     eventType = "flooding";
   }
 
-  // 3. Fallback: If no database match found, dynamically generate location object matching user's query place
+  // 6. Fallback: If no database match found, dynamically generate location object matching user's query place
   if (!matchedLocation) {
     const extractedName = extractPlaceNameFromQuery(query);
     matchedLocation = {

@@ -11,6 +11,7 @@ import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Search, Sparkles, Loader2, MousePointer, Upload } from "lucide-react";
 import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
 import { parseAfricanQuery } from "@/utils/africanGeocoding";
 
 const generateLocalSearchInterpretation = (
