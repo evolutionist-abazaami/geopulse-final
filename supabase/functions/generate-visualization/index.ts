@@ -37,6 +37,148 @@ function validateVisualizationType(value: unknown): string {
   return normalized;
 }
 
+// === Sentinel Hub (Copernicus Data Space Ecosystem) real satellite imagery ===
+// Covers true-color, false-color, and NDVI - the three panel types that map
+// directly onto real Sentinel-2 bands. Everything else (risk zones, driver
+// analysis, 3D terrain, etc.) isn't a real satellite product to begin with,
+// so it stays AI-illustrated via the Gemini path below.
+const SENTINEL_VISUALIZATION_MAP: Record<string, string> = {
+  landsat_truecolor: "true_color",
+  satellite_2d: "true_color",
+  landsat_falsecolor: "false_color",
+  ndvi_map: "ndvi",
+  landsat_ndvi: "ndvi",
+};
+
+// Sentinel-2 L2A Scene Classification Layer values that mean "cloud or cloud
+// shadow, not ground truth" - masked to transparent so clouds don't get
+// rendered as if they were real surface reflectance.
+const SCL_CLOUD_MASK_JS = `
+function isCloud(scl) { return scl == 3 || scl == 8 || scl == 9 || scl == 10; }`;
+
+const SENTINEL_EVALSCRIPTS: Record<string, string> = {
+  true_color: `//VERSION=3
+function setup() { return { input: ["B02","B03","B04","SCL"], output: { bands: 4 } }; }
+${SCL_CLOUD_MASK_JS}
+function evaluatePixel(s) {
+  return [2.5*s.B04, 2.5*s.B03, 2.5*s.B02, isCloud(s.SCL) ? 0 : 1];
+}`,
+  false_color: `//VERSION=3
+function setup() { return { input: ["B03","B04","B08","SCL"], output: { bands: 4 } }; }
+${SCL_CLOUD_MASK_JS}
+function evaluatePixel(s) {
+  return [2.5*s.B08, 2.5*s.B04, 2.5*s.B03, isCloud(s.SCL) ? 0 : 1];
+}`,
+  ndvi: `//VERSION=3
+function setup() { return { input: ["B04","B08","SCL"], output: { bands: 4 } }; }
+${SCL_CLOUD_MASK_JS}
+function evaluatePixel(s) {
+  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04);
+  let rgb;
+  if (ndvi < 0) rgb = [0.40, 0.30, 0.20];
+  else if (ndvi < 0.2) rgb = [0.80, 0.70, 0.30];
+  else if (ndvi < 0.4) rgb = [0.90, 0.90, 0.20];
+  else if (ndvi < 0.6) rgb = [0.40, 0.70, 0.20];
+  else rgb = [0.0, 0.40, 0.0];
+  return [...rgb, isCloud(s.SCL) ? 0 : 1];
+}`,
+};
+
+let cachedSentinelToken: { token: string; expiresAt: number } | null = null;
+
+async function getSentinelHubToken(): Promise<string | null> {
+  const clientId = Deno.env.get("SENTINELHUB_CLIENT_ID");
+  const clientSecret = Deno.env.get("SENTINELHUB_CLIENT_SECRET");
+  if (!clientId || !clientSecret) return null;
+
+  if (cachedSentinelToken && cachedSentinelToken.expiresAt > Date.now() + 30_000) {
+    return cachedSentinelToken.token;
+  }
+
+  const response = await fetch(
+    "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    console.error("Sentinel Hub auth failed:", response.status, (await response.text()).slice(0, 200));
+    return null;
+  }
+
+  const data = await response.json();
+  cachedSentinelToken = { token: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
+  return cachedSentinelToken.token;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function fetchSentinelHubImage(evalscriptKey: string, lat: number, lng: number): Promise<string | null> {
+  const token = await getSentinelHubToken();
+  if (!token) return null;
+
+  const half = 0.05; // ~11km-wide chip around the point
+  const bbox = [lng - half, lat - half, lng + half, lat + half];
+  const now = new Date();
+  // Wide window (6 months) so there are enough candidate scenes for
+  // leastCC mosaicking to actually find clear pixels; per-pixel SCL masking
+  // in the evalscript handles whatever cloud remains in the chosen scenes.
+  const from = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
+
+  let response: Response;
+  try {
+    response = await fetch("https://sh.dataspace.copernicus.eu/api/v1/process", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+      body: JSON.stringify({
+        input: {
+          bounds: { bbox, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } },
+          data: [{
+            type: "sentinel-2-l2a",
+            dataFilter: {
+              timeRange: { from: from.toISOString(), to: now.toISOString() },
+              mosaickingOrder: "leastCC",
+              maxCloudCoverage: 70,
+            },
+          }],
+        },
+        output: {
+          width: 800,
+          height: 450,
+          responses: [{ identifier: "default", format: { type: "image/png" } }],
+        },
+        evalscript: SENTINEL_EVALSCRIPTS[evalscriptKey],
+      }),
+    });
+  } catch (e) {
+    console.error("Sentinel Hub process API request failed:", e instanceof Error ? e.message : e);
+    return null;
+  }
+
+  if (!response.ok) {
+    console.error(`Sentinel Hub process API error (${evalscriptKey}):`, response.status, (await response.text()).slice(0, 300));
+    return null;
+  }
+
+  const buffer = await response.arrayBuffer();
+  return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -73,14 +215,40 @@ serve(async (req) => {
     const changeDetection = body.changeDetection || body.data?.changeDetection;
     const landsatInfo = body.landsatInfo || body.data?.landsatInfo;
     const predictiveData = body.predictiveModeling || body.data?.predictiveModeling;
-    
+
+    console.log(`Generating ${visualizationType} visualization for ${region} - User: ${user?.id || 'anonymous'}`);
+
+    // Real satellite imagery path: try Sentinel Hub first for the types it can
+    // actually cover, before falling back to an AI illustration below.
+    const sentinelKey = SENTINEL_VISUALIZATION_MAP[visualizationType];
+    const rawLat = body.lat ?? body.data?.locations?.[0]?.lat ?? body.selectedLocation?.lat;
+    const rawLng = body.lng ?? body.data?.locations?.[0]?.lng ?? body.selectedLocation?.lng;
+    const lat = typeof rawLat === "number" ? rawLat : parseFloat(rawLat);
+    const lng = typeof rawLng === "number" ? rawLng : parseFloat(rawLng);
+
+    if (sentinelKey && Number.isFinite(lat) && Number.isFinite(lng)) {
+      const sentinelImage = await fetchSentinelHubImage(sentinelKey, lat, lng);
+      if (sentinelImage) {
+        console.log(`Sentinel Hub image succeeded for ${visualizationType} at [${lat}, ${lng}]`);
+        return new Response(
+          JSON.stringify({
+            success: true,
+            imageUrl: sentinelImage,
+            description: "Real Sentinel-2 L2A satellite imagery (last 90 days, least cloud cover).",
+            visualizationType,
+            dataSource: "Sentinel-2 L2A (Copernicus Data Space Ecosystem)",
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      console.warn(`Sentinel Hub unavailable for ${visualizationType}, falling back to AI illustration.`);
+    }
+
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-    
+
     if (!GEMINI_API_KEY) {
       throw new Error("GEMINI_API_KEY not configured");
     }
-
-    console.log(`Generating ${visualizationType} visualization for ${region} - User: ${user?.id || 'anonymous'}`);
 
     let prompt = "";
     switch (visualizationType) {

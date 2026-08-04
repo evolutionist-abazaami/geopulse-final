@@ -1,5 +1,5 @@
-import { useState } from "react";
-import MapLibreMap, { HeatmapLayerType } from "@/components/MapLibreMap";
+import { useState, useRef } from "react";
+import MapLibreMap, { HeatmapLayerType, MapLibreMapHandle } from "@/components/MapLibreMap";
 import MapLayerControls from "@/components/MapLayerControls";
 import LocationSearch from "@/components/LocationSearch";
 import ReportGenerator from "@/components/ReportGenerator";
@@ -105,6 +105,11 @@ const GeoSearch = () => {
   const [mapPolygons, setMapPolygons] = useState<any[]>([]);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedLocation, setSelectedLocation] = useState<{ lat: number; lng: number; name: string } | null>(null);
+  // The coordinates actually resolved for this search (AI locations -> picked location -> local
+  // parser fallback), same chain used for the map marker. Reports need this explicitly since
+  // analysisData.locations can be empty when the AI doesn't return structured locations.
+  const [reportLocation, setReportLocation] = useState<{ lat: number; lng: number; name: string } | null>(null);
+  const mapRef = useRef<MapLibreMapHandle>(null);
   const [activeTab, setActiveTab] = useState("search");
   const [is3DEnabled, setIs3DEnabled] = useState(false);
   const [activeHeatmapLayer, setActiveHeatmapLayer] = useState<HeatmapLayerType>("none");
@@ -192,10 +197,11 @@ const GeoSearch = () => {
           color: "#0891b2"
         }));
         setMapMarkers(markers);
-        
+
         if (firstLocation.lat && firstLocation.lng) {
           setMapCenter([firstLocation.lat, firstLocation.lng]);
           setMapZoom(10);
+          setReportLocation({ lat: firstLocation.lat, lng: firstLocation.lng, name: firstLocation.name || parsedLoc.location.name });
         }
         
         // Create boundary polygon if location coordinates exist
@@ -229,6 +235,7 @@ const GeoSearch = () => {
         label: targetLoc.name,
         color: "#0891b2"
       }]);
+      setReportLocation({ lat: targetLoc.lat, lng: targetLoc.lng, name: targetLoc.name });
       
       const boundarySize = 0.15;
       setMapPolygons([{
@@ -258,8 +265,9 @@ const GeoSearch = () => {
         {/* Map Container */}
         <div className="flex-1 relative h-[40vh] lg:h-full order-2 lg:order-1">
         <MapLibreMap
-          center={mapCenter} 
-          zoom={mapZoom} 
+          ref={mapRef}
+          center={mapCenter}
+          zoom={mapZoom}
           className="h-full w-full"
           markers={mapMarkers}
           polygons={mapPolygons}
@@ -451,9 +459,12 @@ const GeoSearch = () => {
                   </div>
                 )}
 
-                <ReportGenerator 
+                <ReportGenerator
                   analysisData={results}
-                  region={selectedLocation?.name}
+                  region={selectedLocation?.name || reportLocation?.name}
+                  lat={reportLocation?.lat}
+                  lng={reportLocation?.lng}
+                  onCaptureMap={() => mapRef.current?.captureSnapshot() ?? null}
                 />
 
                 <Button 
@@ -463,6 +474,7 @@ const GeoSearch = () => {
                     setResults(null);
                     setQuery("");
                     setSelectedLocation(null);
+                    setReportLocation(null);
                     setMapMarkers([]);
                     setMapPolygons([]);
                   }}

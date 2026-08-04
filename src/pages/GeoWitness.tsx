@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import DataProvenancePanel from "@/components/DataProvenancePanel";
 import RealTimeRegionalStatus from "@/components/RealTimeRegionalStatus";
-import MapLibreMap, { HeatmapLayerType } from "@/components/MapLibreMap";
+import MapLibreMap, { HeatmapLayerType, MapLibreMapHandle } from "@/components/MapLibreMap";
 import MapLayerControls from "@/components/MapLayerControls";
 import LocationSearch from "@/components/LocationSearch";
 import ReportGenerator from "@/components/ReportGenerator";
@@ -283,6 +283,7 @@ const GeoWitness = () => {
   const [classificationType, setClassificationType] = useState<ClassificationType>(null);
   const [enableChangeDetection, setEnableChangeDetection] = useState(false);
   const [numClasses, setNumClasses] = useState(6);
+  const mapRef = useRef<MapLibreMapHandle>(null);
 
   const handleLocationSelect = (location: { name: string; lat: number; lng: number; bounds?: [[number, number], [number, number]] }) => {
     setRegion(location.name);
@@ -503,9 +504,10 @@ const GeoWitness = () => {
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
         {/* Map Container - Larger on mobile for better interaction */}
       <div className="flex-1 relative h-[50vh] sm:h-[55vh] lg:h-full order-2 lg:order-1 min-h-[300px]">
-        <MapLibreMap 
-          center={mapCenter} 
-          zoom={mapZoom} 
+        <MapLibreMap
+          ref={mapRef}
+          center={mapCenter}
+          zoom={mapZoom}
           className="h-full w-full"
           markers={mapMarkers}
           polygons={mapPolygons}
@@ -951,10 +953,13 @@ const GeoWitness = () => {
                 )}
 
                 <div className="flex flex-wrap gap-2">
-                  <ReportGenerator 
-                    analysisData={results} 
+                  <ReportGenerator
+                    analysisData={results}
                     eventType={results.isMultiEvent ? results.eventTypes?.join(', ') : eventType}
                     region={region || selectedLocation?.name}
+                    lat={results?.coordinates?.lat}
+                    lng={results?.coordinates?.lng}
+                    onCaptureMap={() => mapRef.current?.captureSnapshot() ?? null}
                   />
                   <GISExportButton
                     features={[{

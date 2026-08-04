@@ -14,6 +14,10 @@ interface ReportGeneratorProps {
   analysisData: any;
   eventType?: string;
   region?: string;
+  lat?: number;
+  lng?: number;
+  /** Captures the real, currently-displayed interactive map (OSM tiles + study-area polygon) as a PNG data URL. */
+  onCaptureMap?: () => Promise<string | null> | string | null;
 }
 
 /**
@@ -34,6 +38,83 @@ const sanitizeForPdf = (text: unknown): string => {
     .replace(/[^ -ÿ\n\r\t]/g, "?"); // replace anything else outside Latin-1 (unsupported by jsPDF standard fonts)
 };
 
+/**
+ * Draws the trend chart on a real <canvas> from the report's own numbers,
+ * instead of asking an AI model to illustrate one. Deterministic, free,
+ * and always available - no network call, no quota, no hallucinated values.
+ */
+const renderTrendChartPng = (periods: { label: string; value: number }[]): string => {
+  const width = 900;
+  const height = 300;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  const padding = { top: 20, right: 24, bottom: 50, left: 70 };
+  const chartW = width - padding.left - padding.right;
+  const chartH = height - padding.top - padding.bottom;
+
+  const values = periods.map((p) => p.value);
+  const minVal = Math.min(0, ...values);
+  const maxVal = Math.max(0, ...values, 1);
+  const range = maxVal - minVal || 1;
+  const yForValue = (v: number) => padding.top + chartH - ((v - minVal) / range) * chartH;
+  const zeroY = yForValue(0);
+
+  ctx.strokeStyle = "#e5e7eb";
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "#6b7280";
+  ctx.font = "20px Arial";
+  ctx.textAlign = "right";
+  const gridSteps = 4;
+  for (let i = 0; i <= gridSteps; i++) {
+    const v = minVal + (range * i) / gridSteps;
+    const y = yForValue(v);
+    ctx.beginPath();
+    ctx.moveTo(padding.left, y);
+    ctx.lineTo(padding.left + chartW, y);
+    ctx.stroke();
+    ctx.fillText(`${v.toFixed(0)}%`, padding.left - 10, y + 7);
+  }
+
+  const barGap = 24;
+  const barWidth = Math.min(120, (chartW - barGap * (periods.length - 1)) / periods.length);
+  const rowWidth = barWidth + barGap;
+  const startX = padding.left + (chartW - (rowWidth * periods.length - barGap)) / 2;
+
+  periods.forEach((p, i) => {
+    const x = startX + i * rowWidth;
+    const barTop = Math.min(yForValue(p.value), zeroY);
+    const barHeight = Math.max(1, Math.abs(yForValue(p.value) - zeroY));
+    ctx.fillStyle = p.value >= 0 ? "#0891b2" : "#ef4444";
+    ctx.fillRect(x, barTop, barWidth, barHeight);
+
+    ctx.fillStyle = "#374151";
+    ctx.textAlign = "center";
+    ctx.font = "bold 18px Arial";
+    ctx.fillText(`${p.value.toFixed(1)}%`, x + barWidth / 2, barTop - 8);
+
+    ctx.fillStyle = "#6b7280";
+    ctx.font = "16px Arial";
+    const label = p.label.length > 16 ? `${p.label.slice(0, 15)}…` : p.label;
+    ctx.fillText(label, x + barWidth / 2, padding.top + chartH + 26);
+  });
+
+  ctx.strokeStyle = "#9ca3af";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(padding.left, zeroY);
+  ctx.lineTo(padding.left + chartW, zeroY);
+  ctx.stroke();
+
+  return canvas.toDataURL("image/png");
+};
+
 // Advanced visualization types available
 const ADVANCED_VIZ_TYPES = [
   { id: 'terrain_3d', label: '3D Terrain', icon: Mountain, description: 'Dramatic 3D terrain with elevation' },
@@ -46,7 +127,7 @@ const ADVANCED_VIZ_TYPES = [
   { id: 'driver_analysis', label: 'Driver Analysis', icon: PieChart, description: 'Causal factors breakdown' },
 ];
 
-const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorProps) => {
+const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureMap }: ReportGeneratorProps) => {
   const [reportType, setReportType] = useState<"professional" | "simple">("professional");
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationStep, setGenerationStep] = useState("");
@@ -73,6 +154,8 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
             visualizationType: type,
             region: region || analysisData?.region,
             eventType: eventType || analysisData?.eventType,
+            lat: lat ?? analysisData?.locations?.[0]?.lat,
+            lng: lng ?? analysisData?.locations?.[0]?.lng,
             data: analysisData,
           }),
         }
@@ -183,10 +266,14 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
       let ndviImage: string | null = null;
       let classificationImage: string | null = null;
       let changeDetectionImage: string | null = null;
-      let chartImage: string | null = null;
+      let mapSnapshot: string | null = null;
       const advancedImages: Record<string, string | null> = {};
 
       if (includeImages) {
+        // Real screenshot of the interactive map (actual OSM tiles + study-area
+        // polygon), not an AI illustration - captured fresh at generation time.
+        mapSnapshot = (await onCaptureMap?.()) ?? null;
+
         setGenerationStep("Generating Landsat true-color satellite imagery...");
         trueColorImage = await generateVisualization("landsat_truecolor");
         
@@ -216,9 +303,6 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
           setGenerationStep("Generating change detection analysis map...");
           changeDetectionImage = await generateVisualization("change_detection_map");
         }
-        
-        setGenerationStep("Generating spectral indices analysis chart...");
-        chartImage = await generateVisualization("chart");
       }
 
       setGenerationStep("Compiling professional report document...");
@@ -626,6 +710,27 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
         yPos = addWrappedText(imageryIntro, margin, yPos, contentWidth, 5);
         yPos += 10;
 
+        // Study area location map - a real screenshot of the interactive map
+        // (actual OpenStreetMap tiles + study-area boundary), giving genuine
+        // geographic context before the spectral imagery panels below.
+        if (mapSnapshot) {
+          const mapImgWidth = contentWidth - 10;
+          const mapImgHeight = 55;
+          pdf.setFillColor(243, 244, 246);
+          pdf.roundedRect(margin, yPos, contentWidth, mapImgHeight + 10, 3, 3, "F");
+          try {
+            pdf.addImage(mapSnapshot, "PNG", margin + 5, yPos + 5, mapImgWidth, mapImgHeight);
+          } catch (e) {
+            console.warn("Could not add map snapshot to PDF:", e);
+          }
+          yPos += mapImgHeight + 15;
+          pdf.setFontSize(9);
+          pdf.setTextColor(107, 114, 128);
+          pdf.setFont("helvetica", "italic");
+          pdf.text(`Figure: Study area location for ${regionName} (OpenStreetMap).`, margin, yPos);
+          yPos += 10;
+        }
+
         // Main satellite image
         const imgWidth = contentWidth - 10;
         const imgHeight = 65;
@@ -760,35 +865,34 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
         : "Sub-period breakdown not provided by analysis; cumulative total shown.", margin, yPos);
       yPos += 12;
 
-      // Trend chart - always show section in professional reports
+      // Trend chart - rendered directly from the report's own numbers (see
+      // renderTrendChartPng), not an AI illustration, so it always succeeds
+      // and always matches the table above.
       checkPageBreak(75);
       yPos = addSubsectionTitle("Trend Analysis Visualization", yPos);
-      
+
       pdf.setFillColor(249, 250, 251);
       pdf.roundedRect(margin, yPos, contentWidth, 60, 3, 3, "F");
-      
+
       const chartImgWidth = contentWidth - 10;
       const chartImgHeight = 50;
-      
+
+      const chartPeriods = Array.isArray(periodsFromData) && periodsFromData.length > 0
+        ? periodsFromData.map((p: any) => ({
+            label: String(p.label || p.period || "Period"),
+            value: p.changePercent !== undefined ? parseFloat(p.changePercent) : 0,
+          }))
+        : [{ label: "Full Study Period", value: changePercent }];
+      const chartImage = renderTrendChartPng(chartPeriods);
+
       if (chartImage) {
-        try {
-          pdf.addImage(chartImage, "PNG", margin + 5, yPos + 5, chartImgWidth, chartImgHeight);
-        } catch (e) {
-          console.warn("Could not add chart image to PDF:", e);
-          pdf.setFontSize(12);
-          pdf.setTextColor(107, 114, 128);
-          pdf.text("Trend Analysis Chart", margin + contentWidth / 2 - 30, yPos + 25);
-          pdf.setFontSize(9);
-          pdf.text("Environmental change trends over study period", margin + contentWidth / 2 - 50, yPos + 35);
-        }
+        pdf.addImage(chartImage, "PNG", margin + 5, yPos + 5, chartImgWidth, chartImgHeight);
       } else {
-        // Placeholder chart description
         pdf.setFontSize(12);
         pdf.setTextColor(107, 114, 128);
         pdf.text("Trend Analysis Chart", margin + contentWidth / 2 - 30, yPos + 20);
         pdf.setFontSize(9);
         pdf.text(`${changePercent.toFixed(1)}% change detected over study period`, margin + contentWidth / 2 - 45, yPos + 32);
-        pdf.text("Quarterly breakdown shown in table above", margin + contentWidth / 2 - 42, yPos + 42);
       }
       yPos += 65;
       
