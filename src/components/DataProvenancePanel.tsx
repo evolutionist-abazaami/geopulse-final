@@ -10,9 +10,9 @@ interface DataProvenancePanelProps {
 
 const DataProvenancePanel = ({ results, eventType }: DataProvenancePanelProps) => {
   const confidence = results?.analysisConfidence || 0;
-  const dataSources = results?.dataSources || [];
-  const cloudCoverage = results?.cloudCoverage?.percentage || 0;
-  const dataQuality = results?.dataQuality?.overall_score || 0;
+  const cloudCoverage = results?.cloudCoverage?.percentage;
+  const dataQuality = results?.dataQuality?.overall_score;
+  const provenance = results?.dataProvenance;
 
   return (
     <div className="space-y-3">
@@ -23,9 +23,8 @@ const DataProvenancePanel = ({ results, eventType }: DataProvenancePanelProps) =
           <div className="text-xs space-y-1">
             <p className="font-medium text-amber-600 dark:text-amber-400">Data Authenticity Notice</p>
             <p className="text-muted-foreground leading-relaxed">
-              Analysis percentages are AI-estimated based on spectral index calculations from Landsat 8/9 OLI imagery. 
-              Values represent modeled approximations, not ground-truth measurements. For critical decisions, 
-              cross-validate with in-situ field data and official government reports.
+              {provenance?.disclaimer ||
+                "These figures are AI-generated plausible estimates, not measurements from real satellite imagery. For critical decisions, cross-validate with in-situ field data and official government reports."}
             </p>
           </div>
         </div>
@@ -43,34 +42,32 @@ const DataProvenancePanel = ({ results, eventType }: DataProvenancePanelProps) =
         <CollapsibleContent className="mt-2 space-y-2">
           <Card className="p-3 space-y-3">
             <div>
-              <p className="text-xs font-medium text-muted-foreground mb-1">Primary Data Sources</p>
+              <p className="text-xs font-medium text-muted-foreground mb-1">What actually produced these numbers</p>
               <div className="flex flex-wrap gap-1">
-                {dataSources.length > 0 ? dataSources.map((src: string, i: number) => (
-                  <Badge key={i} variant="outline" className="text-xs">{src}</Badge>
-                )) : (
-                  <>
-                    <Badge variant="outline" className="text-xs">Landsat 8 OLI</Badge>
-                    <Badge variant="outline" className="text-xs">Landsat 9 OLI</Badge>
-                  </>
-                )}
-                <Badge variant="outline" className="text-xs">Open-Meteo API</Badge>
-                <Badge variant="outline" className="text-xs">Google Gemini AI</Badge>
+                <Badge variant="outline" className="text-xs">Google Gemini 2.5 Flash (AI estimation)</Badge>
               </div>
+              <p className="text-[10px] text-muted-foreground mt-1.5 leading-relaxed">
+                No Landsat or Sentinel imagery is fetched for this numeric analysis - the model generates
+                plausible spectral-index values and narrative findings based on its training knowledge of
+                typical patterns for this region and event type.{" "}
+                {provenance?.earthEngine?.configured
+                  ? "An Earth Engine credential is configured and authenticates successfully, but isn't yet used to pull real pixel data into this analysis."
+                  : "Google Earth Engine is not configured, so no real pixel data is available as an alternative."}
+              </p>
             </div>
 
             <div>
-              <p className="text-xs font-medium text-muted-foreground mb-1">Analysis Pipeline</p>
+              <p className="text-xs font-medium text-muted-foreground mb-1">What actually happens, step by step</p>
               <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
-                <li>Satellite imagery acquisition (Landsat 8/9, 30m resolution)</li>
-                <li>Atmospheric correction & cloud masking (QA band)</li>
-                <li>Spectral index computation (NDVI, NDWI, NBR, NDBI)</li>
-                <li>AI-powered change detection & interpretation (Gemini 2.5 Flash)</li>
-                <li>Statistical aggregation & confidence scoring</li>
+                <li>Your region, event type, and date range are sent to Gemini in a detailed text prompt</li>
+                <li>The prompt describes real spectral-index formulas (NDVI, NDWI, NBR, NDBI) and asks the model to reason about plausible values for this kind of location/event</li>
+                <li>Gemini returns estimated percentages, a narrative analysis, and recommendations as structured JSON</li>
+                <li>No image pixels, bands, or files are downloaded or processed at any point</li>
               </ol>
             </div>
 
             <div>
-              <p className="text-xs font-medium text-muted-foreground mb-1">Quality Metrics</p>
+              <p className="text-xs font-medium text-muted-foreground mb-1">Reported Quality Metrics (also AI-estimated)</p>
               <div className="grid grid-cols-3 gap-2">
                 <div className="text-center p-2 bg-muted/30 rounded">
                   <p className="text-xs text-muted-foreground">Confidence</p>
@@ -80,14 +77,14 @@ const DataProvenancePanel = ({ results, eventType }: DataProvenancePanelProps) =
                 </div>
                 <div className="text-center p-2 bg-muted/30 rounded">
                   <p className="text-xs text-muted-foreground">Cloud Cover</p>
-                  <p className={`text-sm font-bold ${cloudCoverage <= 20 ? 'text-green-500' : cloudCoverage <= 50 ? 'text-amber-500' : 'text-destructive'}`}>
-                    {cloudCoverage}%
+                  <p className="text-sm font-bold text-muted-foreground">
+                    {cloudCoverage ?? "—"}{cloudCoverage != null ? "%" : ""}
                   </p>
                 </div>
                 <div className="text-center p-2 bg-muted/30 rounded">
                   <p className="text-xs text-muted-foreground">Data Quality</p>
-                  <p className={`text-sm font-bold ${dataQuality >= 80 ? 'text-green-500' : dataQuality >= 60 ? 'text-amber-500' : 'text-destructive'}`}>
-                    {dataQuality}%
+                  <p className="text-sm font-bold text-muted-foreground">
+                    {dataQuality ?? "—"}{dataQuality != null ? "%" : ""}
                   </p>
                 </div>
               </div>
@@ -99,10 +96,9 @@ const DataProvenancePanel = ({ results, eventType }: DataProvenancePanelProps) =
                 <span className="font-medium">Limitations</span>
               </div>
               <ul className="list-disc list-inside space-y-0.5">
-                <li>30m spatial resolution may miss small-scale changes</li>
-                <li>Cloud cover can obscure observations in certain periods</li>
-                <li>AI interpretations are probabilistic, not deterministic</li>
-                <li>Temporal gaps between satellite passes (16-day revisit)</li>
+                <li>These are not measurements - treat every percentage as a plausible estimate, not a fact</li>
+                <li>AI interpretations are probabilistic and can be wrong or inconsistent between runs</li>
+                <li>For the imagery panels specifically (true-color/false-color/NDVI), real Sentinel-2 satellite imagery is used when a location is available - that part is genuinely real data</li>
               </ul>
             </div>
           </Card>
@@ -114,7 +110,7 @@ const DataProvenancePanel = ({ results, eventType }: DataProvenancePanelProps) =
         <CollapsibleTrigger className="flex items-center justify-between w-full p-3 bg-muted/30 rounded-lg hover:bg-muted/50 transition-colors">
           <div className="flex items-center gap-2">
             <Brain className="h-4 w-4 text-primary" />
-            <span className="text-sm font-medium">How the Model Works</span>
+            <span className="text-sm font-medium">How the Estimate Is Generated</span>
           </div>
           <ChevronDown className="h-4 w-4 text-muted-foreground" />
         </CollapsibleTrigger>
@@ -124,37 +120,31 @@ const DataProvenancePanel = ({ results, eventType }: DataProvenancePanelProps) =
               <div className="flex items-center gap-2">
                 <div className="h-6 w-6 rounded-full bg-primary/10 flex items-center justify-center text-xs font-bold text-primary">1</div>
                 <div>
-                  <p className="text-xs font-medium">Data Ingestion</p>
-                  <p className="text-[10px] text-muted-foreground">Landsat multispectral bands (B2-B7) are fetched for the selected region and time period</p>
+                  <p className="text-xs font-medium">Prompt Construction</p>
+                  <p className="text-[10px] text-muted-foreground">Your region, event type, and date range are formatted into a detailed text prompt - no imagery is fetched</p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
                 <div className="h-6 w-6 rounded-full bg-primary/10 flex items-center justify-center text-xs font-bold text-primary">2</div>
                 <div>
-                  <p className="text-xs font-medium">Spectral Analysis</p>
+                  <p className="text-xs font-medium">Index Definitions Given to the Model</p>
                   <p className="text-[10px] text-muted-foreground">
-                    {eventType === 'deforestation' || eventType === 'vegetation_loss' 
+                    {eventType === 'deforestation' || eventType === 'vegetation_loss'
                       ? 'NDVI (NIR-Red)/(NIR+Red) measures vegetation health. Values <0.2 indicate bare soil; >0.6 indicates dense vegetation.'
                       : eventType === 'flood' || eventType === 'water_scarcity'
                       ? 'NDWI (Green-NIR)/(Green+NIR) detects water bodies. Positive values indicate water presence.'
                       : eventType === 'wildfire' || eventType === 'bushfire'
                       ? 'NBR (NIR-SWIR2)/(NIR+SWIR2) assesses burn severity. Lower values indicate more severe burns.'
-                      : 'Multiple spectral indices (NDVI, NDWI, NBR, NDBI) are computed for comprehensive environmental assessment.'}
+                      : 'Multiple spectral indices (NDVI, NDWI, NBR, NDBI) are described to the model for it to reason about.'}
+                    {" "}The model estimates plausible values for these formulas - it does not compute them from real pixels.
                   </p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
                 <div className="h-6 w-6 rounded-full bg-primary/10 flex items-center justify-center text-xs font-bold text-primary">3</div>
                 <div>
-                  <p className="text-xs font-medium">AI Interpretation</p>
-                  <p className="text-[10px] text-muted-foreground">Google Gemini 2.5 Flash analyzes spectral data patterns, compares temporal changes, and generates human-readable assessments with confidence scores</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="h-6 w-6 rounded-full bg-primary/10 flex items-center justify-center text-xs font-bold text-primary">4</div>
-                <div>
-                  <p className="text-xs font-medium">Change Detection</p>
-                  <p className="text-[10px] text-muted-foreground">Image differencing between start and end dates quantifies change magnitude. Post-classification comparison identifies transition types.</p>
+                  <p className="text-xs font-medium">Text Generation</p>
+                  <p className="text-[10px] text-muted-foreground">Google Gemini 2.5 Flash generates estimated percentages, narrative findings, and recommendations as structured JSON, based on patterns in its training data</p>
                 </div>
               </div>
             </div>
@@ -165,8 +155,9 @@ const DataProvenancePanel = ({ results, eventType }: DataProvenancePanelProps) =
                 <span className="text-xs font-medium">Validation Approach</span>
               </div>
               <p className="text-[10px] text-muted-foreground">
-                Results include confidence intervals and are cross-referenced against known environmental baselines. 
-                For peer-reviewed accuracy, compare with USGS Earth Explorer data or ESA Copernicus products.
+                Treat this as a starting hypothesis, not a finding. For decisions that matter, verify against
+                real sources: USGS Earth Explorer, ESA Copernicus Browser, or the real Sentinel-2 imagery
+                already shown in this report's imagery panels.
               </p>
             </div>
           </Card>

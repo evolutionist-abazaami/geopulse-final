@@ -66,6 +66,39 @@ function validateEventTypes(value: unknown): string[] {
   }).filter(v => v.length > 0).slice(0, 5);
 }
 
+// Without a strict responseSchema for this array, Gemini occasionally wraps
+// each recommendation in its own tiny JSON object (e.g. the literal string
+// '{"recommendation":"..."}' instead of just the sentence), which then
+// renders as raw JSON text in the UI/report instead of the recommendation
+// itself. This recovers the real text if that happens.
+function cleanTextArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") {
+        const trimmed = item.trim();
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            const firstString = parsed && typeof parsed === "object"
+              ? Object.values(parsed).find((v) => typeof v === "string")
+              : undefined;
+            if (typeof firstString === "string") return firstString;
+          } catch {
+            // Not actually JSON - a sentence can legitimately start/end with braces.
+          }
+        }
+        return trimmed;
+      }
+      if (item && typeof item === "object") {
+        const firstString = Object.values(item).find((v) => typeof v === "string");
+        if (typeof firstString === "string") return firstString;
+      }
+      return String(item);
+    })
+    .filter((s) => s.trim().length > 0);
+}
+
 // Classification types
 type ClassificationType = 'unsupervised_kmeans' | 'unsupervised_isodata' | 'supervised_ml' | 'supervised_rf' | 'supervised_svm';
 
@@ -408,10 +441,13 @@ IMPORTANT: Return your response as a JSON object with this structure:
 {
   "area_km2": number,
   "change_percent": number,
-  "summary": "brief summary",
-  "detailed_analysis": "full analysis text",
+  "temporal_breakdown": [
+    { "period": "short label e.g. 'Q1 2022' or '2022' depending on granularity chosen", "change_percent": number (cumulative change from baseline through the end of this period, reaching the final change_percent by the last entry), "months": number (months elapsed from study start through the end of this period) }
+  ],
+  "summary": "2-3 sentence summary naming the specific region, event type, and headline change figure",
+  "detailed_analysis": "4-8 sentence full analysis grounded in this specific location's known geography (named rivers/land cover/terrain where relevant) and this event type's typical drivers - avoid generic statements that could apply to any region",
   "severity": "low|medium|high|critical",
-  "recommendations": ["rec1", "rec2", ...],
+  "recommendations": ["4-6 specific, actionable recommendations, each naming a concrete action and a plausible responsible actor or monitoring approach (e.g. 'Deploy ground survey teams to verify X within 30 days' rather than 'monitor the situation')"],
   "data_sources": ["Landsat 8 OLI", "Landsat 9 OLI", ...],
   "cloud_coverage": {
     "percentage": number (0-100),
@@ -505,6 +541,11 @@ IMPORTANT: Return your response as a JSON object with this structure:
 Time period: ${startDate} to ${endDate}
 Coordinates: ${coordinates ? JSON.stringify(coordinates) : "Not specified"}
 
+TEMPORAL BREAKDOWN REQUIRED:
+- Break the ${startDate} to ${endDate} study period into 3-6 realistic sub-periods (quarterly if the span is 2 years or less, yearly if longer).
+- For each sub-period, report the cumulative change_percent from baseline through the end of that period - values should progress toward (and the final entry should equal) the overall change_percent, with realistic non-linear variation rather than even/linear steps (real environmental change typically accelerates, plateaus, or has setbacks rather than a straight line).
+- Label each period clearly and chronologically (e.g. "Q1 2022", "Q2 2022", ... or "2022", "2023", ...).
+
 ${classificationType ? `
 CLASSIFICATION REQUESTED: ${classificationType.toUpperCase()}
 - Number of classes: ${numClasses}
@@ -537,7 +578,12 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
       contents: [{ role: "user", parts: [{ text: userPrompt }] }],
       generationConfig: {
         temperature: 0.7,
-        maxOutputTokens: 4000,
+        // 4000 was already marginal for this schema (classification_results
+        // alone can carry 20 classes x 6-band signatures) and the added
+        // temporal_breakdown field pushed some responses over the limit,
+        // truncating the JSON mid-object and silently losing change_percent/
+        // temporal_breakdown to the regex-based fallback parser below.
+        maxOutputTokens: 8000,
         responseMimeType: "application/json",
       },
     });
@@ -612,6 +658,9 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
     }
 
     const aiData = await aiResponse.json();
+    if (aiData.candidates?.[0]?.finishReason === "MAX_TOKENS") {
+      console.warn("Gemini response was truncated by maxOutputTokens - JSON parse will likely fail and fall back to the regex extractor.");
+    }
     let analysis = aiData.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
     analysis = analysis.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
 
@@ -648,11 +697,21 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
       endDate,
       area: parsedAnalysis.area_km2 ? `${parsedAnalysis.area_km2} km²` : "Analysis in progress",
       changePercent: parsedAnalysis.change_percent || 0,
+      temporalBreakdown: Array.isArray(parsedAnalysis.temporal_breakdown) && parsedAnalysis.temporal_breakdown.length > 0
+        ? parsedAnalysis.temporal_breakdown.map((p: any) => ({
+            label: String(p.period || "Period"),
+            changePercent: typeof p.change_percent === "number" ? p.change_percent : parseFloat(p.change_percent),
+            months: typeof p.months === "number" ? p.months : undefined,
+          }))
+        : null,
       summary: parsedAnalysis.summary || parsedAnalysis.detailed_analysis?.split('\n')[0] || "Environmental analysis complete",
       fullAnalysis: parsedAnalysis.detailed_analysis || analysis,
       severity: parsedAnalysis.severity || "medium",
-      recommendations: parsedAnalysis.recommendations || [],
-      dataSources: parsedAnalysis.data_sources || ["Landsat 8 OLI"],
+      recommendations: cleanTextArray(parsedAnalysis.recommendations),
+      // Not taken from the model's own self-reported "data_sources" field -
+      // Gemini has no actual way to know what it "used" since it never
+      // queried any imagery provider; this is an honest fixed description.
+      dataSources: ["Google Gemini 2.5 (AI-estimated, not measured imagery)"],
       // Enhanced quality metrics
       cloudCoverage: parsedAnalysis.cloud_coverage || { percentage: 5, detection_accuracy: 92, impact: "minimal" },
       dataQuality: parsedAnalysis.data_quality || { overall_score: 87 },
@@ -672,6 +731,19 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
       predictiveModeling: parsedAnalysis.predictive_modeling || null,
       // Methodology transparency
       methodologyTransparency: parsedAnalysis.methodology_transparency || null,
+      // Computed by this function, not the model - guarantees an honest
+      // provenance statement regardless of how the AI phrases its own text.
+      dataProvenance: {
+        analysisMethod: "ai_estimated",
+        disclaimer: "Spectral index values, percentages, and classification statistics in this analysis are AI-generated plausible estimates based on the model's training knowledge of typical environmental patterns for this region/event type - they are not measurements derived from actual satellite pixel data. No Landsat or Sentinel imagery was fetched or processed for this specific analysis.",
+        earthEngine: {
+          configured: earthEngineContext.available,
+          note: earthEngineContext.available
+            ? "An Earth Engine service account is configured and authenticates successfully, but its access token is not currently used to fetch real pixel data for this analysis."
+            : earthEngineContext.message,
+        },
+        realDataSourcesUsed: [] as string[],
+      },
       coordinates,
       timestamp: new Date().toISOString(),
     };

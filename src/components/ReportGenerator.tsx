@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
@@ -135,6 +135,10 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
   const [showPreview, setShowPreview] = useState(false);
   const [selectedAdvancedViz, setSelectedAdvancedViz] = useState<string[]>(['terrain_3d', 'risk_zones']);
   const [previewImages, setPreviewImages] = useState<Record<string, string | null>>({});
+  // Side-channel for the Quality Assurance / References sections: which
+  // panels in the most recent generation actually came from real Sentinel
+  // Hub imagery vs. an AI illustration, keyed by visualization type.
+  const lastDataSourcesRef = useRef<Record<string, string>>({});
 
   const generateVisualization = async (type: string): Promise<string | null> => {
     try {
@@ -168,8 +172,9 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
 
       const data = await response.json();
       console.log(`Visualization response for ${type}:`, data.imageUrl ? 'Image received' : 'No image', data.description?.substring(0, 100));
-      
+
       if (data.imageUrl) {
+        lastDataSourcesRef.current[type] = data.dataSource || "AI illustration (Google Gemini)";
         return data.imageUrl;
       }
       
@@ -247,7 +252,18 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       water_quality: { label: "Water Quality Assessment", category: "Environmental Health", fullTitle: "WATER QUALITY ASSESSMENT REPORT" },
       coastal_erosion: { label: "Coastal Erosion Analysis", category: "Geological Change", fullTitle: "COASTAL EROSION ANALYSIS REPORT" },
     };
-    return types[type?.toLowerCase()] || { label: type || "Environmental Analysis", category: "General Assessment", fullTitle: "ENVIRONMENTAL ANALYSIS REPORT" };
+    if (types[type?.toLowerCase()]) return types[type.toLowerCase()];
+
+    // GeoWitness offers 40+ event types (reforestation, mangrove_loss, heatwave,
+    // desertification, etc.) but only the handful above have a custom label -
+    // everything else previously fell through to the raw snake_case value
+    // (e.g. "forest_degradation") instead of a readable title.
+    const humanized = type ? type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) : "";
+    return {
+      label: humanized ? `${humanized} Assessment` : "Environmental Analysis",
+      category: "General Assessment",
+      fullTitle: `${humanized || "Environmental Analysis"} Report`.toUpperCase(),
+    };
   };
 
   const generatePDFReport = async () => {
@@ -258,6 +274,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
 
     setIsGenerating(true);
     const isSimple = reportType === "simple";
+    lastDataSourcesRef.current = {};
 
     try {
       // Generate Landsat visualizations if enabled
@@ -270,39 +287,46 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       const advancedImages: Record<string, string | null> = {};
 
       if (includeImages) {
-        // Real screenshot of the interactive map (actual OSM tiles + study-area
-        // polygon), not an AI illustration - captured fresh at generation time.
-        mapSnapshot = (await onCaptureMap?.()) ?? null;
+        // Every image below is an independent network call (map snapshot,
+        // Sentinel Hub/AI visualizations), so they're fired concurrently
+        // rather than awaited one-by-one - report generation time is then
+        // bounded by the slowest single call instead of their sum.
+        type VizTask = { key: string; type: string };
+        const vizTasks: VizTask[] = [{ key: "trueColor", type: "landsat_truecolor" }];
 
-        setGenerationStep("Generating Landsat true-color satellite imagery...");
-        trueColorImage = await generateVisualization("landsat_truecolor");
-        
         if (!isSimple) {
-          setGenerationStep("Generating false-color composite imagery...");
-          falseColorImage = await generateVisualization("landsat_falsecolor");
-          
-          setGenerationStep("Generating NDVI vegetation analysis map...");
-          ndviImage = await generateVisualization("ndvi_map");
-          
-          // Generate selected advanced visualizations
+          vizTasks.push({ key: "falseColor", type: "landsat_falsecolor" });
+          vizTasks.push({ key: "ndvi", type: "ndvi_map" });
           for (const vizId of selectedAdvancedViz) {
-            const vizInfo = ADVANCED_VIZ_TYPES.find(v => v.id === vizId);
-            if (vizInfo) {
-              setGenerationStep(`Generating ${vizInfo.label}...`);
-              advancedImages[vizId] = await generateVisualization(vizId);
+            if (ADVANCED_VIZ_TYPES.some((v) => v.id === vizId)) {
+              vizTasks.push({ key: `advanced:${vizId}`, type: vizId });
             }
           }
         }
-        
         if (analysisData?.classificationResults) {
-          setGenerationStep("Generating land cover classification map...");
-          classificationImage = await generateVisualization("classification_map");
+          vizTasks.push({ key: "classification", type: "classification_map" });
         }
-        
         if (analysisData?.changeDetection) {
-          setGenerationStep("Generating change detection analysis map...");
-          changeDetectionImage = await generateVisualization("change_detection_map");
+          vizTasks.push({ key: "changeDetection", type: "change_detection_map" });
         }
+
+        setGenerationStep(`Generating ${vizTasks.length} satellite imagery panel${vizTasks.length === 1 ? "" : "s"} and capturing study area map...`);
+
+        const [mapResult, ...vizResults] = await Promise.all([
+          Promise.resolve(onCaptureMap?.() ?? null),
+          ...vizTasks.map((t) => generateVisualization(t.type)),
+        ]);
+
+        mapSnapshot = mapResult ?? null;
+        vizTasks.forEach((t, i) => {
+          const result = vizResults[i];
+          if (t.key === "trueColor") trueColorImage = result;
+          else if (t.key === "falseColor") falseColorImage = result;
+          else if (t.key === "ndvi") ndviImage = result;
+          else if (t.key === "classification") classificationImage = result;
+          else if (t.key === "changeDetection") changeDetectionImage = result;
+          else if (t.key.startsWith("advanced:")) advancedImages[t.key.slice("advanced:".length)] = result;
+        });
       }
 
       setGenerationStep("Compiling professional report document...");
@@ -338,6 +362,35 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       const regionName = region || analysisData?.region || "Study Region";
       const area = analysisData?.area || analysisData?.area_analyzed || "N/A";
       const confidence = analysisData?.confidenceLevel ?? analysisData?.confidence ?? analysisData?.analysisConfidence ?? null;
+
+      // Only include Driver Analysis if there's real underlying data for it -
+      // otherwise it would be pure filler (and previously WAS, in the
+      // generate-visualization AI-illustration version of this section).
+      const driverData = analysisData?.changeDetection?.change_drivers?.length
+        ? analysisData.changeDetection.change_drivers
+        : null;
+
+      // Single source of truth for section numbering, used to render BOTH the
+      // table of contents AND each section header - guarantees they can never
+      // drift out of sync the way the old hardcoded TOC vs. body numbers did.
+      const sectionPlan: { key: string; title: string }[] = isSimple
+        ? [
+            { key: "executive_summary", title: "Executive Summary" },
+            { key: "key_findings", title: "Key Findings & Analysis" },
+          ]
+        : [
+            { key: "executive_summary", title: "Executive Summary" },
+            { key: "project_overview", title: "Project Overview & Objectives" },
+            { key: "satellite_imagery", title: "Satellite Imagery Analysis" },
+            { key: "key_findings", title: "Key Findings & Analysis" },
+            ...(driverData ? [{ key: "driver_analysis", title: "Driver Analysis" }] : []),
+            { key: "risk_assessment", title: "Risk Assessment" },
+            { key: "recommendations", title: "Recommendations & Implementation Roadmap" },
+            { key: "quality_assurance", title: "Quality Assurance & Limitations" },
+            { key: "methodology", title: "Geospatial Analysis Methodology" },
+            { key: "references", title: "References & Data Sources" },
+          ];
+      const sectionNum = (key: string): string => String(sectionPlan.findIndex((s) => s.key === key) + 1);
 
       // Helper functions
       const addWrappedText = (text: string, x: number, y: number, maxWidth: number, lineHeight: number = 5): number => {
@@ -567,19 +620,15 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         pdf.text("TABLE OF CONTENTS", margin, yPos);
         yPos += 15;
 
-        const tocItems = [
-          { num: "1", title: "Executive Summary", page: "3" },
-          { num: "2", title: "Project Overview & Objectives", page: "4" },
-          { num: "3", title: "Geospatial Analysis Methodology", page: "5" },
-          { num: "4", title: "Key Findings & Analysis", page: "6" },
-          { num: "5", title: "Driver Analysis", page: "8" },
-          { num: "6", title: "Risk Assessment", page: "9" },
-          { num: "7", title: "Stakeholder-Specific Recommendations", page: "10" },
-          { num: "8", title: "Economic Impact Assessment", page: "12" },
-          { num: "9", title: "Implementation Roadmap", page: "13" },
-          { num: "10", title: "Quality Assurance & Limitations", page: "14" },
-          { num: "11", title: "References & Data Sources", page: "15" },
-        ];
+        // Generated from sectionPlan (not a separate hardcoded list) so the
+        // TOC's numbers/titles can never drift out of sync with the actual
+        // section headers rendered below, page numbers are estimates.
+        let tocPageEstimate = 3;
+        const tocItems = sectionPlan.map((section) => {
+          const item = { num: sectionNum(section.key), title: section.title, page: String(tocPageEstimate) };
+          tocPageEstimate += section.key === "methodology" || section.key === "references" ? 2 : 1;
+          return item;
+        });
 
         pdf.setFontSize(11);
         tocItems.forEach((item) => {
@@ -621,13 +670,13 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       addPageHeader();
       yPos = 28;
 
-      yPos = addSectionTitle("EXECUTIVE SUMMARY", yPos, "1");
+      yPos = addSectionTitle("EXECUTIVE SUMMARY", yPos, sectionNum("executive_summary"));
 
       // Purpose paragraph with citation references
       pdf.setFont("helvetica", "normal");
       pdf.setFontSize(10);
       pdf.setTextColor(55, 65, 81);
-      const purposeText = `Purpose of Analysis: This assessment was conducted to evaluate environmental conditions, quantify changes, and inform evidence-based land management policy in ${regionName} [1,2]. The analysis covers the period from ${new Date(startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })} to ${new Date(endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}, utilizing multi-spectral satellite imagery [3].`;
+      const purposeText = `Purpose of Analysis: This assessment was conducted to evaluate environmental conditions, quantify changes, and inform evidence-based land management policy in ${regionName}. The analysis covers the period from ${new Date(startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })} to ${new Date(endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}.${!isSimple ? ` See Section ${sectionNum("references")} for the specific data sources used in this report.` : ""}`;
       yPos = addWrappedText(purposeText, margin, yPos, contentWidth, 5);
       yPos += 8;
 
@@ -649,12 +698,36 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       // Critical Findings section
       yPos = addSubsectionTitle("Critical Findings", yPos);
 
-      const findings = analysisData?.findings || analysisData?.recommendations || [
-        { num: "1", title: "Change Pattern Analysis", detail: `Analysis reveals significant environmental change patterns within the study area, with changes concentrated in specific hotspots that require targeted monitoring and intervention.` },
-        { num: "2", title: "Primary Drivers Identified", detail: `Multi-spectral analysis indicates primary drivers including land use change, environmental stressors, and anthropogenic activities contributing to the observed changes.` },
-        { num: "3", title: "Temporal Trends", detail: `Seasonal analysis shows variation in change rates, with peak activity observed during specific periods that correlate with regional patterns.` },
-        { num: "4", title: "Impact Assessment", detail: `The detected changes represent significant implications for ecosystem health, requiring continued monitoring and potential intervention strategies.` },
-      ];
+      // Splits a real narrative paragraph into distinct chunks, one per
+      // sentence-group, so GeoWitness-sourced reports (analyze-satellite
+      // returns detailed_analysis/summary but no separate "findings" array)
+      // get real, specific findings here instead of duplicating the
+      // Recommendations section verbatim under a different heading - that
+      // previous fallback (`analysisData?.recommendations`) was the reason
+      // exported reports still looked repetitive/unchanged.
+      const splitIntoFindings = (text: string, maxCount: number): string[] =>
+        text
+          .replace(/\s+/g, " ")
+          .split(/(?<=[.!?])\s+(?=[A-Z])/)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 20)
+          .slice(0, maxCount);
+
+      const narrativeFindings = splitIntoFindings(
+        String(analysisData?.fullAnalysis || analysisData?.detailedAnalysis || analysisData?.summary || ""),
+        4
+      );
+
+      const findings = analysisData?.findings?.length > 0
+        ? analysisData.findings
+        : narrativeFindings.length > 0
+        ? narrativeFindings
+        : [
+            { num: "1", title: "Change Pattern Analysis", detail: `Analysis reveals significant environmental change patterns within the study area, with changes concentrated in specific hotspots that require targeted monitoring and intervention.` },
+            { num: "2", title: "Primary Drivers Identified", detail: `Multi-spectral analysis indicates primary drivers including land use change, environmental stressors, and anthropogenic activities contributing to the observed changes.` },
+            { num: "3", title: "Temporal Trends", detail: `Seasonal analysis shows variation in change rates, with peak activity observed during specific periods that correlate with regional patterns.` },
+            { num: "4", title: "Impact Assessment", detail: `The detected changes represent significant implications for ecosystem health, requiring continued monitoring and potential intervention strategies.` },
+          ];
 
       findings.slice(0, 4).forEach((finding: any, index: number) => {
         checkPageBreak(20);
@@ -694,6 +767,54 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       pdf.text(pdf.splitTextToSize(riskText, contentWidth - 20)[0], margin + 10, yPos + 18);
       yPos += 35;
 
+      // ============= PROJECT OVERVIEW & OBJECTIVES =============
+      if (!isSimple) {
+        pdf.addPage();
+        addPageHeader();
+        yPos = 28;
+
+        yPos = addSectionTitle("PROJECT OVERVIEW & OBJECTIVES", yPos, sectionNum("project_overview"));
+
+        yPos = addSubsectionTitle("Study Parameters", yPos);
+        const overviewHeaders = ["PARAMETER", "VALUE"];
+        const overviewRows: string[][] = [
+          ["Region", regionName],
+          ["Event / Analysis Type", eventInfo.label],
+          ["Study Period", `${new Date(startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })} - ${new Date(endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`],
+          ["Area Analyzed", String(area)],
+        ];
+        if (typeof lat === "number" && typeof lng === "number") {
+          overviewRows.push(["Coordinates", `${lat.toFixed(4)}, ${lng.toFixed(4)}`]);
+        }
+        yPos = addTableWithBorders(overviewHeaders, overviewRows, yPos, [70, 100]);
+        yPos += 8;
+
+        yPos = addSubsectionTitle("Objectives", yPos);
+        const objectives = [
+          `Quantify the extent and rate of ${eventInfo.label.toLowerCase()} in ${regionName} over the study period.`,
+          `Assess the associated environmental risk and likely trajectory if current patterns continue.`,
+          `Provide specific, actionable recommendations for the responsible stakeholders identified in this report.`,
+        ];
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9.5);
+        pdf.setTextColor(55, 65, 81);
+        objectives.forEach((obj, i) => {
+          checkPageBreak(15);
+          pdf.text(`${i + 1}.`, margin, yPos);
+          yPos = addWrappedText(obj, margin + 6, yPos, contentWidth - 6, 5);
+          yPos += 3;
+        });
+        yPos += 5;
+
+        yPos = addSubsectionTitle("Scope & Data Basis", yPos);
+        const scopeText = typeof lat === "number" && typeof lng === "number"
+          ? `This report's satellite imagery panels (Section ${sectionNum("satellite_imagery")}) use real Sentinel-2 imagery for the coordinates above. Numeric spectral/change statistics elsewhere in this report are AI-generated estimates rather than pixel-level measurements - see Section ${sectionNum("quality_assurance")} for a full accounting of what is real data versus modeled approximation in this specific report.`
+          : `No specific coordinates were available for this analysis, so satellite imagery panels could not be sourced from real imagery and numeric spectral/change statistics are AI-generated estimates rather than pixel-level measurements - see Section ${sectionNum("quality_assurance")} for a full accounting of what is real data versus modeled approximation in this specific report.`;
+        pdf.setFontSize(9.5);
+        yPos = addWrappedText(scopeText, margin, yPos, contentWidth, 5);
+        yPos += 10;
+      }
+
       // ============= SATELLITE IMAGERY SECTION =============
       // Always show imagery section in professional reports
       if (!isSimple) {
@@ -701,12 +822,15 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         addPageHeader();
         yPos = 28;
 
-        yPos = addSectionTitle("SATELLITE IMAGERY ANALYSIS", yPos, "2");
+        yPos = addSectionTitle("SATELLITE IMAGERY ANALYSIS", yPos, sectionNum("satellite_imagery"));
 
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(10);
         pdf.setTextColor(55, 65, 81);
-        const imageryIntro = `Multi-spectral satellite imagery sourced from Sentinel-2 MSI [1] and Landsat-8 OLI [2] sensors provides comprehensive coverage of the study area. Processing was conducted using Google Earth Engine [3] and validated against ground-truth data [4]. The following imagery panels show the analyzed region with environmental change indicators.`;
+        const anyRealImagery = Object.values(lastDataSourcesRef.current).some((s) => /sentinel/i.test(s));
+        const imageryIntro = anyRealImagery
+          ? `The following panels include real Sentinel-2 L2A satellite imagery retrieved for this study area, alongside AI-generated illustrations for panel types not covered by real imagery retrieval. See Section ${sectionNum("quality_assurance")} for exactly which panels below are real versus AI-illustrated.`
+          : `Real satellite imagery could not be retrieved for this report (no verified location was available), so the panels below are AI-generated illustrations rather than actual imagery. See Section ${sectionNum("quality_assurance")} for details.`;
         yPos = addWrappedText(imageryIntro, margin, yPos, contentWidth, 5);
         yPos += 10;
 
@@ -833,7 +957,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       addPageHeader();
       yPos = 28;
 
-      yPos = addSectionTitle("KEY FINDINGS & ANALYSIS", yPos, "3");
+      yPos = addSectionTitle("KEY FINDINGS & ANALYSIS", yPos, sectionNum("key_findings"));
 
       // Temporal Dynamics table — uses real per-period values from analysis when present,
       // otherwise reports only the validated study-period total (no fabricated quarterly splits).
@@ -902,6 +1026,39 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       pdf.text("Figure 2: Environmental change trend analysis showing temporal patterns over the study period.", margin, yPos);
       yPos += 12;
 
+      // ============= DRIVER ANALYSIS (only when the analysis actually returned driver data) =============
+      if (!isSimple && driverData) {
+        pdf.addPage();
+        addPageHeader();
+        yPos = 28;
+
+        yPos = addSectionTitle("DRIVER ANALYSIS", yPos, sectionNum("driver_analysis"));
+
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9.5);
+        pdf.setTextColor(75, 85, 99);
+        yPos = addWrappedText(
+          "Contributing drivers identified for the detected change, as estimated by the analysis. These figures are AI-generated estimates, not measured attributions.",
+          margin, yPos, contentWidth, 5
+        );
+        yPos += 8;
+
+        const driverHeaders = ["DRIVER", "ESTIMATED CONTRIBUTION"];
+        const driverRows = driverData.map((d: any) => [
+          String(d.driver || d.name || "Unspecified"),
+          d.contribution_percent !== undefined ? `${parseFloat(d.contribution_percent).toFixed(1)}%` : "N/A",
+        ]);
+        yPos = addTableWithBorders(driverHeaders, driverRows, yPos, [110, 60]);
+        yPos += 8;
+
+        if (analysisData?.multiEventAnalysis?.interaction_effects) {
+          yPos = addSubsectionTitle("Interaction Effects", yPos);
+          pdf.setFontSize(9.5);
+          yPos = addWrappedText(String(analysisData.multiEventAnalysis.interaction_effects), margin, yPos, contentWidth, 5);
+          yPos += 8;
+        }
+      }
+
       // ============= PROFESSIONAL REPORT EXTRAS =============
       if (!isSimple) {
         // RISK ASSESSMENT PAGE
@@ -909,7 +1066,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         addPageHeader();
         yPos = 28;
 
-        yPos = addSectionTitle("RISK ASSESSMENT", yPos, "4");
+        yPos = addSectionTitle("RISK ASSESSMENT", yPos, sectionNum("risk_assessment"));
 
         // Risk classification box
         pdf.setFillColor(risk.bgColor[0], risk.bgColor[1], risk.bgColor[2]);
@@ -939,30 +1096,56 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
 
         // RECOMMENDATIONS PAGE
         checkPageBreak(80);
-        yPos = addSectionTitle("RECOMMENDATIONS", yPos, "5");
+        yPos = addSectionTitle("RECOMMENDATIONS & IMPLEMENTATION ROADMAP", yPos, sectionNum("recommendations"));
 
-        const recommendations = [
-          { priority: "HIGH", action: "Establish continuous monitoring protocols for identified change hotspots", timeline: "Immediate", responsible: "Environmental Agency" },
-          { priority: "HIGH", action: "Deploy ground-truth verification teams to validate satellite findings", timeline: "30 days", responsible: "Field Operations" },
-          { priority: "MEDIUM", action: "Engage local stakeholders and authorities with preliminary findings", timeline: "45 days", responsible: "Community Liaison" },
-          { priority: "MEDIUM", action: "Develop intervention strategies based on driver analysis results", timeline: "60 days", responsible: "Policy Team" },
-          { priority: "LOW", action: "Schedule follow-up analysis to track progression of detected changes", timeline: "90 days", responsible: "Analysis Team" },
-        ];
+        // Real recommendations from the analysis, organized into a
+        // roadmap (priority/timeline/responsible are derived scaffolding
+        // around real content, not fabricated advice) - only falls back to
+        // generic placeholders when the analysis returned none at all.
+        const realRecommendationText: string[] = Array.isArray(analysisData?.recommendations)
+          ? analysisData.recommendations
+              .map((r: any) => (typeof r === "string" ? r : r?.detail || r?.action || null))
+              .filter((r: unknown): r is string => typeof r === "string" && r.trim().length > 0)
+          : [];
+
+        const timelineByIndex = (i: number) => ["Immediate", "30 days", "45 days", "60 days", "90 days"][i] || `${(i + 1) * 30} days`;
+        const responsibleRotation = ["Environmental Agency", "Field Operations", "Community Liaison", "Policy Team", "Analysis Team"];
+        const priorityByIndex = (i: number, total: number) => {
+          if (i < Math.ceil(total / 3)) return "HIGH";
+          if (i < Math.ceil((total * 2) / 3)) return "MEDIUM";
+          return "LOW";
+        };
+
+        const recommendations = realRecommendationText.length > 0
+          ? realRecommendationText.map((action, i) => ({
+              priority: priorityByIndex(i, realRecommendationText.length),
+              action,
+              timeline: timelineByIndex(i),
+              responsible: responsibleRotation[i % responsibleRotation.length],
+            }))
+          : [
+              { priority: "HIGH", action: "Establish continuous monitoring protocols for identified change hotspots", timeline: "Immediate", responsible: "Environmental Agency" },
+              { priority: "HIGH", action: "Deploy ground-truth verification teams to validate satellite findings", timeline: "30 days", responsible: "Field Operations" },
+              { priority: "MEDIUM", action: "Engage local stakeholders and authorities with preliminary findings", timeline: "45 days", responsible: "Community Liaison" },
+              { priority: "MEDIUM", action: "Develop intervention strategies based on driver analysis results", timeline: "60 days", responsible: "Policy Team" },
+              { priority: "LOW", action: "Schedule follow-up analysis to track progression of detected changes", timeline: "90 days", responsible: "Analysis Team" },
+            ];
 
         recommendations.forEach((rec) => {
-          checkPageBreak(20);
-          
           const priorityColors: Record<string, { bg: [number, number, number]; fg: [number, number, number] }> = {
             HIGH: { bg: [254, 226, 226], fg: [220, 38, 38] },
             MEDIUM: { bg: [254, 249, 195], fg: [161, 98, 7] },
             LOW: { bg: [220, 252, 231], fg: [21, 128, 61] }
           };
-          
+
           const colors = priorityColors[rec.priority];
-          
+          const actionLines = pdf.splitTextToSize(sanitizeForPdf(rec.action), contentWidth - 30);
+          const boxHeight = 14 + actionLines.length * 4.5;
+          checkPageBreak(boxHeight + 4);
+
           pdf.setFillColor(colors.bg[0], colors.bg[1], colors.bg[2]);
-          pdf.roundedRect(margin, yPos, contentWidth, 18, 2, 2, "F");
-          
+          pdf.roundedRect(margin, yPos, contentWidth, boxHeight, 2, 2, "F");
+
           // Priority badge
           pdf.setFillColor(colors.fg[0], colors.fg[1], colors.fg[2]);
           pdf.roundedRect(margin + 3, yPos + 3, 18, 6, 1, 1, "F");
@@ -970,46 +1153,111 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           pdf.setFontSize(7);
           pdf.setFont("helvetica", "bold");
           pdf.text(rec.priority, margin + 5, yPos + 7);
-          
-          // Action text
+
+          // Action text (wrapped, not truncated to one line)
           pdf.setTextColor(17, 24, 39);
           pdf.setFontSize(9);
           pdf.setFont("helvetica", "normal");
-          const actionText = pdf.splitTextToSize(rec.action, contentWidth - 70)[0];
-          pdf.text(actionText, margin + 25, yPos + 8);
-          
+          pdf.text(actionLines, margin + 25, yPos + 8);
+
           // Timeline
+          const metaY = yPos + 8 + actionLines.length * 4.5;
           pdf.setTextColor(107, 114, 128);
           pdf.setFontSize(8);
-          pdf.text(`Timeline: ${rec.timeline}`, margin + 25, yPos + 14);
-          pdf.text(`Responsible: ${rec.responsible}`, pageWidth - margin - 50, yPos + 14);
-          
-          yPos += 22;
+          pdf.text(`Timeline: ${rec.timeline}`, margin + 25, metaY);
+          pdf.text(`Responsible: ${rec.responsible}`, pageWidth - margin - 50, metaY);
+
+          yPos += boxHeight + 4;
         });
+
+        // ============= QUALITY ASSURANCE & LIMITATIONS =============
+        pdf.addPage();
+        addPageHeader();
+        yPos = 28;
+
+        yPos = addSectionTitle("QUALITY ASSURANCE & LIMITATIONS", yPos, sectionNum("quality_assurance"));
+
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9.5);
+        pdf.setTextColor(75, 85, 99);
+        yPos = addWrappedText(
+          "This section states plainly which parts of this specific report are real, measured data versus AI-generated estimates, so findings can be weighted appropriately.",
+          margin, yPos, contentWidth, 5
+        );
+        yPos += 8;
+
+        yPos = addSubsectionTitle("Data Basis for This Report", yPos);
+        const provenanceHeaders = ["REPORT ELEMENT", "BASIS"];
+        const imageLabel = (key: string, label: string): string[] => {
+          const source = lastDataSourcesRef.current[key];
+          if (!source) return [label, "Not generated for this report"];
+          const isReal = /sentinel/i.test(source);
+          return [label, isReal ? "Real Sentinel-2 satellite imagery" : "AI illustration (not real imagery)"];
+        };
+        const provenanceRows: string[][] = [
+          ["Study area map", mapSnapshot ? "Real map screenshot (OpenStreetMap)" : "Not captured for this report"],
+          imageLabel("landsat_truecolor", "True-color imagery panel"),
+          imageLabel("landsat_falsecolor", "False-color imagery panel"),
+          imageLabel("ndvi_map", "NDVI imagery panel"),
+          ["Trend chart", "Rendered directly from this report's own figures (not AI-generated)"],
+          ["Spectral indices / change %", analysisData?.dataProvenance?.analysisMethod === "ai_estimated" || !analysisData?.dataProvenance
+            ? "AI-estimated (Google Gemini) - not measured from pixel data"
+            : "See analysis source"],
+          ["Location coordinates", analysisData?.locations?.[0]?.verified === false ? "AI-estimated, not geocoder-verified" : "Geocoded (OpenStreetMap/Nominatim) or user-selected"],
+        ];
+        yPos = addTableWithBorders(provenanceHeaders, provenanceRows, yPos, [70, 100]);
+        yPos += 8;
+
+        if (analysisData?.dataProvenance?.disclaimer) {
+          yPos = addSubsectionTitle("Analysis Disclaimer", yPos);
+          pdf.setFontSize(9);
+          yPos = addWrappedText(String(analysisData.dataProvenance.disclaimer), margin, yPos, contentWidth, 4.5);
+          yPos += 8;
+        }
+
+        checkPageBreak(40);
+        yPos = addSubsectionTitle("General Limitations", yPos);
+        pdf.setFontSize(9);
+        pdf.setTextColor(75, 85, 99);
+        const limitations = [
+          "AI-estimated figures are plausible approximations, not ground-truth measurements - validate against field data before acting on them.",
+          "Real satellite imagery (where used) is subject to cloud cover and a multi-day revisit cycle, so the most recent clear scene may predate the report date.",
+          "AI interpretations are probabilistic and can vary between runs of the same query.",
+          confidence !== null
+            ? `This report's reported confidence level is ${confidence}%, self-assessed by the analysis - treat it as a rough indicator, not a statistical guarantee.`
+            : "No confidence level was reported for this analysis.",
+        ];
+        limitations.forEach((line) => {
+          checkPageBreak(12);
+          pdf.text("•", margin, yPos);
+          yPos = addWrappedText(line, margin + 5, yPos, contentWidth - 5, 4.5);
+          yPos += 3;
+        });
+        yPos += 5;
 
         // METHODOLOGY PAGE
         pdf.addPage();
         addPageHeader();
         yPos = 28;
 
-        yPos = addSectionTitle("GEOSPATIAL ANALYSIS METHODOLOGY", yPos, "6");
+        yPos = addSectionTitle("GEOSPATIAL ANALYSIS METHODOLOGY", yPos, sectionNum("methodology"));
 
         const methodology = [
           {
-            title: "Data Acquisition",
-            content: "Multi-spectral satellite imagery was sourced from Copernicus Sentinel-2 MSI (10m resolution, 13 spectral bands) [1] and Landsat-8 OLI (30m resolution, 11 bands) [2] sensors. Cloud-free scenes were selected spanning the study period with atmospheric correction applied using Sen2Cor processor for Sentinel-2 [6] and LaSRC algorithm for Landsat-8."
+            title: "Imagery Data Basis",
+            content: `Where coordinates are available, the true-color, false-color, and NDVI panels in this report use real Sentinel-2 L2A imagery retrieved via the Copernicus Data Space Ecosystem's Sentinel Hub API, least-cloud mosaicked over the preceding 90 days, with cloud pixels masked using the Sentinel-2 Scene Classification Layer. ${analysisData?.locations?.[0]?.verified === false || (typeof lat !== "number") ? "For this specific report, no verified location was available, so imagery panels could not be sourced from real satellite data - see the Quality Assurance section for confirmation of what was actually used." : "This applies to the imagery panels in this specific report."}`
           },
           {
-            title: "Processing Pipeline",
-            content: "Images processed through radiometric calibration (DN to Top-of-Atmosphere reflectance) using Google Earth Engine [3], geometric correction (co-registration accuracy ±0.3 pixels RMS), and cloud masking using Fmask 4.2 algorithm. Spectral indices (NDVI, EVI, NDMI, NBR, SAVI) computed for comprehensive environmental analysis [4]."
+            title: "Numeric Analysis Generation",
+            content: "Spectral index values, change percentages, and classification statistics are generated by Google Gemini from a text prompt describing the region, event type, and the real formulas for standard indices (NDVI, NDWI, NBR, NDBI). The model produces plausible estimates based on patterns in its training data - it does not compute these values from actual pixel data, and no image differencing or classification algorithm is run against real imagery for these figures."
           },
           {
-            title: "AI Analysis Framework",
-            content: "Deep learning models (U-Net architecture with ResNet50 backbone) trained on labeled image patches for the region using TensorFlow/PyTorch [9]. Model performance: Overall Accuracy 91.3%, Producer's Accuracy 87.2%, User's Accuracy 89.4%. Confidence scoring employs Monte Carlo Dropout to quantify prediction uncertainty."
+            title: "Map & Chart Rendering",
+            content: "The study area map is a real screenshot of the interactive map (OpenStreetMap tiles plus the study-area marker/boundary), captured at report generation time. The trend chart is drawn directly from this report's own reported figures using on-device rendering - it is not AI-generated."
           },
           {
-            title: "Validation Methodology",
-            content: "Ground-truth validation conducted at randomly stratified points using GPS-verified locations and high-resolution reference imagery [5]. Independent validation dataset used for accuracy assessment via QGIS [10]. Overall classification accuracy verified with systematic bias analysis."
+            title: "Validation Approach",
+            content: "This system does not perform independent ground-truth validation. The self-reported confidence level reflects the AI model's own assessment, not a statistically validated accuracy metric. For decisions with real consequences, validate findings against field data or authoritative sources such as USGS Earth Explorer or the Copernicus Browser."
           }
         ];
 
@@ -1034,31 +1282,39 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         yPos += 5;
         yPos = addSubsectionTitle("Uncertainty Quantification", yPos);
         
-        const uncertaintyHeaders = ["ERROR SOURCE", "MAGNITUDE", "MITIGATION"];
-        const uncertaintyRows = [
-          ["Positional accuracy", "±15m (1.5 pixels)", "Multi-date co-registration"],
-          ["Classification error", "±12.9% (1-σ)", "Confidence thresholding >70%"],
-          ["Cloud contamination", "±3.2%", "Multi-temporal compositing"],
-          ["Seasonal phenology", "±5.7%", "Dry season normalization"],
-          ["Combined uncertainty", "±9.4% (95% CI)", "Monte Carlo propagation"],
-        ];
-        yPos = addTableWithBorders(uncertaintyHeaders, uncertaintyRows, yPos, [55, 50, 65]);
+        const uncertaintyHeaders = ["ASPECT", "NOTE"];
+        const uncertaintyRows: string[][] = [];
+        const transparencyRange = analysisData?.methodologyTransparency?.uncertainty_range;
+        if (transparencyRange && (transparencyRange.lower !== undefined || transparencyRange.upper !== undefined)) {
+          uncertaintyRows.push(["AI-reported uncertainty range", `${transparencyRange.lower ?? "?"}% to ${transparencyRange.upper ?? "?"}% (self-assessed by the model, not independently verified)`]);
+        }
+        if (confidence !== null) {
+          uncertaintyRows.push(["Self-reported confidence level", `${confidence}% (the model's own assessment, not a statistical accuracy metric)`]);
+        }
+        uncertaintyRows.push(["Real imagery geolocation (where used)", "Sentinel-2 L2A products are typically geolocated to within about 1 pixel (~10m) per ESA specifications"]);
+        uncertaintyRows.push(["Numeric spectral/change analysis", "Not independently validated by this system - see Validation Approach above"]);
+        yPos = addTableWithBorders(uncertaintyHeaders, uncertaintyRows, yPos, [75, 95]);
 
         // DATA SOURCES PAGE
         pdf.addPage();
         addPageHeader();
         yPos = 28;
 
-        yPos = addSectionTitle("REFERENCES & DATA SOURCES", yPos, "7");
+        yPos = addSectionTitle("REFERENCES & DATA SOURCES", yPos, sectionNum("references"));
 
-        yPos = addSubsectionTitle("Satellite Data Sources", yPos);
-        
+        yPos = addSubsectionTitle("Data Sources Used In This Report", yPos);
+
+        const usedRealImagery = Object.values(lastDataSourcesRef.current).some((s) => /sentinel/i.test(s));
+        const eeConfigured = !!analysisData?.dataProvenance?.earthEngine?.configured;
         const dataSources = [
-          "[1] European Space Agency (ESA). Copernicus Sentinel-2 MSI Level-2A. Accessed via: https://scihub.copernicus.eu",
-          "[2] NASA/USGS. Landsat-8 OLI/TIRS Collection 2 Level-2. Accessed via: https://earthexplorer.usgs.gov",
-          "[3] Google Earth Engine (GEE). Cloud Computing Platform for Earth Observation. https://earthengine.google.com",
-          "[4] NASA MODIS Science Team. MOD13Q1 250m Vegetation Indices. https://lpdaac.usgs.gov",
-          "[5] OpenStreetMap Contributors. Geographic Database. https://www.openstreetmap.org"
+          "[1] Google Gemini (Google DeepMind). Generated the narrative analysis, findings, and recommendations in this report, and any AI-illustrated (non-real) imagery panels. https://ai.google.dev",
+          ...(usedRealImagery ? [
+            "[2] European Space Agency (ESA) / Copernicus Data Space Ecosystem. Real Sentinel-2 L2A satellite imagery, used for this report's true-color, false-color, and/or NDVI panels. https://dataspace.copernicus.eu",
+          ] : []),
+          "[3] OpenStreetMap Contributors. Basemap tiles for the study area map, and/or place-name geocoding used to resolve this report's location. https://www.openstreetmap.org",
+          ...(eeConfigured ? [
+            "[4] Google Earth Engine. A service-account credential is configured for this project but was not used to source real pixel data for this specific report - see Quality Assurance & Limitations.",
+          ] : []),
         ];
 
         pdf.setFontSize(9);
@@ -1072,18 +1328,19 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         });
 
         yPos += 8;
-        yPos = addSubsectionTitle("Processing Tools & Frameworks", yPos);
-        
+        yPos = addSubsectionTitle("Software Used to Produce This Report", yPos);
+
         const tools = [
-          "[6] Sen2Cor v2.11 - Atmospheric correction processor for Sentinel-2",
-          "[7] GDAL/OGR - Geospatial Data Abstraction Library",
-          "[8] Python SciPy/NumPy - Scientific computing libraries",
-          "[9] TensorFlow/PyTorch - Deep learning frameworks for AI analysis",
-          "[10] QGIS - Geographic Information System for validation"
+          "jsPDF - client-side PDF document generation",
+          "MapLibre GL JS - interactive map rendering for the study area map panel",
+          "Supabase Edge Functions (Deno) - backend APIs for AI analysis and imagery retrieval",
+          ...(usedRealImagery ? ["Sentinel Hub Process API (Copernicus Data Space Ecosystem) - real satellite imagery retrieval"] : []),
+          "Google Gemini API - AI-generated narrative analysis and, where real imagery was unavailable, illustrative visualizations",
         ];
 
         tools.forEach((tool) => {
-          pdf.text(tool, margin, yPos);
+          checkPageBreak(8);
+          pdf.text(`• ${tool}`, margin, yPos);
           yPos += 6;
         });
       }

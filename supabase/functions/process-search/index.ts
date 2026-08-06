@@ -17,6 +17,106 @@ function validateQuery(value: unknown): string {
   return value.trim();
 }
 
+// Without a strict responseSchema, Gemini sometimes wraps each array item in
+// its own tiny JSON object (e.g. a "findings" entry coming back as the
+// literal string '{"finding":"..."}' instead of just the sentence) - the
+// frontend then renders that raw JSON text as if it were the finding itself.
+// A responseSchema (added below) should prevent this at the source, but this
+// normalizer is kept as a defensive second layer in case a future prompt
+// tweak or model swap reintroduces the same drift.
+function cleanTextArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") {
+        const trimmed = item.trim();
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            const firstString = parsed && typeof parsed === "object"
+              ? Object.values(parsed).find((v) => typeof v === "string")
+              : undefined;
+            if (typeof firstString === "string") return firstString;
+          } catch {
+            // Not actually JSON - a sentence can legitimately start/end with braces.
+          }
+        }
+        return trimmed;
+      }
+      if (item && typeof item === "object") {
+        const firstString = Object.values(item).find((v) => typeof v === "string");
+        if (typeof firstString === "string") return firstString;
+      }
+      return String(item);
+    })
+    .filter((s) => s.trim().length > 0);
+}
+
+interface GeocodedLocation {
+  name: string;
+  lat: number | null;
+  lng: number | null;
+  verified: boolean;
+  source: "nominatim" | "ai_estimate";
+}
+
+// Gemini identifies *which* places a query is about; real coordinates come
+// from Nominatim (OpenStreetMap) so the map/report never plots a place at
+// coordinates the model invented. Sequential with a short gap between calls
+// per Nominatim's usage policy (max ~1 request/second, no concurrent bursts).
+async function geocodeLocation(name: string): Promise<{ lat: number; lng: number } | null> {
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(name)}&viewbox=-18,37,52,-35&bounded=0&limit=1`;
+    const response = await fetch(url, {
+      headers: {
+        "Accept-Language": "en",
+        "User-Agent": "GeoPulse Environmental Analysis App (process-search geocoding)",
+      },
+    });
+    if (!response.ok) return null;
+    const results = await response.json();
+    if (!Array.isArray(results) || results.length === 0) return null;
+    const lat = parseFloat(results[0].lat);
+    const lng = parseFloat(results[0].lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+  } catch (error) {
+    console.error(`Nominatim geocode failed for "${name}":`, error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
+async function resolveLocations(rawLocations: unknown[]): Promise<GeocodedLocation[]> {
+  const resolved: GeocodedLocation[] = [];
+  for (const raw of rawLocations.slice(0, 5)) {
+    const entry = raw as Record<string, unknown>;
+    const name = typeof entry?.name === "string" && entry.name.trim() ? entry.name.trim() : "Unspecified location";
+
+    const geocoded = await geocodeLocation(name);
+    if (geocoded) {
+      resolved.push({ name, lat: geocoded.lat, lng: geocoded.lng, verified: true, source: "nominatim" });
+    } else {
+      // Geocoding found nothing real for this name - fall back to the
+      // model's own estimate, but flag it so the UI/report can be honest
+      // that this position is not a verified real-world coordinate.
+      const fallbackLat = Number(entry?.lat);
+      const fallbackLng = Number(entry?.lng);
+      resolved.push({
+        name,
+        lat: Number.isFinite(fallbackLat) ? fallbackLat : null,
+        lng: Number.isFinite(fallbackLng) ? fallbackLng : null,
+        verified: false,
+        source: "ai_estimate",
+      });
+    }
+    // Stay well under Nominatim's rate limit when resolving multiple names.
+    if (rawLocations.length > 1) {
+      await new Promise((r) => setTimeout(r, 1100));
+    }
+  }
+  return resolved;
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -57,23 +157,21 @@ serve(async (req) => {
 Your role is to:
 1. Interpret natural language queries about environmental changes across Africa
 2. Extract key information: location, event type, time period, specific concerns
-3. Provide relevant satellite data insights with REAL coordinates
+3. Identify which real places (city, region, or country) the query refers to
 4. Suggest monitoring strategies and data sources
 5. Assess confidence levels based on data availability
 
 Format responses as structured JSON with:
-- interpretation: Clear explanation of what the user is looking for
-- findings: Array of relevant environmental insights
-- locations: Array of location objects with {name: string, lat: number, lng: number, boundary?: [[lat,lng][]]}
-- confidenceLevel: 1-100 scale
-- recommendations: Actionable next steps
-
-IMPORTANT: Always provide real geographic coordinates for locations mentioned in Africa.`;
+- interpretation: Clear explanation of what the user is looking for (2-4 sentences)
+- findings: Array of 3-5 specific, detailed insights (each 1-2 full sentences with concrete detail - not a one-line label). Ground each in the location's known environmental context (e.g. named rivers, land cover types, seasonal patterns) rather than generic statements.
+- locations: Array of location objects with {name: string, lat: number, lng: number} - name should be a real, geocodable place (e.g. "Accra, Ghana", not a vague description). lat/lng are your best estimate only; they are a fallback, not the primary source of truth, since coordinates are re-verified against a real geocoding service after your response.
+- confidenceLevel: 1-100 scale, reflecting how well the query maps to a real, locatable place and known environmental patterns
+- recommendations: Array of 3-5 specific, actionable next steps (each naming a concrete action, responsible actor, or monitoring approach - not generic advice like "monitor the situation")`;
 
     const userPrompt = `Interpret this environmental search query: "${query}"
 
 Provide insights about environmental changes in African regions, including deforestation, flooding, drought, urbanization, or climate impacts.
-Consider satellite data availability and relevance.`;
+Consider satellite data availability and relevance. Be specific and detailed rather than generic - this analysis will be used in a professional report.`;
 
     // Call Google Gemini API with model fallback chain for resilience to overload
     const requestBody = JSON.stringify({
@@ -83,6 +181,31 @@ Consider satellite data availability and relevance.`;
         temperature: 0.6,
         maxOutputTokens: 2000,
         responseMimeType: "application/json",
+        // Forces findings/recommendations to actually be plain strings rather
+        // than leaving the shape to the prose instructions above, which Gemini
+        // doesn't always follow consistently (see cleanTextArray for why).
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            interpretation: { type: "STRING" },
+            findings: { type: "ARRAY", items: { type: "STRING" } },
+            locations: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  name: { type: "STRING" },
+                  lat: { type: "NUMBER" },
+                  lng: { type: "NUMBER" },
+                },
+                required: ["name", "lat", "lng"],
+              },
+            },
+            confidenceLevel: { type: "NUMBER" },
+            recommendations: { type: "ARRAY", items: { type: "STRING" } },
+          },
+          required: ["interpretation", "findings", "locations", "confidenceLevel", "recommendations"],
+        },
       },
     });
 
@@ -150,13 +273,16 @@ Consider satellite data availability and relevance.`;
       };
     }
 
+    const rawLocations = Array.isArray(structuredResult.locations) ? structuredResult.locations : [];
+    const locations = await resolveLocations(rawLocations);
+
     const result = {
       query,
       interpretation: structuredResult.interpretation || interpretation,
-      findings: structuredResult.findings || [],
-      locations: structuredResult.locations || [],
+      findings: cleanTextArray(structuredResult.findings),
+      locations,
       confidenceLevel: structuredResult.confidenceLevel || 85,
-      recommendations: structuredResult.recommendations || [],
+      recommendations: cleanTextArray(structuredResult.recommendations),
       timestamp: new Date().toISOString(),
     };
 

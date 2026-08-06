@@ -122,7 +122,7 @@ serve(async (req) => {
       throw new Error("GEMINI_API_KEY not configured");
     }
 
-    console.log(`Analyzing ${files.length} files with report type: ${reportType} for user ${user.id}`);
+    console.log(`Analyzing ${files.length} files with report type: ${reportType} for user ${user?.id || 'anonymous'}`);
 
     // Prepare file descriptions for AI
     const fileDescriptions = files.map((f) => ({
@@ -288,6 +288,17 @@ Please provide a comprehensive ${isSimple ? 'simple, easy-to-understand' : 'prof
       filesAnalyzed: fileDescriptions,
       reportType,
       timestamp: new Date().toISOString(),
+      // Computed here rather than trusting the model's own self-reported
+      // "dataSources" - images are genuinely seen by Gemini's vision input,
+      // but non-image files are only sampled as 500 chars of text and the
+      // model is explicitly instructed to generalize from typical patterns,
+      // not to have actually read/parsed the file's real content.
+      dataProvenance: {
+        analysisMethod: imageFiles.length > 0 ? "ai_vision_analysis" : "ai_pattern_estimation",
+        disclaimer: imageFiles.length > 0
+          ? "Image files in this batch were directly viewed by the AI model. Any non-image files included were not read in detail - see below."
+          : "No image was uploaded, so the AI did not read this file's actual content in detail - it generated a plausible analysis based on typical patterns for this file type and a short text sample only. Treat these findings as illustrative, not a real analysis of your data.",
+      },
     };
 
     // Store in database if authenticated user

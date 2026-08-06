@@ -135,9 +135,9 @@ async function fetchSentinelHubImage(evalscriptKey: string, lat: number, lng: nu
   const half = 0.05; // ~11km-wide chip around the point
   const bbox = [lng - half, lat - half, lng + half, lat + half];
   const now = new Date();
-  // Wide window (6 months) so there are enough candidate scenes for
-  // leastCC mosaicking to actually find clear pixels; per-pixel SCL masking
-  // in the evalscript handles whatever cloud remains in the chosen scenes.
+  // Wide window (6 months) so there's a scene available even in persistently
+  // cloudy regions; per-pixel SCL masking in the evalscript makes whatever
+  // cloud remains transparent rather than rendering it as false ground data.
   const from = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
 
   let response: Response;
@@ -152,8 +152,17 @@ async function fetchSentinelHubImage(evalscriptKey: string, lat: number, lng: nu
             type: "sentinel-2-l2a",
             dataFilter: {
               timeRange: { from: from.toISOString(), to: now.toISOString() },
-              mosaickingOrder: "leastCC",
-              maxCloudCoverage: 70,
+              // "leastCC" composites per-pixel from whichever scene is least
+              // cloudy at that exact pixel, which can silently stitch together
+              // two different orbit passes/dates within the AOI - visible as a
+              // seam (often diagonal, matching Sentinel-2's swath edges) with a
+              // visible tone/color mismatch across it. "mostRecent" instead
+              // prefers one temporally-coherent scene for the whole AOI, only
+              // reaching for an older scene where the newest has literally no
+              // data - combined with SCL cloud masking below, this avoids the
+              // seam without bringing back visible cloud cover.
+              mosaickingOrder: "mostRecent",
+              maxCloudCoverage: 20,
             },
           }],
         },

@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Search, Sparkles, Loader2, MousePointer, Upload } from "lucide-react";
+import { Search, Sparkles, Loader2, MousePointer, Upload, MapPin } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { parseAfricanQuery } from "@/utils/africanGeocoding";
@@ -87,7 +87,7 @@ const generateLocalSearchInterpretation = (
     interpretation,
     findings,
     locations: [
-      { name: loc.name, lat: loc.lat, lng: loc.lng }
+      { name: loc.name, lat: loc.lat, lng: loc.lng, verified: !!selectedLoc || parsed.location.type !== "custom" }
     ],
     confidenceLevel: 93,
     recommendations,
@@ -108,7 +108,7 @@ const GeoSearch = () => {
   // The coordinates actually resolved for this search (AI locations -> picked location -> local
   // parser fallback), same chain used for the map marker. Reports need this explicitly since
   // analysisData.locations can be empty when the AI doesn't return structured locations.
-  const [reportLocation, setReportLocation] = useState<{ lat: number; lng: number; name: string } | null>(null);
+  const [reportLocation, setReportLocation] = useState<{ lat: number; lng: number; name: string; verified: boolean } | null>(null);
   const mapRef = useRef<MapLibreMapHandle>(null);
   const [activeTab, setActiveTab] = useState("search");
   const [is3DEnabled, setIs3DEnabled] = useState(false);
@@ -183,9 +183,15 @@ const GeoSearch = () => {
       setResults(data);
       
       const parsedLoc = parseAfricanQuery(query);
-      const locList = data.locations && data.locations.length > 0 
-        ? data.locations 
-        : [selectedLocation || { name: parsedLoc.location.name, lat: parsedLoc.location.lat, lng: parsedLoc.location.lng }];
+      // Locations with no usable coordinates (geocoding found nothing real,
+      // and the model gave no usable fallback either) don't count as "found" -
+      // fall through to a location we actually have coordinates for.
+      const locatableResults = Array.isArray(data.locations)
+        ? data.locations.filter((l: any) => Number.isFinite(l?.lat) && Number.isFinite(l?.lng))
+        : [];
+      const locList = locatableResults.length > 0
+        ? locatableResults
+        : [selectedLocation || { name: parsedLoc.location.name, lat: parsedLoc.location.lat, lng: parsedLoc.location.lng, verified: parsedLoc.location.type !== "custom" }];
 
       if (locList.length > 0) {
         const firstLocation = locList[0];
@@ -201,7 +207,12 @@ const GeoSearch = () => {
         if (firstLocation.lat && firstLocation.lng) {
           setMapCenter([firstLocation.lat, firstLocation.lng]);
           setMapZoom(10);
-          setReportLocation({ lat: firstLocation.lat, lng: firstLocation.lng, name: firstLocation.name || parsedLoc.location.name });
+          setReportLocation({
+            lat: firstLocation.lat,
+            lng: firstLocation.lng,
+            name: firstLocation.name || parsedLoc.location.name,
+            verified: firstLocation.verified !== false,
+          });
         }
         
         // Create boundary polygon if location coordinates exist
@@ -235,7 +246,7 @@ const GeoSearch = () => {
         label: targetLoc.name,
         color: "#0891b2"
       }]);
-      setReportLocation({ lat: targetLoc.lat, lng: targetLoc.lng, name: targetLoc.name });
+      setReportLocation({ lat: targetLoc.lat, lng: targetLoc.lng, name: targetLoc.name, verified: targetLoc.verified !== false });
       
       const boundarySize = 0.15;
       setMapPolygons([{
@@ -424,16 +435,32 @@ const GeoSearch = () => {
                   <p className="text-sm text-muted-foreground">{results.interpretation}</p>
                 </div>
 
+                {reportLocation && (
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <MapPin className="h-3 w-3 text-muted-foreground" />
+                    <span className="text-muted-foreground">{reportLocation.name}</span>
+                    {reportLocation.verified ? (
+                      <span className="px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-medium">
+                        Verified location (OpenStreetMap)
+                      </span>
+                    ) : (
+                      <span className="px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 font-medium">
+                        Estimated location - not geocoder-verified
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between">
                   <p className="font-medium text-sm">Findings</p>
                   <span className="text-xs px-2 py-1 rounded-full bg-secondary/20 text-secondary font-medium">
                     {results.confidenceLevel}% confidence
                   </span>
                 </div>
-                
+
                 <div className="space-y-2">
                   {results.findings && results.findings.length > 0 ? (
-                    results.findings.slice(0, 5).map((finding: any, index: number) => (
+                    results.findings.map((finding: any, index: number) => (
                       <div key={index} className="flex items-start gap-2">
                         <div className="h-2 w-2 rounded-full bg-primary mt-1.5 flex-shrink-0" />
                         <p className="text-sm">
@@ -450,7 +477,7 @@ const GeoSearch = () => {
                   <div>
                     <p className="text-sm font-medium mb-2">Recommendations:</p>
                     <div className="space-y-1">
-                      {results.recommendations.slice(0, 3).map((rec: any, index: number) => (
+                      {results.recommendations.map((rec: any, index: number) => (
                         <p key={index} className="text-sm text-muted-foreground">
                           • {typeof rec === 'string' ? rec : rec.detail || JSON.stringify(rec)}
                         </p>

@@ -952,6 +952,20 @@ const GeoWitness = () => {
                   </div>
                 )}
 
+                {results.recommendations && results.recommendations.length > 0 && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-2 font-medium">Recommendations</p>
+                    <div className="space-y-2">
+                      {results.recommendations.map((rec: any, idx: number) => (
+                        <div key={idx} className="flex items-start gap-2 text-sm">
+                          <span className="h-2 w-2 rounded-full bg-primary mt-1.5 flex-shrink-0" />
+                          <p>{typeof rec === "string" ? rec : rec.detail || rec.action || JSON.stringify(rec)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex flex-wrap gap-2">
                   <ReportGenerator
                     analysisData={results}
