@@ -26,29 +26,35 @@ function determineSeverity(value: number, threshold: number, hazardType: string)
 }
 
 async function getAIAnalysis(hazardType: string, metricName: string, metricValue: number, thresholdValue: number, regionName: string) {
-  const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-  if (!GEMINI_API_KEY) return null;
+  const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY");
+  if (!GROQ_API_KEY) return null;
 
   try {
     const systemText = "You are a disaster risk analyst specializing in African environmental hazards. Provide concise, actionable risk assessments in 2-3 sentences.";
     const userText = `A ${hazardType} hazard threshold has been triggered in ${regionName}. The ${metricName} reading is ${metricValue} (threshold: ${thresholdValue}). Provide a brief risk assessment and recommended actions.`;
+    const model = "llama-3.3-70b-versatile";
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-    const response = await fetch(url, {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${GROQ_API_KEY}`,
+      },
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemText }] },
-        contents: [{ role: "user", parts: [{ text: userText }] }],
+        model,
+        messages: [
+          { role: "system", content: systemText },
+          { role: "user", content: userText },
+        ],
       }),
     });
 
     if (!response.ok) return null;
     const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || null;
+    const text = data?.choices?.[0]?.message?.content || null;
     return {
       assessment: text,
-      model: "gemini-2.5-flash",
+      model,
       generated_at: new Date().toISOString(),
     };
   } catch {

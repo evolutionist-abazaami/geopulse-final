@@ -66,7 +66,7 @@ function validateEventTypes(value: unknown): string[] {
   }).filter(v => v.length > 0).slice(0, 5);
 }
 
-// Without a strict responseSchema for this array, Gemini occasionally wraps
+// Without a strict schema for this array, the model occasionally wraps
 // each recommendation in its own tiny JSON object (e.g. the literal string
 // '{"recommendation":"..."}' instead of just the sentence), which then
 // renders as raw JSON text in the UI/report instead of the recommendation
@@ -319,7 +319,7 @@ function buildFallbackAnalysis(params: {
 // === Real spectral statistics via Sentinel Hub (Copernicus Data Space) ===
 // The imagery panels (generate-visualization) already fetch real Sentinel-2
 // pixels for the pictures; this does the same for the *numbers* - NDVI/NDWI/
-// NBR means and a real before/after change figure - instead of asking Gemini
+// NBR means and a real before/after change figure - instead of asking the AI
 // to estimate them. Same credentials, a different Sentinel Hub API
 // (Statistics instead of Process) that aggregates real pixel values over an
 // area/time range rather than rendering an image.
@@ -516,12 +516,12 @@ serve(async (req) => {
       throw new Error('endDate must be after startDate');
     }
     
-    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
+    const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY");
     const GOOGLE_EARTH_ENGINE_KEY = Deno.env.get("GOOGLE_EARTH_ENGINE_API_KEY");
     const earthEngineContext = await getEarthEngineContext(Deno.env.toObject());
-    
-    if (!GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY not configured");
+
+    if (!GROQ_API_KEY) {
+      throw new Error("GROQ_API_KEY not configured");
     }
 
     const isMultiEvent = eventTypes.length > 1;
@@ -535,7 +535,7 @@ serve(async (req) => {
     // (capped so "after" never reaches into the future, since satellite data
     // obviously doesn't exist yet for dates ahead of today) and fetch real
     // NDVI/NDWI/NBR means for each, so change_percent below can be a real
-    // measured difference instead of a Gemini guess.
+    // measured difference instead of an AI guess.
     let realStats: { before: SpectralStatsResult; after: SpectralStatsResult } | null = null;
     let realChangePercent: number | null = null;
     let realTemporalBreakdown: { label: string; changePercent: number; months: number }[] | null = null;
@@ -573,7 +573,7 @@ serve(async (req) => {
             console.log(`Real Sentinel-2 stats: NDVI ${beforeStats.ndvi.mean.toFixed(3)} -> ${afterStats.ndvi.mean.toFixed(3)} (${realChangePercent.toFixed(1)}% change)`);
 
             // Real temporal breakdown: the "progress over time" chart used to
-            // be entirely Gemini invention between our two real endpoints
+            // be entirely AI invention between our two real endpoints
             // (Sentinel Hub only ever gave us before/after, never quarterly
             // points). Sample 1-2 real interior windows in the gap between
             // the before/after windows so the intermediate points are
@@ -619,7 +619,7 @@ serve(async (req) => {
             }));
 
             // Real least-squares linear regression over the measured points,
-            // replacing Gemini's invented 6/12-month projection with an
+            // replacing the AI's invented 6/12-month projection with an
             // actual trend fit to genuine measurements. Confidence is a real
             // R^2, not a plausible-looking made-up number.
             const n = points.length;
@@ -651,7 +651,7 @@ serve(async (req) => {
 
     // Real bbox area (deterministic geometry, not AI) for the ~11km chip
     // statistics were actually computed over - computed here (not just in
-    // the result below) so it can also be told to Gemini, keeping its
+    // the result below) so it can also be told to the AI, keeping its
     // narrative text consistent with the structured "area" field instead of
     // the model guessing its own, different number.
     let realAreaKm2: number | null = null;
@@ -870,33 +870,34 @@ SENTINEL-2 DATA REQUIREMENTS:
 
 ${earthEngineContext.available ? `Access imagery via Google Earth Engine using authenticated service account access for project ${earthEngineContext.projectId}.` : `Google Earth Engine is unavailable for this request: ${earthEngineContext.message}`}`;
 
-    const requestBody = JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-      generationConfig: {
-        temperature: 0.7,
-        // 4000 was already marginal for this schema (classification_results
-        // alone can carry 20 classes x 6-band signatures) and the added
-        // temporal_breakdown field pushed some responses over the limit,
-        // truncating the JSON mid-object and silently losing change_percent/
-        // temporal_breakdown to the regex-based fallback parser below.
-        maxOutputTokens: 8000,
-        responseMimeType: "application/json",
-      },
-    });
+    const requestParams = {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.7,
+      // 4000 was already marginal for this schema (classification_results
+      // alone can carry 20 classes x 6-band signatures) and the added
+      // temporal_breakdown field pushed some responses over the limit,
+      // truncating the JSON mid-object and silently losing change_percent/
+      // temporal_breakdown to the regex-based fallback parser below.
+      max_tokens: 8000,
+      response_format: { type: "json_object" },
+    };
 
     // Model fallback chain - if one is overloaded, try the next.
     // Ordered from most capable to most available.
     const modelChain = [
-      "gemini-2.5-flash",
-      "gemini-2.5-flash-lite",
-      "gemini-2.0-flash",
-      "gemini-2.0-flash-lite",
+      "llama-3.3-70b-versatile",
+      "openai/gpt-oss-120b",
+      "openai/gpt-oss-20b",
+      "llama-3.1-8b-instant",
     ];
 
     let aiResponse: Response | null = null;
     let lastErrorText = "";
     let lastStatus = 0;
+    let successModel = "";
     const attemptsPerModel = 2;
     // 4 models x 2 attempts, each a real network round-trip to an overloaded
     // API, can otherwise compound to 40-90s on a degraded/rate-limited key -
@@ -910,20 +911,22 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
 
     outer: for (const model of modelChain) {
       if (Date.now() > retryDeadline) {
-        console.warn("Gemini retry time budget exceeded, stopping early.");
+        console.warn("Groq retry time budget exceeded, stopping early.");
         break outer;
       }
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
       for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
         if (Date.now() > retryDeadline) break outer;
         const perRequestTimeoutMs = Math.min(8000, Math.max(2000, retryDeadline - Date.now()));
         const requestController = new AbortController();
         const requestTimeoutId = setTimeout(() => requestController.abort(), perRequestTimeoutMs);
         try {
-          aiResponse = await fetch(url, {
+          aiResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: requestBody,
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${GROQ_API_KEY}`,
+            },
+            body: JSON.stringify({ model, ...requestParams }),
             signal: requestController.signal,
           });
         } catch (e) {
@@ -937,6 +940,7 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
         }
         if (aiResponse.ok) {
           console.log(`AI success on model ${model} (attempt ${attempt})`);
+          successModel = model;
           break outer;
         }
         lastErrorText = await aiResponse.text();
@@ -965,7 +969,7 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
           classificationType,
           enableChangeDetection,
           providerStatus: status,
-          providerMessage: lastErrorText || "Google Gemini is temporarily overloaded. Please try again in a minute.",
+          providerMessage: lastErrorText || "Groq is temporarily overloaded. Please try again in a minute.",
         });
 
         return new Response(
@@ -975,7 +979,7 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
       }
       if (status === 429) {
         return new Response(
-          JSON.stringify({ error: "Gemini API rate limit reached. Please wait a moment and try again." }),
+          JSON.stringify({ error: "Groq API rate limit reached. Please wait a moment and try again." }),
           { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
@@ -983,10 +987,10 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
     }
 
     const aiData = await aiResponse.json();
-    if (aiData.candidates?.[0]?.finishReason === "MAX_TOKENS") {
-      console.warn("Gemini response was truncated by maxOutputTokens - JSON parse will likely fail and fall back to the regex extractor.");
+    if (aiData.choices?.[0]?.finish_reason === "length") {
+      console.warn("Groq response was truncated by max_tokens - JSON parse will likely fail and fall back to the regex extractor.");
     }
-    let analysis = aiData.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
+    let analysis = aiData.choices?.[0]?.message?.content || '';
     analysis = analysis.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
 
     let parsedAnalysis;
@@ -1013,9 +1017,9 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
       };
     }
 
-    // Real data, where fetched above, wins over whatever Gemini produced -
+    // Real data, where fetched above, wins over whatever the AI produced -
     // this guarantees the "real" claim in dataProvenance is actually true
-    // every time real stats succeeded, rather than merely "true if Gemini
+    // every time real stats succeeded, rather than merely "true if the AI
     // happened to follow the prompt's instruction to use them."
     const usedRealStats = !!realStats;
     const finalChangePercent = usedRealStats ? realChangePercent! : (parsedAnalysis.change_percent || 0);
@@ -1050,11 +1054,11 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
       severity: parsedAnalysis.severity || "medium",
       recommendations: cleanTextArray(parsedAnalysis.recommendations),
       // Not taken from the model's own self-reported "data_sources" field -
-      // Gemini has no actual way to know what it "used". This is computed
+      // the model has no actual way to know what it "used". This is computed
       // by this function based on what was actually fetched, not phrased.
       dataSources: usedRealStats
-        ? ["Sentinel-2 L2A (Copernicus Data Space Ecosystem) - real NDVI/NDWI/NBR statistics", "Google Gemini 2.5 (AI-generated narrative analysis)"]
-        : ["Google Gemini 2.5 (AI-estimated, not measured imagery)"],
+        ? ["Sentinel-2 L2A (Copernicus Data Space Ecosystem) - real NDVI/NDWI/NBR statistics", `Groq AI (${successModel}, AI-generated narrative analysis)`]
+        : [`Groq AI (${successModel}, AI-estimated, not measured imagery)`],
       // Enhanced quality metrics
       cloudCoverage: usedRealStats
         ? { percentage: Math.round((1 - realStats!.after.validPixelRatio) * 100), detection_accuracy: null, impact: realStats!.after.validPixelRatio > 0.7 ? "minimal" : "moderate", affected_areas: "Computed from real Sentinel-2 Scene Classification Layer masking", qa_band_quality: "measured" }
@@ -1075,7 +1079,7 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
       // Multi-event results
       multiEventAnalysis: parsedAnalysis.multi_event_analysis || null,
       // Predictive modeling - real regression numbers (when available) win
-      // for the quantitative fields; trend_direction stays Gemini's call
+      // for the quantitative fields; trend_direction stays the model's call
       // since "improving vs declining" is a judgment about this specific
       // event type, not something the regression slope alone can determine.
       predictiveModeling: realPredictiveModeling
@@ -1088,7 +1092,7 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
       dataProvenance: {
         analysisMethod: usedRealStats ? "real_sentinel_statistics" : "ai_estimated",
         disclaimer: usedRealStats
-          ? `The change percentage and spectral index values (NDVI${realSpectralIndices.ndwi ? '/NDWI' : ''}${realSpectralIndices.nbr ? '/NBR' : ''}) above are real measurements computed from actual Sentinel-2 satellite pixels (Copernicus Data Space Ecosystem), comparing the start and end of the study period over an ~11km area around the given coordinates (${(realStats!.after.validPixelRatio * 100).toFixed(0)}% cloud-free pixel coverage). The narrative summary, severity assessment, recommendations, and any classification/change-matrix breakdown are still AI-generated (Google Gemini) interpretation grounded in these real numbers, not independently measured themselves.`
+          ? `The change percentage and spectral index values (NDVI${realSpectralIndices.ndwi ? '/NDWI' : ''}${realSpectralIndices.nbr ? '/NBR' : ''}) above are real measurements computed from actual Sentinel-2 satellite pixels (Copernicus Data Space Ecosystem), comparing the start and end of the study period over an ~11km area around the given coordinates (${(realStats!.after.validPixelRatio * 100).toFixed(0)}% cloud-free pixel coverage). The narrative summary, severity assessment, recommendations, and any classification/change-matrix breakdown are still AI-generated (${successModel} via Groq) interpretation grounded in these real numbers, not independently measured themselves.`
           : "Spectral index values, percentages, and classification statistics in this analysis are AI-generated plausible estimates based on the model's training knowledge of typical environmental patterns for this region/event type - they are not measurements derived from actual satellite pixel data. No real satellite imagery was fetched or processed for this specific analysis.",
         earthEngine: {
           configured: earthEngineContext.available,

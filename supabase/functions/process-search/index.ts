@@ -17,7 +17,7 @@ function validateQuery(value: unknown): string {
   return value.trim();
 }
 
-// Without a strict responseSchema, Gemini sometimes wraps each array item in
+// Without a strict schema, the model sometimes wraps each array item in
 // its own tiny JSON object (e.g. a "findings" entry coming back as the
 // literal string '{"finding":"..."}' instead of just the sentence) - the
 // frontend then renders that raw JSON text as if it were the finding itself.
@@ -60,7 +60,7 @@ interface GeocodedLocation {
   source: "nominatim" | "ai_estimate";
 }
 
-// Gemini identifies *which* places a query is about; real coordinates come
+// The AI model identifies *which* places a query is about; real coordinates come
 // from Nominatim (OpenStreetMap) so the map/report never plots a place at
 // coordinates the model invented. Sequential with a short gap between calls
 // per Nominatim's usage policy (max ~1 request/second, no concurrent bursts).
@@ -144,10 +144,10 @@ serve(async (req) => {
     const body = await req.json();
     const query = validateQuery(body.query);
     
-    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-    
-    if (!GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY not configured");
+    const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY");
+
+    if (!GROQ_API_KEY) {
+      throw new Error("GROQ_API_KEY not configured");
     }
 
     console.log(`Processing search query for user ${user?.id || 'anonymous'}: ${query.substring(0, 100)}...`);
@@ -161,55 +161,32 @@ Your role is to:
 4. Suggest monitoring strategies and data sources
 5. Assess confidence levels based on data availability
 
-Format responses as structured JSON with:
-- interpretation: Clear explanation of what the user is looking for (2-4 sentences)
-- findings: Array of 3-5 specific, detailed insights (each 1-2 full sentences with concrete detail - not a one-line label). Ground each in the location's known environmental context (e.g. named rivers, land cover types, seasonal patterns) rather than generic statements.
-- locations: Array of location objects with {name: string, lat: number, lng: number} - name should be a real, geocodable place (e.g. "Accra, Ghana", not a vague description). lat/lng are your best estimate only; they are a fallback, not the primary source of truth, since coordinates are re-verified against a real geocoding service after your response.
-- confidenceLevel: 1-100 scale, reflecting how well the query maps to a real, locatable place and known environmental patterns
-- recommendations: Array of 3-5 specific, actionable next steps (each naming a concrete action, responsible actor, or monitoring approach - not generic advice like "monitor the situation")`;
+Respond with ONLY a valid JSON object (no markdown fences, no commentary) matching exactly this shape:
+{
+  "interpretation": string - Clear explanation of what the user is looking for (2-4 sentences),
+  "findings": string[] - Array of 3-5 specific, detailed insights (each 1-2 full sentences with concrete detail - not a one-line label). Ground each in the location's known environmental context (e.g. named rivers, land cover types, seasonal patterns) rather than generic statements. Each item MUST be a plain string, not a nested object.,
+  "locations": Array of {"name": string, "lat": number, "lng": number} - name should be a real, geocodable place (e.g. "Accra, Ghana", not a vague description). lat/lng are your best estimate only; they are a fallback, not the primary source of truth, since coordinates are re-verified against a real geocoding service after your response.,
+  "confidenceLevel": number - 1-100 scale, reflecting how well the query maps to a real, locatable place and known environmental patterns,
+  "recommendations": string[] - Array of 3-5 specific, actionable next steps (each naming a concrete action, responsible actor, or monitoring approach - not generic advice like "monitor the situation"). Each item MUST be a plain string, not a nested object.
+}`;
 
     const userPrompt = `Interpret this environmental search query: "${query}"
 
 Provide insights about environmental changes in African regions, including deforestation, flooding, drought, urbanization, or climate impacts.
 Consider satellite data availability and relevance. Be specific and detailed rather than generic - this analysis will be used in a professional report.`;
 
-    // Call Google Gemini API with model fallback chain for resilience to overload
-    const requestBody = JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-      generationConfig: {
-        temperature: 0.6,
-        maxOutputTokens: 2000,
-        responseMimeType: "application/json",
-        // Forces findings/recommendations to actually be plain strings rather
-        // than leaving the shape to the prose instructions above, which Gemini
-        // doesn't always follow consistently (see cleanTextArray for why).
-        responseSchema: {
-          type: "OBJECT",
-          properties: {
-            interpretation: { type: "STRING" },
-            findings: { type: "ARRAY", items: { type: "STRING" } },
-            locations: {
-              type: "ARRAY",
-              items: {
-                type: "OBJECT",
-                properties: {
-                  name: { type: "STRING" },
-                  lat: { type: "NUMBER" },
-                  lng: { type: "NUMBER" },
-                },
-                required: ["name", "lat", "lng"],
-              },
-            },
-            confidenceLevel: { type: "NUMBER" },
-            recommendations: { type: "ARRAY", items: { type: "STRING" } },
-          },
-          required: ["interpretation", "findings", "locations", "confidenceLevel", "recommendations"],
-        },
-      },
-    });
+    // Call Groq's chat completions API with a model fallback chain for resilience to overload
+    const requestParams = {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.6,
+      max_tokens: 2000,
+      response_format: { type: "json_object" },
+    };
 
-    const modelChain = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite"];
+    const modelChain = ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"];
     let aiResponse: Response | null = null;
     const attemptsPerModel = 2;
     // Bounds worst-case latency - 4 models x 2 attempts against a degraded/
@@ -219,10 +196,9 @@ Consider satellite data availability and relevance. Be specific and detailed rat
 
     outer: for (const model of modelChain) {
       if (Date.now() > retryDeadline) {
-        console.warn("Gemini retry time budget exceeded, stopping early.");
+        console.warn("Groq retry time budget exceeded, stopping early.");
         break outer;
       }
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
       for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
         if (Date.now() > retryDeadline) break outer;
         // Each attempt also gets its own timeout - the overall deadline only
@@ -232,10 +208,13 @@ Consider satellite data availability and relevance. Be specific and detailed rat
         const requestController = new AbortController();
         const requestTimeoutId = setTimeout(() => requestController.abort(), perRequestTimeoutMs);
         try {
-          aiResponse = await fetch(url, {
+          aiResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: requestBody,
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${GROQ_API_KEY}`,
+            },
+            body: JSON.stringify({ model, ...requestParams }),
             signal: requestController.signal,
           });
         } catch (e) {
@@ -263,13 +242,13 @@ Consider satellite data availability and relevance. Be specific and detailed rat
       const status = aiResponse?.status || 500;
       if (status === 503) {
         return new Response(
-          JSON.stringify({ error: "Google Gemini is temporarily overloaded. Please try again in a minute." }),
+          JSON.stringify({ error: "Groq is temporarily overloaded. Please try again in a minute." }),
           { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
       if (status === 429) {
         return new Response(
-          JSON.stringify({ error: "Gemini API rate limit reached. Please wait a moment and try again." }),
+          JSON.stringify({ error: "Groq API rate limit reached. Please wait a moment and try again." }),
           { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
@@ -277,7 +256,7 @@ Consider satellite data availability and relevance. Be specific and detailed rat
     }
 
     const aiData = await aiResponse.json();
-    let interpretation = aiData.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
+    let interpretation = aiData.choices?.[0]?.message?.content || '';
 
     // Strip markdown code blocks if present
     interpretation = interpretation.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
