@@ -212,15 +212,39 @@ Consider satellite data availability and relevance. Be specific and detailed rat
     const modelChain = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite"];
     let aiResponse: Response | null = null;
     const attemptsPerModel = 2;
+    // Bounds worst-case latency - 4 models x 2 attempts against a degraded/
+    // rate-limited key can otherwise compound to 40-90s of real network
+    // round-trips, long enough that a waiting user assumes the app is broken.
+    const retryDeadline = Date.now() + 18000;
 
     outer: for (const model of modelChain) {
+      if (Date.now() > retryDeadline) {
+        console.warn("Gemini retry time budget exceeded, stopping early.");
+        break outer;
+      }
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
       for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
-        aiResponse = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: requestBody,
-        });
+        if (Date.now() > retryDeadline) break outer;
+        // Each attempt also gets its own timeout - the overall deadline only
+        // gates whether a NEW attempt starts, so a single slow in-flight
+        // request could otherwise still run long past it.
+        const perRequestTimeoutMs = Math.min(8000, Math.max(2000, retryDeadline - Date.now()));
+        const requestController = new AbortController();
+        const requestTimeoutId = setTimeout(() => requestController.abort(), perRequestTimeoutMs);
+        try {
+          aiResponse = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: requestBody,
+            signal: requestController.signal,
+          });
+        } catch (e) {
+          console.error(`AI request to ${model} timed out or failed (attempt ${attempt}):`, e instanceof Error ? e.message : e);
+          aiResponse = null;
+          continue;
+        } finally {
+          clearTimeout(requestTimeoutId);
+        }
         if (aiResponse.ok) {
           console.log(`AI success on model ${model}`);
           break outer;
@@ -229,7 +253,7 @@ Consider satellite data availability and relevance. Be specific and detailed rat
         console.error(`AI API error on ${model} (attempt ${attempt}):`, aiResponse.status, errText.slice(0, 200));
         const isRetryable = aiResponse.status === 503 || aiResponse.status === 429 || aiResponse.status === 500;
         if (!isRetryable) break outer;
-        if (attempt < attemptsPerModel) {
+        if (attempt < attemptsPerModel && Date.now() < retryDeadline) {
           await new Promise((r) => setTimeout(r, 800 * attempt + Math.random() * 400));
         }
       }

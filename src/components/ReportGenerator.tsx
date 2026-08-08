@@ -9,6 +9,8 @@ import { Download, FileText, Loader2, Image, Check, Shield, AlertTriangle, Trend
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import jsPDF from "jspdf";
+import maplibregl from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
 
 interface ReportGeneratorProps {
   analysisData: any;
@@ -18,6 +20,13 @@ interface ReportGeneratorProps {
   lng?: number;
   /** Captures the real, currently-displayed interactive map (OSM tiles + study-area polygon) as a PNG data URL. */
   onCaptureMap?: () => Promise<string | null> | string | null;
+}
+
+/** Real per-cell NDVI from generate-visualization's risk_zones grid endpoint. */
+interface RiskGridData {
+  rows: number;
+  cols: number;
+  cells: (number | null)[];
 }
 
 /**
@@ -115,6 +124,341 @@ const renderTrendChartPng = (periods: { label: string; value: number }[]): strin
   return canvas.toDataURL("image/png");
 };
 
+/**
+ * Ecosystem Health dashboard drawn from this report's own real Sentinel-2
+ * spectral index measurements, instead of asking an AI model to illustrate
+ * a dashboard. Deterministic, free, always available.
+ */
+const renderEcosystemHealthPng = (
+  indices: { ndvi?: { mean?: number }; ndwi?: { mean?: number }; nbr?: { mean?: number } } | undefined,
+  changePercent: number
+): string => {
+  const width = 900;
+  const height = 420;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  const overallScore = Math.max(0, Math.min(100, 100 - Math.abs(changePercent)));
+
+  const gauges: { label: string; value: number | undefined; min: number; max: number; format: (v: number) => string; color: string }[] = [
+    { label: "NDVI (Vegetation)", value: indices?.ndvi?.mean, min: -1, max: 1, format: (v) => v.toFixed(3), color: "#16a34a" },
+    { label: "NDWI (Water)", value: indices?.ndwi?.mean, min: -1, max: 1, format: (v) => v.toFixed(3), color: "#0891b2" },
+    { label: "NBR (Burn / Vegetation)", value: indices?.nbr?.mean, min: -1, max: 1, format: (v) => v.toFixed(3), color: "#ea580c" },
+    { label: "Overall Ecosystem Score", value: overallScore, min: 0, max: 100, format: (v) => `${v.toFixed(0)}/100`, color: overallScore > 70 ? "#16a34a" : overallScore > 40 ? "#eab308" : "#dc2626" },
+  ];
+
+  const padding = 40;
+  const gaugeGap = 30;
+  let y = padding + 20;
+
+  ctx.fillStyle = "#111827";
+  ctx.font = "bold 24px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText("Ecosystem Health Dashboard", padding, y);
+  y += 26;
+  ctx.font = "14px Arial";
+  ctx.fillStyle = "#6b7280";
+  ctx.fillText("Real Sentinel-2 spectral index measurements for this study area", padding, y);
+  y += 34;
+
+  gauges.forEach((g) => {
+    const hasValue = typeof g.value === "number" && !isNaN(g.value);
+    ctx.fillStyle = "#374151";
+    ctx.font = "bold 16px Arial";
+    ctx.textAlign = "left";
+    ctx.fillText(g.label, padding, y);
+    ctx.textAlign = "right";
+    ctx.fillText(hasValue ? g.format(g.value as number) : "No data", width - padding, y);
+    y += 12;
+
+    const barWidth = width - padding * 2;
+    const barHeight = 18;
+    ctx.fillStyle = "#e5e7eb";
+    ctx.fillRect(padding, y, barWidth, barHeight);
+
+    if (hasValue) {
+      const frac = Math.max(0, Math.min(1, ((g.value as number) - g.min) / (g.max - g.min)));
+      ctx.fillStyle = g.color;
+      ctx.fillRect(padding, y, barWidth * frac, barHeight);
+    }
+    ctx.strokeStyle = "#9ca3af";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padding, y, barWidth, barHeight);
+
+    y += barHeight + gaugeGap;
+  });
+
+  return canvas.toDataURL("image/png");
+};
+
+/**
+ * Risk zone heatmap drawn from real per-cell NDVI measurements returned by
+ * generate-visualization's risk_zones grid endpoint - a genuine spatial
+ * measurement, not an AI illustration of one.
+ */
+const renderRiskZonesHeatmapPng = (grid: RiskGridData): string => {
+  const width = 900;
+  const height = 580;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.fillStyle = "#111827";
+  ctx.font = "bold 24px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText("Risk Zone Map", 40, 40);
+  ctx.font = "14px Arial";
+  ctx.fillStyle = "#6b7280";
+  ctx.fillText(`Real ${grid.rows}x${grid.cols} gridded Sentinel-2 NDVI - lower vegetation vigor shown in warmer colors`, 40, 62);
+
+  const gridTop = 90;
+  const gridSize = 420;
+  const gridLeft = (width - gridSize) / 2;
+  const cellW = gridSize / grid.cols;
+  const cellH = gridSize / grid.rows;
+
+  const validValues = grid.cells.filter((v): v is number => v !== null);
+  const minV = validValues.length ? Math.min(...validValues) : 0;
+  const maxV = validValues.length ? Math.max(...validValues) : 1;
+  const range = maxV - minV || 1;
+
+  const colorFor = (v: number) => {
+    const frac = Math.max(0, Math.min(1, (v - minV) / range));
+    const r = Math.round(220 - frac * 180);
+    const g = Math.round(60 + frac * 140);
+    return `rgb(${r},${g},60)`;
+  };
+
+  grid.cells.forEach((value, i) => {
+    const row = Math.floor(i / grid.cols);
+    const col = i % grid.cols;
+    const x = gridLeft + col * cellW;
+    const y = gridTop + row * cellH;
+
+    ctx.fillStyle = value === null ? "#e5e7eb" : colorFor(value);
+    ctx.fillRect(x, y, cellW - 2, cellH - 2);
+
+    ctx.fillStyle = value === null ? "#9ca3af" : "#ffffff";
+    ctx.font = "bold 14px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText(value === null ? "N/A" : value.toFixed(2), x + cellW / 2, y + cellH / 2 + 5);
+  });
+
+  ctx.strokeStyle = "#374151";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(gridLeft, gridTop, gridSize, gridSize);
+
+  const legendY = gridTop + gridSize + 40;
+  const legendWidth = 300;
+  const legendLeft = (width - legendWidth) / 2;
+  const legendGradient = ctx.createLinearGradient(legendLeft, 0, legendLeft + legendWidth, 0);
+  legendGradient.addColorStop(0, colorFor(minV));
+  legendGradient.addColorStop(1, colorFor(maxV));
+  ctx.fillStyle = legendGradient;
+  ctx.fillRect(legendLeft, legendY, legendWidth, 16);
+  ctx.strokeStyle = "#9ca3af";
+  ctx.strokeRect(legendLeft, legendY, legendWidth, 16);
+
+  ctx.fillStyle = "#374151";
+  ctx.font = "12px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText(`Lower NDVI (${minV.toFixed(2)}) - higher risk`, legendLeft, legendY + 32);
+  ctx.textAlign = "right";
+  ctx.fillText(`Higher NDVI (${maxV.toFixed(2)}) - lower risk`, legendLeft + legendWidth, legendY + 32);
+
+  return canvas.toDataURL("image/png");
+};
+
+/**
+ * Driver Analysis pie chart drawn from this report's real driver data
+ * (analysisData.changeDetection.change_drivers) - the same real data the
+ * text Driver Analysis section already requires before rendering at all.
+ * Callers must not call this without real driverData; there is no
+ * AI-illustrated fallback for causal attribution, since that can't be
+ * measured from pixels.
+ */
+const renderDriverAnalysisPng = (drivers: { driver?: string; name?: string; contribution_percent?: number | string }[]): string => {
+  const width = 900;
+  const height = 500;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.fillStyle = "#111827";
+  ctx.font = "bold 24px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText("Driver Analysis", 40, 40);
+  ctx.font = "14px Arial";
+  ctx.fillStyle = "#6b7280";
+  ctx.fillText("Contributing drivers as estimated by this report's analysis", 40, 62);
+
+  const entries = drivers
+    .map((d) => ({
+      label: d.driver || d.name || "Unspecified",
+      value: typeof d.contribution_percent === "number" ? d.contribution_percent : parseFloat(String(d.contribution_percent)) || 0,
+    }))
+    .filter((d) => d.value > 0);
+
+  const total = entries.reduce((s, d) => s + d.value, 0) || 1;
+  const colors = ["#0891b2", "#16a34a", "#eab308", "#ea580c", "#dc2626", "#7c3aed", "#64748b"];
+
+  const cx = 230;
+  const cy = 280;
+  const r = 150;
+  let startAngle = -Math.PI / 2;
+
+  entries.forEach((d, i) => {
+    const sliceAngle = (d.value / total) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, startAngle, startAngle + sliceAngle);
+    ctx.closePath();
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fill();
+    startAngle += sliceAngle;
+  });
+
+  let legendY = 100;
+  entries.forEach((d, i) => {
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fillRect(500, legendY, 16, 16);
+    ctx.fillStyle = "#374151";
+    ctx.font = "14px Arial";
+    ctx.textAlign = "left";
+    ctx.fillText(`${d.label}: ${d.value.toFixed(1)}%`, 524, legendY + 13);
+    legendY += 28;
+  });
+
+  return canvas.toDataURL("image/png");
+};
+
+/**
+ * Real 3D terrain snapshot: an off-screen MapLibre GL map with real SRTM-
+ * derived elevation (AWS's free/keyless Terrarium DEM tiles) and, when
+ * available, this report's own real Sentinel-2 imagery draped on top -
+ * instead of asking an AI model to illustrate a 3D terrain picture. Returns
+ * null (rather than throwing) on any failure so a slow tile load or WebGL
+ * issue never breaks the rest of report generation.
+ */
+const capture3DTerrainSnapshot = async (
+  lat: number | undefined,
+  lng: number | undefined,
+  sentinelTrueColorImage: string | null
+): Promise<string | null> => {
+  if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+
+  const container = document.createElement("div");
+  container.style.position = "fixed";
+  container.style.top = "-10000px";
+  container.style.left = "-10000px";
+  container.style.width = "800px";
+  container.style.height = "450px";
+  document.body.appendChild(container);
+
+  let map: maplibregl.Map | null = null;
+
+  try {
+    // Matches generate-visualization's Sentinel Hub Process API AOI exactly,
+    // so the draped image lines up with the real coordinates it was fetched for.
+    const half = 0.05;
+    const sources: Record<string, any> = {
+      dem: {
+        type: "raster-dem",
+        tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+        tileSize: 256,
+        encoding: "terrarium",
+        maxzoom: 15,
+      },
+    };
+    const layers: any[] = [];
+
+    if (sentinelTrueColorImage) {
+      sources["sentinel-drape"] = {
+        type: "image",
+        url: sentinelTrueColorImage,
+        coordinates: [
+          [lng - half, lat + half],
+          [lng + half, lat + half],
+          [lng + half, lat - half],
+          [lng - half, lat - half],
+        ],
+      };
+      layers.push({ id: "sentinel-drape-layer", type: "raster", source: "sentinel-drape" });
+    } else {
+      sources["osm"] = {
+        type: "raster",
+        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        tileSize: 256,
+        attribution: "© OpenStreetMap contributors",
+      };
+      layers.push({ id: "osm-layer", type: "raster", source: "osm" });
+    }
+
+    map = new maplibregl.Map({
+      container,
+      style: { version: 8, sources, layers },
+      center: [lng, lat],
+      zoom: 12.5,
+      pitch: 65,
+      bearing: -20,
+      interactive: false,
+      attributionControl: false,
+      preserveDrawingBuffer: true, // required so getCanvas().toDataURL() works
+    } as any);
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("3D terrain load timed out")), 12000);
+      map!.on("load", () => {
+        try {
+          map!.setTerrain({ source: "dem", exaggeration: 1.6 });
+        } catch (e) {
+          clearTimeout(timeout);
+          reject(e);
+          return;
+        }
+        map!.once("idle", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+      map!.on("error", (e) => {
+        clearTimeout(timeout);
+        reject(e.error || new Error("MapLibre error during 3D terrain render"));
+      });
+    });
+
+    return map.getCanvas().toDataURL("image/png");
+  } catch (e) {
+    console.warn("3D terrain capture failed, omitting from report:", e);
+    return null;
+  } finally {
+    try {
+      map?.remove();
+    } catch {
+      // ignore cleanup errors
+    }
+    container.remove();
+  }
+};
+
 // Advanced visualization types available
 const ADVANCED_VIZ_TYPES = [
   { id: 'terrain_3d', label: '3D Terrain', icon: Mountain, description: 'Dramatic 3D terrain with elevation' },
@@ -140,12 +484,12 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
   // Hub imagery vs. an AI illustration, keyed by visualization type.
   const lastDataSourcesRef = useRef<Record<string, string>>({});
 
-  const generateVisualization = async (type: string): Promise<string | null> => {
+  const generateVisualization = async (type: string): Promise<{ imageUrl: string | null; gridData?: RiskGridData; dataSource?: string } | null> => {
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      
+
       console.log(`Starting visualization generation for: ${type}`);
-      
+
       const response = await fetch(
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-visualization`,
         {
@@ -160,6 +504,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             eventType: eventType || analysisData?.eventType,
             lat: lat ?? analysisData?.locations?.[0]?.lat,
             lng: lng ?? analysisData?.locations?.[0]?.lng,
+            endDate: analysisData?.endDate || analysisData?.end_date,
             data: analysisData,
           }),
         }
@@ -171,14 +516,14 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       }
 
       const data = await response.json();
-      console.log(`Visualization response for ${type}:`, data.imageUrl ? 'Image received' : 'No image', data.description?.substring(0, 100));
+      console.log(`Visualization response for ${type}:`, data.imageUrl ? 'Image received' : data.gridData ? 'Grid data received' : 'No image', data.description?.substring(0, 100));
 
-      if (data.imageUrl) {
+      if (data.imageUrl || data.gridData) {
         lastDataSourcesRef.current[type] = data.dataSource || "AI illustration (Google Gemini)";
-        return data.imageUrl;
+        return { imageUrl: data.imageUrl ?? null, gridData: data.gridData, dataSource: data.dataSource };
       }
-      
-      console.warn(`No image URL returned for ${type}`);
+
+      console.warn(`No image or grid data returned for ${type}`);
       return null;
     } catch (error) {
       console.error(`Error generating ${type} visualization:`, error);
@@ -199,7 +544,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
     // Generate one preview image as a sample
     toast.info("Generating report preview...");
     const sampleImage = await generateVisualization("landsat_truecolor");
-    previews["satellite"] = sampleImage;
+    previews["satellite"] = sampleImage?.imageUrl ?? null;
     
     setPreviewImages(previews);
   };
@@ -277,7 +622,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
     lastDataSourcesRef.current = {};
 
     try {
-      // Generate Landsat visualizations if enabled
+      // Generate Sentinel-2 visualizations if enabled
       let trueColorImage: string | null = null;
       let falseColorImage: string | null = null;
       let ndviImage: string | null = null;
@@ -294,11 +639,21 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         type VizTask = { key: string; type: string };
         const vizTasks: VizTask[] = [{ key: "trueColor", type: "landsat_truecolor" }];
 
+        // Only these advanced types need a network call: ndwi_water/nbr_fire
+        // now get real Sentinel Hub imagery and risk_zones needs real
+        // gridded stats from the backend; thermal_analysis has no real data
+        // source available yet (Sentinel-2 has no thermal sensor) so it
+        // stays an AI illustration. The rest (ecosystem_health,
+        // temporal_animation, driver_analysis, terrain_3d) are rendered
+        // locally below from data this report already has - no network
+        // call, no AI quota dependency, always available.
+        const NETWORK_ADVANCED_TYPES = new Set(["ndwi_water", "nbr_fire", "thermal_analysis", "risk_zones"]);
+
         if (!isSimple) {
           vizTasks.push({ key: "falseColor", type: "landsat_falsecolor" });
           vizTasks.push({ key: "ndvi", type: "ndvi_map" });
           for (const vizId of selectedAdvancedViz) {
-            if (ADVANCED_VIZ_TYPES.some((v) => v.id === vizId)) {
+            if (NETWORK_ADVANCED_TYPES.has(vizId)) {
               vizTasks.push({ key: `advanced:${vizId}`, type: vizId });
             }
           }
@@ -318,15 +673,72 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         ]);
 
         mapSnapshot = mapResult ?? null;
+        let riskGridData: RiskGridData | null = null;
         vizTasks.forEach((t, i) => {
           const result = vizResults[i];
-          if (t.key === "trueColor") trueColorImage = result;
-          else if (t.key === "falseColor") falseColorImage = result;
-          else if (t.key === "ndvi") ndviImage = result;
-          else if (t.key === "classification") classificationImage = result;
-          else if (t.key === "changeDetection") changeDetectionImage = result;
-          else if (t.key.startsWith("advanced:")) advancedImages[t.key.slice("advanced:".length)] = result;
+          if (t.key === "trueColor") trueColorImage = result?.imageUrl ?? null;
+          else if (t.key === "falseColor") falseColorImage = result?.imageUrl ?? null;
+          else if (t.key === "ndvi") ndviImage = result?.imageUrl ?? null;
+          else if (t.key === "classification") classificationImage = result?.imageUrl ?? null;
+          else if (t.key === "changeDetection") changeDetectionImage = result?.imageUrl ?? null;
+          else if (t.key === "advanced:risk_zones") {
+            if (result?.gridData) riskGridData = result.gridData;
+            else advancedImages.risk_zones = result?.imageUrl ?? null;
+          } else if (t.key.startsWith("advanced:")) {
+            advancedImages[t.key.slice("advanced:".length)] = result?.imageUrl ?? null;
+          }
         });
+
+        // Locally-rendered advanced visualizations: real data this report
+        // already has, drawn on-device (deterministic, free, no quota,
+        // always available) instead of asking an AI model to illustrate one.
+        if (!isSimple) {
+          const rdChangePercent = parseFloat(analysisData?.changePercent ?? analysisData?.change_percent ?? 0) || 0;
+          const rdSpectralIndices = analysisData?.spectralIndices;
+          const rdTemporalBreakdown = analysisData?.temporalBreakdown || analysisData?.temporal_breakdown;
+          const rdDriverData = analysisData?.changeDetection?.change_drivers?.length
+            ? analysisData.changeDetection.change_drivers
+            : null;
+
+          if (selectedAdvancedViz.includes("temporal_animation")) {
+            const periods = Array.isArray(rdTemporalBreakdown) && rdTemporalBreakdown.length > 0
+              ? rdTemporalBreakdown.map((p: any) => ({
+                  label: String(p.label || p.period || "Period"),
+                  value: p.changePercent !== undefined ? parseFloat(p.changePercent) : 0,
+                }))
+              : [{ label: "Full Study Period", value: rdChangePercent }];
+            advancedImages.temporal_animation = renderTrendChartPng(periods);
+            lastDataSourcesRef.current.temporal_animation = Array.isArray(rdTemporalBreakdown) && rdTemporalBreakdown.length > 0
+              ? "Real Sentinel-2 measurements (rendered on-device, not AI-generated)"
+              : "Reported study-period total (rendered on-device, not AI-generated)";
+          }
+
+          if (selectedAdvancedViz.includes("ecosystem_health") && rdSpectralIndices) {
+            advancedImages.ecosystem_health = renderEcosystemHealthPng(rdSpectralIndices, rdChangePercent);
+            lastDataSourcesRef.current.ecosystem_health = "Real Sentinel-2 spectral indices (rendered on-device, not AI-generated)";
+          }
+
+          if (selectedAdvancedViz.includes("risk_zones") && riskGridData) {
+            advancedImages.risk_zones = renderRiskZonesHeatmapPng(riskGridData);
+            lastDataSourcesRef.current.risk_zones = "Real gridded Sentinel-2 NDVI (rendered on-device, not AI-generated)";
+          }
+
+          if (selectedAdvancedViz.includes("driver_analysis") && rdDriverData) {
+            advancedImages.driver_analysis = renderDriverAnalysisPng(rdDriverData);
+            lastDataSourcesRef.current.driver_analysis = "Real analysis driver data (rendered on-device, not AI-generated)";
+          }
+
+          if (selectedAdvancedViz.includes("terrain_3d")) {
+            setGenerationStep("Rendering real 3D terrain from elevation data...");
+            const terrainImg = await capture3DTerrainSnapshot(lat, lng, trueColorImage);
+            if (terrainImg) {
+              advancedImages.terrain_3d = terrainImg;
+              lastDataSourcesRef.current.terrain_3d = trueColorImage
+                ? "Real Sentinel-2 imagery draped on real SRTM elevation data (MapLibre GL, rendered on-device)"
+                : "Real SRTM elevation data (MapLibre GL, rendered on-device)";
+            }
+          }
+        }
       }
 
       setGenerationStep("Compiling professional report document...");
@@ -660,9 +1072,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         pdf.setFont("helvetica", "normal");
         pdf.text("A. Satellite Imagery Panels", margin + 10, yPos);
         yPos += 8;
-        pdf.text("B. Spectral Indices Maps", margin + 10, yPos);
-        yPos += 8;
-        pdf.text("C. Land Classification Results", margin + 10, yPos);
+        pdf.text("B. Advanced Visualizations (if selected)", margin + 10, yPos);
       }
 
       // ============= PAGE 3: EXECUTIVE SUMMARY =============
@@ -872,7 +1282,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             pdf.setTextColor(107, 114, 128);
             pdf.text("Satellite Imagery", margin + contentWidth / 2 - 25, yPos + 35);
             pdf.setFontSize(9);
-            pdf.text("True-color Landsat composite visualization", margin + contentWidth / 2 - 45, yPos + 45);
+            pdf.text("True-color Sentinel-2 composite visualization", margin + contentWidth / 2 - 45, yPos + 45);
           }
         } else {
           // Placeholder when no image available
@@ -880,7 +1290,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           pdf.setTextColor(107, 114, 128);
           pdf.text("Satellite Imagery Panel", margin + contentWidth / 2 - 30, yPos + 30);
           pdf.setFontSize(9);
-          pdf.text("True-color Landsat 8/9 OLI composite", margin + contentWidth / 2 - 38, yPos + 40);
+          pdf.text("True-color Sentinel-2 MSI composite", margin + contentWidth / 2 - 38, yPos + 40);
           pdf.text(`Region: ${regionName}`, margin + contentWidth / 2 - 20, yPos + 50);
         }
         yPos += 80;
@@ -1200,10 +1610,16 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           imageLabel("landsat_falsecolor", "False-color imagery panel"),
           imageLabel("ndvi_map", "NDVI imagery panel"),
           ["Trend chart", "Rendered directly from this report's own figures (not AI-generated)"],
-          ["Spectral indices / change %", analysisData?.dataProvenance?.analysisMethod === "ai_estimated" || !analysisData?.dataProvenance
-            ? "AI-estimated (Google Gemini) - not measured from pixel data"
-            : "See analysis source"],
+          ["Spectral indices / change %", analysisData?.dataProvenance?.analysisMethod === "real_sentinel_statistics"
+            ? "Real Sentinel-2 measurement (NDVI/NDWI/NBR computed from actual pixels)"
+            : "AI-estimated (Google Gemini) - not measured from pixel data"],
           ["Location coordinates", analysisData?.locations?.[0]?.verified === false ? "AI-estimated, not geocoder-verified" : "Geocoded (OpenStreetMap/Nominatim) or user-selected"],
+          ...selectedAdvancedViz
+            .filter((id) => advancedImages[id])
+            .map((id) => {
+              const viz = ADVANCED_VIZ_TYPES.find((v) => v.id === id);
+              return [viz?.label || id, lastDataSourcesRef.current[id] || "AI illustration (Google Gemini)"];
+            }),
         ];
         yPos = addTableWithBorders(provenanceHeaders, provenanceRows, yPos, [70, 100]);
         yPos += 8;
@@ -1249,7 +1665,9 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           },
           {
             title: "Numeric Analysis Generation",
-            content: "Spectral index values, change percentages, and classification statistics are generated by Google Gemini from a text prompt describing the region, event type, and the real formulas for standard indices (NDVI, NDWI, NBR, NDBI). The model produces plausible estimates based on patterns in its training data - it does not compute these values from actual pixel data, and no image differencing or classification algorithm is run against real imagery for these figures."
+            content: analysisData?.dataProvenance?.analysisMethod === "real_sentinel_statistics"
+              ? "The change percentage and NDVI/NDWI/NBR values in this report are real measurements: Sentinel-2 pixels for the start and end of the study period were fetched via the Sentinel Hub Statistics API, cloud-masked using the Scene Classification Layer, and averaged to compute each index. The reported % change is the real difference between those two measured periods. Google Gemini is given these real numbers and writes the narrative summary, severity assessment, and recommendations around them, but does not generate the figures themselves. Classification results and change-matrix breakdowns (where shown) remain Gemini-generated estimates, not computed from these real pixels."
+              : "Spectral index values, change percentages, and classification statistics are generated by Google Gemini from a text prompt describing the region, event type, and the real formulas for standard indices (NDVI, NDWI, NBR, NDBI). The model produces plausible estimates based on patterns in its training data - it does not compute these values from actual pixel data, and no image differencing or classification algorithm is run against real imagery for these figures."
           },
           {
             title: "Map & Chart Rendering",
@@ -1305,11 +1723,12 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         yPos = addSubsectionTitle("Data Sources Used In This Report", yPos);
 
         const usedRealImagery = Object.values(lastDataSourcesRef.current).some((s) => /sentinel/i.test(s));
+        const usedRealStatistics = analysisData?.dataProvenance?.analysisMethod === "real_sentinel_statistics";
         const eeConfigured = !!analysisData?.dataProvenance?.earthEngine?.configured;
         const dataSources = [
           "[1] Google Gemini (Google DeepMind). Generated the narrative analysis, findings, and recommendations in this report, and any AI-illustrated (non-real) imagery panels. https://ai.google.dev",
-          ...(usedRealImagery ? [
-            "[2] European Space Agency (ESA) / Copernicus Data Space Ecosystem. Real Sentinel-2 L2A satellite imagery, used for this report's true-color, false-color, and/or NDVI panels. https://dataspace.copernicus.eu",
+          ...(usedRealImagery || usedRealStatistics ? [
+            `[2] European Space Agency (ESA) / Copernicus Data Space Ecosystem. Real Sentinel-2 L2A satellite ${[usedRealImagery && "imagery (true-color/false-color/NDVI panels)", usedRealStatistics && "pixel statistics (spectral index values and change %)"].filter(Boolean).join(" and ")} used in this report. https://dataspace.copernicus.eu`,
           ] : []),
           "[3] OpenStreetMap Contributors. Basemap tiles for the study area map, and/or place-name geocoding used to resolve this report's location. https://www.openstreetmap.org",
           ...(eeConfigured ? [
@@ -1335,6 +1754,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           "MapLibre GL JS - interactive map rendering for the study area map panel",
           "Supabase Edge Functions (Deno) - backend APIs for AI analysis and imagery retrieval",
           ...(usedRealImagery ? ["Sentinel Hub Process API (Copernicus Data Space Ecosystem) - real satellite imagery retrieval"] : []),
+          ...(usedRealStatistics ? ["Sentinel Hub Statistics API (Copernicus Data Space Ecosystem) - real spectral index/change computation"] : []),
           "Google Gemini API - AI-generated narrative analysis and, where real imagery was unavailable, illustrative visualizations",
         ];
 
@@ -1392,6 +1812,50 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             console.warn("Could not add change detection image");
           }
         }
+      }
+
+      // ============= APPENDIX: ADVANCED VISUALIZATIONS =============
+      // Previously these were fetched (burning AI image-generation quota)
+      // but never actually embedded anywhere in the output - this is the
+      // step that was missing. Each panel is captioned with its real data
+      // source (or honestly labeled as an AI illustration) via
+      // lastDataSourcesRef, populated above for both the network-fetched
+      // and locally-rendered advanced visualization types.
+      const selectedWithImages = selectedAdvancedViz.filter((id) => advancedImages[id]);
+      if (includeImages && !isSimple && selectedWithImages.length > 0) {
+        pdf.addPage();
+        addPageHeader();
+        yPos = 28;
+
+        pdf.setTextColor(17, 24, 39);
+        pdf.setFontSize(16);
+        pdf.setFont("helvetica", "bold");
+        pdf.text("APPENDIX B: ADVANCED VISUALIZATIONS", margin, yPos);
+        yPos += 15;
+
+        selectedWithImages.forEach((vizId) => {
+          const viz = ADVANCED_VIZ_TYPES.find((v) => v.id === vizId);
+          const image = advancedImages[vizId];
+          if (!image) return;
+
+          checkPageBreak(95);
+          try {
+            yPos = addSubsectionTitle(viz?.label || vizId, yPos);
+            pdf.setFillColor(243, 244, 246);
+            pdf.roundedRect(margin, yPos, contentWidth, 70, 3, 3, "F");
+            pdf.addImage(image, "PNG", margin + 5, yPos + 5, contentWidth - 10, 60);
+            yPos += 75;
+
+            const source = lastDataSourcesRef.current[vizId] || "AI illustration (Google Gemini)";
+            pdf.setFontSize(8);
+            pdf.setTextColor(107, 114, 128);
+            pdf.setFont("helvetica", "italic");
+            pdf.text(`Source: ${source}`, margin, yPos);
+            yPos += 12;
+          } catch (e) {
+            console.warn(`Could not add ${vizId} image:`, e);
+          }
+        });
       }
 
       // ============= FINAL PAGE - DISCLAIMER =============
@@ -1626,14 +2090,14 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
                           <Image className="h-4 w-4 text-primary" />
                           <span className="text-sm font-medium">True-Color Composite</span>
                         </div>
-                        <p className="text-xs text-muted-foreground">Landsat Bands 4-3-2 RGB</p>
+                        <p className="text-xs text-muted-foreground">Sentinel-2 Bands 4-3-2 RGB</p>
                       </div>
                       <div className="p-3 rounded-lg border bg-muted/30">
                         <div className="flex items-center gap-2 mb-2">
                           <Layers className="h-4 w-4 text-orange-500" />
                           <span className="text-sm font-medium">False-Color Composite</span>
                         </div>
-                        <p className="text-xs text-muted-foreground">Bands 5-4-3 NIR-R-G</p>
+                        <p className="text-xs text-muted-foreground">Bands 8-4-3 NIR-R-G</p>
                       </div>
                       <div className="p-3 rounded-lg border bg-muted/30">
                         <div className="flex items-center gap-2 mb-2">
@@ -1679,7 +2143,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
                       <div className="text-center text-muted-foreground">
                         <Image className="h-16 w-16 mx-auto mb-4 opacity-30" />
                         <p className="text-sm">Click Preview to generate a sample visualization</p>
-                        <p className="text-xs mt-1">This will show a Landsat satellite image of your region</p>
+                        <p className="text-xs mt-1">This will show a Sentinel-2 satellite image of your region</p>
                       </div>
                     )}
                   </div>

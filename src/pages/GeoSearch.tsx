@@ -24,20 +24,20 @@ const generateLocalSearchInterpretation = (
   const locLower = loc.name.toLowerCase();
   const qLower = queryText.toLowerCase();
 
-  let interpretation = `Multi-spectral Landsat 8/9 satellite evaluation for "${queryText}" in ${loc.name}. Processing Band 3 (Green), Band 5 (NIR), and Band 6 (SWIR1) surface reflectance highlights temporal environmental variation across target sectors.`;
+  let interpretation = `Multi-spectral Sentinel-2 satellite evaluation for "${queryText}" in ${loc.name}. Processing Band 3 (Green), Band 8 (NIR), and Band 11 (SWIR1) surface reflectance highlights temporal environmental variation across target sectors.`;
   let findings = [
     `NDWI (Normalized Difference Water Index) signatures indicate altered hydrological accumulation and localized surface runoff near ${loc.name}.`,
-    `Landsat multi-spectral band differencing confirms surface reflectance changes associated with ${event.replace(/_/g, " ")} across primary drainage vectors.`,
+    `Sentinel-2 multi-spectral band differencing confirms surface reflectance changes associated with ${event.replace(/_/g, " ")} across primary drainage vectors.`,
     `Urban land cover density and surrounding topography contribute to localized environmental vulnerability in ${loc.name}.`,
   ];
   let recommendations = [
-    `Establish high-frequency satellite surveillance alerts using Sentinel-2 and Landsat 8/9 over ${loc.name}.`,
+    `Establish high-frequency Sentinel-2 satellite surveillance alerts over ${loc.name}.`,
     `Deploy municipal engineering teams to inspect primary drainage channels and low-lying sectors in ${loc.name}.`,
     `Integrate multi-spectral satellite indices into local emergency response frameworks.`,
   ];
 
   if (locLower.includes("abidjan") || qLower.includes("abidjan") || qLower.includes("abijan")) {
-    interpretation = `Comprehensive satellite flood risk and hydrological assessment for "${queryText}" targeting Abidjan (Lagunes Region, Côte d'Ivoire). Processing Landsat 8/9 Band 3 (Green) and Band 5 (NIR) confirms high moisture saturation around Ébrié Lagoon and Indénié crossroads.`;
+    interpretation = `Comprehensive satellite flood risk and hydrological assessment for "${queryText}" targeting Abidjan (Lagunes Region, Côte d'Ivoire). Processing Sentinel-2 Band 3 (Green) and Band 8 (NIR) confirms high moisture saturation around Ébrié Lagoon and Indénié crossroads.`;
     findings = [
       `Elevated NDWI (Water Index) anomalies detected along the Indénié basin, Cocody bayou, and low-lying coastal districts of Yopougon and Abobo.`,
       `Tropical monsoon heavy rainfall coupled with steep urban hillside slopes in Abidjan increases slope instability and mudslide risks along Banco forest fringes.`,
@@ -49,11 +49,11 @@ const generateLocalSearchInterpretation = (
       `Enforce strict urban slope protection policies to prevent building encroachments along landslide-prone hillsides in Abidjan.`,
     ];
   } else if (locLower.includes("kumasi") || qLower.includes("kumasi")) {
-    interpretation = `Comprehensive satellite flood risk and hydrological assessment for "${queryText}" targeting Kumasi (Ashanti Region, Ghana). Processing Landsat 8/9 Band 3 (Green) and Band 5 (NIR) confirms high moisture saturation across the Subin, Aboabo, and Wiwi river catchments.`;
+    interpretation = `Comprehensive satellite flood risk and hydrological assessment for "${queryText}" targeting Kumasi (Ashanti Region, Ghana). Processing Sentinel-2 Band 3 (Green) and Band 8 (NIR) confirms high moisture saturation across the Subin, Aboabo, and Wiwi river catchments.`;
     findings = [
       `Severe NDWI surface moisture anomalies detected along the Subin river channel, Kejetia market vicinity, and low-lying residential sectors of Aboabo and Asafo in Kumasi.`,
       `Rapid urban expansion and high impermeable surface density in the Kumasi metropolitan area have reduced natural soil infiltration capacity by over 35%.`,
-      `Multi-temporal Landsat thermal & SWIR imagery highlights seasonal waterlogging of wetlands surrounding the Owabi and Barekese reservoir basins.`,
+      `Multi-temporal Sentinel-2 SWIR imagery highlights seasonal waterlogging of wetlands surrounding the Owabi and Barekese reservoir basins.`,
     ];
     recommendations = [
       `Execute immediate engineering interventions to dredge, widen, and concrete-line the Subin and Aboabo river channels through central Kumasi.`,
@@ -71,7 +71,7 @@ const generateLocalSearchInterpretation = (
       `Construct retention basins upstream to mitigate storm runoff surges into central Accra.`,
     ];
   } else if (locLower.includes("lagos") || qLower.includes("lagos")) {
-    interpretation = `Multi-spectral coastal inundation and flood risk evaluation for "${queryText}" targeting Lagos Megacity (Lagos State, Nigeria). Landsat 8/9 imagery reveals high water table and tidal surge impacts.`;
+    interpretation = `Multi-spectral coastal inundation and flood risk evaluation for "${queryText}" targeting Lagos Megacity (Lagos State, Nigeria). Sentinel-2 imagery reveals high water table and tidal surge impacts.`;
     findings = [
       `High NDWI water signatures observed across Lekki Peninsula, Victoria Island coastal fringe, and Agege low-lying drainage channels.`,
       `Low elevation and lagoon surges during high tides exacerbate urban flood retention across Lagos metropolitan sectors.`,

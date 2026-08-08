@@ -14,10 +14,10 @@ type Message = {
 const generateLocalAssistantResponse = (query: string): string => {
   const q = query.toLowerCase();
   if (q.includes("deforest") || q.includes("tree") || q.includes("forest")) {
-    return "To analyze deforestation on GeoPulse, navigate to **GeoWitness**, select **Deforestation** under Event Types, select your region on the interactive map, and set the temporal window. GeoPulse processes multi-spectral Landsat 8/9 bands (NIR & Red) to calculate NDVI variance and detect vegetation canopy degradation.";
+    return "To analyze deforestation on GeoPulse, navigate to **GeoWitness**, select **Deforestation** under Event Types, select your region on the interactive map, and set the temporal window. GeoPulse processes multi-spectral Sentinel-2 bands (NIR & Red) to calculate NDVI variance and detect vegetation canopy degradation.";
   }
   if (q.includes("flood") || q.includes("water") || q.includes("rain")) {
-    return "GeoPulse detects surface water flooding using the Normalized Difference Water Index (NDWI) derived from Landsat 8/9 imagery. In **GeoWitness**, select **Flood** to map surface water expansion and inundated agricultural or urban land.";
+    return "GeoPulse detects surface water flooding using the Normalized Difference Water Index (NDWI) derived from Sentinel-2 imagery. In **GeoWitness**, select **Flood** to map surface water expansion and inundated agricultural or urban land.";
   }
   if (q.includes("ndvi")) {
     return "NDVI (Normalized Difference Vegetation Index) quantifies vegetation health: `NDVI = (NIR - Red) / (NIR + Red)`. High values (0.5 to 0.8) indicate dense, healthy canopy cover, while low values represent bare soil, urban structures, or water bodies.";
@@ -25,7 +25,7 @@ const generateLocalAssistantResponse = (query: string): string => {
   if (q.includes("drought") || q.includes("arid") || q.includes("dry")) {
     return "Drought tracking on GeoPulse integrates multi-spectral vegetation condition index (VCI) and soil moisture anomalies over time to provide early warnings for agricultural risk.";
   }
-  return `GeoPulse provides AI-driven environmental intelligence across satellite datasets. You can execute natural language environmental searches in **GeoSearch**, perform Landsat satellite change analysis in **GeoWitness**, or upload geospatial files for custom evaluation. How can I assist you with your research?`;
+  return `GeoPulse provides AI-driven environmental intelligence across satellite datasets. You can execute natural language environmental searches in **GeoSearch**, perform Sentinel-2 satellite change analysis in **GeoWitness**, or upload geospatial files for custom evaluation. How can I assist you with your research?`;
 };
 
 const AIAssistant = () => {

@@ -264,7 +264,7 @@ function buildFallbackAnalysis(params: {
       "Try a smaller date range if the issue continues.",
       "Use saved results or comparison history while the provider recovers.",
     ],
-    dataSources: ["Landsat 8 OLI", "Landsat 9 OLI"],
+    dataSources: ["Sentinel-2 MSI"],
     cloudCoverage: {
       percentage: null,
       detection_accuracy: null,
@@ -282,8 +282,8 @@ function buildFallbackAnalysis(params: {
     },
     analysisConfidence: 0,
     landsatInfo: {
-      sensor: "Landsat 8/9 OLI",
-      spatial_resolution: "30m",
+      sensor: "Sentinel-2 MSI",
+      spatial_resolution: "10m",
       acquisition_dates: [],
       processing_level: "Unavailable",
     },
@@ -313,6 +313,162 @@ function buildFallbackAnalysis(params: {
     fallbackReason: "SERVICE_UNAVAILABLE",
     providerStatus,
     providerMessage,
+  };
+}
+
+// === Real spectral statistics via Sentinel Hub (Copernicus Data Space) ===
+// The imagery panels (generate-visualization) already fetch real Sentinel-2
+// pixels for the pictures; this does the same for the *numbers* - NDVI/NDWI/
+// NBR means and a real before/after change figure - instead of asking Gemini
+// to estimate them. Same credentials, a different Sentinel Hub API
+// (Statistics instead of Process) that aggregates real pixel values over an
+// area/time range rather than rendering an image.
+interface SpectralBandStats {
+  mean: number;
+  min: number;
+  max: number;
+}
+
+interface SpectralStatsResult {
+  ndvi: SpectralBandStats | null;
+  ndwi: SpectralBandStats | null;
+  nbr: SpectralBandStats | null;
+  sampleCount: number;
+  validPixelRatio: number;
+}
+
+const STATISTICS_EVALSCRIPT = `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B03","B04","B08","B12","SCL","dataMask"] }],
+    output: [
+      { id: "ndvi", bands: 1 },
+      { id: "ndwi", bands: 1 },
+      { id: "nbr", bands: 1 },
+      { id: "dataMask", bands: 1 }
+    ]
+  };
+}
+function isCloud(scl) { return scl == 3 || scl == 8 || scl == 9 || scl == 10; }
+function evaluatePixel(s) {
+  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04);
+  let ndwi = (s.B03 - s.B08) / (s.B03 + s.B08);
+  let nbr = (s.B08 - s.B12) / (s.B08 + s.B12);
+  let mask = isCloud(s.SCL) ? 0 : s.dataMask;
+  return { ndvi: [ndvi], ndwi: [ndwi], nbr: [nbr], dataMask: [mask] };
+}`;
+
+let cachedSentinelToken: { token: string; expiresAt: number } | null = null;
+
+async function getSentinelHubToken(): Promise<string | null> {
+  const clientId = Deno.env.get("SENTINELHUB_CLIENT_ID");
+  const clientSecret = Deno.env.get("SENTINELHUB_CLIENT_SECRET");
+  if (!clientId || !clientSecret) return null;
+
+  if (cachedSentinelToken && cachedSentinelToken.expiresAt > Date.now() + 30_000) {
+    return cachedSentinelToken.token;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(
+      "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "client_credentials",
+          client_id: clientId,
+          client_secret: clientSecret,
+        }),
+      }
+    );
+  } catch (e) {
+    console.error("Sentinel Hub auth request failed:", e instanceof Error ? e.message : e);
+    return null;
+  }
+
+  if (!response.ok) {
+    console.error("Sentinel Hub auth failed:", response.status, (await response.text()).slice(0, 200));
+    return null;
+  }
+
+  const data = await response.json();
+  if (!data.access_token) return null;
+  cachedSentinelToken = { token: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
+  return cachedSentinelToken.token;
+}
+
+async function fetchSpectralStatistics(
+  token: string,
+  lat: number,
+  lng: number,
+  from: Date,
+  to: Date
+): Promise<SpectralStatsResult | null> {
+  const half = 0.05; // ~11km-wide chip, matching the imagery panels' AOI
+  const bbox = [lng - half, lat - half, lng + half, lat + half];
+  const windowDays = Math.max(1, Math.ceil((to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000)));
+
+  let response: Response;
+  try {
+    response = await fetch("https://sh.dataspace.copernicus.eu/api/v1/statistics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+      body: JSON.stringify({
+        input: {
+          bounds: { bbox, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } },
+          data: [{ type: "sentinel-2-l2a", dataFilter: { maxCloudCoverage: 60 } }],
+        },
+        aggregation: {
+          timeRange: { from: from.toISOString(), to: to.toISOString() },
+          aggregationInterval: { of: `P${windowDays}D` },
+          evalscript: STATISTICS_EVALSCRIPT,
+          width: 128,
+          height: 128,
+        },
+      }),
+    });
+  } catch (e) {
+    console.error("Sentinel Hub statistics request failed:", e instanceof Error ? e.message : e);
+    return null;
+  }
+
+  if (!response.ok) {
+    console.error("Sentinel Hub statistics API error:", response.status, (await response.text()).slice(0, 500));
+    return null;
+  }
+
+  let json: any;
+  try {
+    json = await response.json();
+  } catch (e) {
+    console.error("Sentinel Hub statistics response was not valid JSON:", e instanceof Error ? e.message : e);
+    return null;
+  }
+
+  const outputs = json?.data?.[0]?.outputs;
+  if (!outputs) {
+    console.warn("Sentinel Hub statistics returned no data interval - likely no cloud-free scenes in this window.");
+    return null;
+  }
+
+  const extractBand = (id: string): SpectralBandStats | null => {
+    const stats = outputs[id]?.bands?.B0?.stats;
+    if (!stats || typeof stats.mean !== "number") return null;
+    return { mean: stats.mean, min: stats.min, max: stats.max };
+  };
+
+  const ndviBandStats = outputs.ndvi?.bands?.B0?.stats;
+  const sampleCount = ndviBandStats?.sampleCount || 0;
+  const noDataCount = ndviBandStats?.noDataCount || 0;
+
+  return {
+    ndvi: extractBand("ndvi"),
+    ndwi: extractBand("ndwi"),
+    nbr: extractBand("nbr"),
+    sampleCount,
+    validPixelRatio: sampleCount > 0 ? (sampleCount - noDataCount) / sampleCount : 0,
   };
 }
 
@@ -370,15 +526,146 @@ serve(async (req) => {
 
     const isMultiEvent = eventTypes.length > 1;
     const eventTypeLabels = eventTypes.map(e => e.replace(/_/g, ' ')).join(', ');
-    
+
     console.log(`Analyzing ${eventTypeLabels} in ${region} from ${startDate} to ${endDate}`);
     console.log(`Classification: ${classificationType || 'none'}, Change Detection: ${enableChangeDetection}`);
 
-    // Enhanced system prompt with Landsat, classification, and change detection
-    const systemPrompt = `You are an expert remote sensing scientist specializing in Landsat multispectral satellite imagery analysis, land cover classification, and change detection.
+    // Real spectral statistics from Sentinel-2 pixels, when coordinates are
+    // available: split the study period into a "before" and "after" window
+    // (capped so "after" never reaches into the future, since satellite data
+    // obviously doesn't exist yet for dates ahead of today) and fetch real
+    // NDVI/NDWI/NBR means for each, so change_percent below can be a real
+    // measured difference instead of a Gemini guess.
+    let realStats: { before: SpectralStatsResult; after: SpectralStatsResult } | null = null;
+    let realChangePercent: number | null = null;
+    let realTemporalBreakdown: { label: string; changePercent: number; months: number }[] | null = null;
+    let realPredictiveModeling: { projected_change_6mo: number; projected_change_12mo: number; confidence: number; methodology: string } | null = null;
+    if (coordinates) {
+      const sentinelToken = await getSentinelHubToken();
+      if (sentinelToken) {
+        const now = new Date();
+        const studyStart = new Date(startDate);
+        const studyEnd = new Date(Math.min(new Date(endDate).getTime(), now.getTime()));
+        if (studyEnd.getTime() > studyStart.getTime()) {
+          const totalMs = studyEnd.getTime() - studyStart.getTime();
+          const midpoint = new Date(studyStart.getTime() + totalMs / 2);
+          // Wide enough that Sentinel-2's ~5-day revisit cycle has a real chance of
+          // landing a cloud-free-enough scene even over persistently cloudy regions
+          // (much of West Africa), without the before/after windows overlapping.
+          const maxWindowMs = 90 * 24 * 60 * 60 * 1000;
+
+          const beforeTo = new Date(Math.min(midpoint.getTime(), studyStart.getTime() + maxWindowMs));
+          const afterFrom = new Date(Math.max(midpoint.getTime(), studyEnd.getTime() - maxWindowMs));
+
+          const [beforeStats, afterStats] = await Promise.all([
+            fetchSpectralStatistics(sentinelToken, coordinates.lat, coordinates.lng, studyStart, beforeTo),
+            fetchSpectralStatistics(sentinelToken, coordinates.lat, coordinates.lng, afterFrom, studyEnd),
+          ]);
+
+          if (beforeStats?.ndvi && afterStats?.ndvi && beforeStats.validPixelRatio > 0.1 && afterStats.validPixelRatio > 0.1) {
+            realStats = { before: beforeStats, after: afterStats };
+            // NDVI change expressed as % of the baseline value, matching how
+            // "change_percent" is used everywhere else in this app - guard
+            // against a near-zero baseline making this figure meaningless.
+            realChangePercent = Math.abs(beforeStats.ndvi.mean) > 0.05
+              ? ((afterStats.ndvi.mean - beforeStats.ndvi.mean) / Math.abs(beforeStats.ndvi.mean)) * 100
+              : (afterStats.ndvi.mean - beforeStats.ndvi.mean) * 100;
+            console.log(`Real Sentinel-2 stats: NDVI ${beforeStats.ndvi.mean.toFixed(3)} -> ${afterStats.ndvi.mean.toFixed(3)} (${realChangePercent.toFixed(1)}% change)`);
+
+            // Real temporal breakdown: the "progress over time" chart used to
+            // be entirely Gemini invention between our two real endpoints
+            // (Sentinel Hub only ever gave us before/after, never quarterly
+            // points). Sample 1-2 real interior windows in the gap between
+            // the before/after windows so the intermediate points are
+            // measured too, not just the two ends - degrading gracefully
+            // (fewer points, not a fake one) if an interior sample is too
+            // cloudy to trust.
+            const pctChange = (value: number) => Math.abs(beforeStats.ndvi!.mean) > 0.05
+              ? ((value - beforeStats.ndvi!.mean) / Math.abs(beforeStats.ndvi!.mean)) * 100
+              : (value - beforeStats.ndvi!.mean) * 100;
+            const monthsFromStart = (d: Date) => Math.round((d.getTime() - studyStart.getTime()) / (30 * 24 * 60 * 60 * 1000));
+
+            const points: { date: Date; months: number; changePercent: number }[] = [
+              { date: studyStart, months: 0, changePercent: 0 },
+            ];
+
+            const gapMs = afterFrom.getTime() - beforeTo.getTime();
+            const interiorCount = gapMs > 60 * 24 * 60 * 60 * 1000 ? 2 : gapMs > 20 * 24 * 60 * 60 * 1000 ? 1 : 0;
+            if (interiorCount > 0) {
+              const interiorWindows = Array.from({ length: interiorCount }, (_, i) => {
+                const frac = (i + 1) / (interiorCount + 1);
+                const center = new Date(beforeTo.getTime() + gapMs * frac);
+                const radius = Math.min(20 * 24 * 60 * 60 * 1000, gapMs / (interiorCount * 2));
+                return { from: new Date(center.getTime() - radius), to: new Date(center.getTime() + radius) };
+              });
+              const interiorResults = await Promise.all(
+                interiorWindows.map((w) => fetchSpectralStatistics(sentinelToken, coordinates.lat, coordinates.lng, w.from, w.to))
+              );
+              interiorResults.forEach((stat, i) => {
+                if (stat?.ndvi && stat.validPixelRatio > 0.1) {
+                  const mid = new Date((interiorWindows[i].from.getTime() + interiorWindows[i].to.getTime()) / 2);
+                  points.push({ date: mid, months: monthsFromStart(mid), changePercent: pctChange(stat.ndvi.mean) });
+                }
+              });
+            }
+
+            points.push({ date: studyEnd, months: monthsFromStart(studyEnd), changePercent: realChangePercent });
+            points.sort((a, b) => a.date.getTime() - b.date.getTime());
+
+            realTemporalBreakdown = points.map((p) => ({
+              label: p.date.toLocaleDateString("en-US", { year: "numeric", month: "short" }),
+              changePercent: Math.round(p.changePercent * 10) / 10,
+              months: p.months,
+            }));
+
+            // Real least-squares linear regression over the measured points,
+            // replacing Gemini's invented 6/12-month projection with an
+            // actual trend fit to genuine measurements. Confidence is a real
+            // R^2, not a plausible-looking made-up number.
+            const n = points.length;
+            const sumX = points.reduce((s, p) => s + p.months, 0);
+            const sumY = points.reduce((s, p) => s + p.changePercent, 0);
+            const sumXY = points.reduce((s, p) => s + p.months * p.changePercent, 0);
+            const sumXX = points.reduce((s, p) => s + p.months * p.months, 0);
+            const denom = n * sumXX - sumX * sumX;
+            const slope = denom !== 0 ? (n * sumXY - sumX * sumY) / denom : 0;
+            const intercept = (sumY - slope * sumX) / n;
+            const lastMonths = points[points.length - 1].months;
+            const meanY = sumY / n;
+            const ssTot = points.reduce((s, p) => s + (p.changePercent - meanY) ** 2, 0);
+            const ssRes = points.reduce((s, p) => s + (p.changePercent - (slope * p.months + intercept)) ** 2, 0);
+            const r2 = ssTot > 0 ? Math.max(0, 1 - ssRes / ssTot) : 0.5;
+
+            realPredictiveModeling = {
+              projected_change_6mo: Math.round((slope * (lastMonths + 6) + intercept) * 10) / 10,
+              projected_change_12mo: Math.round((slope * (lastMonths + 12) + intercept) * 10) / 10,
+              confidence: Math.round(Math.max(30, Math.min(95, r2 * 100))),
+              methodology: `linear_regression over ${n} real Sentinel-2 measurements`,
+            };
+          } else {
+            console.warn("Sentinel Hub statistics unavailable or too cloud-obscured for real change detection this request - falling back to AI-estimated figures.");
+          }
+        }
+      }
+    }
+
+    // Real bbox area (deterministic geometry, not AI) for the ~11km chip
+    // statistics were actually computed over - computed here (not just in
+    // the result below) so it can also be told to Gemini, keeping its
+    // narrative text consistent with the structured "area" field instead of
+    // the model guessing its own, different number.
+    let realAreaKm2: number | null = null;
+    if (realStats && coordinates) {
+      const kmPerDegreeLat = 111.32;
+      const kmPerDegreeLng = 111.32 * Math.cos((coordinates.lat * Math.PI) / 180);
+      realAreaKm2 = Math.round(0.1 * kmPerDegreeLat * 0.1 * kmPerDegreeLng * 100) / 100;
+    }
+
+    // Enhanced system prompt with Sentinel-2, classification, and change detection
+    const systemPrompt = `You are an expert remote sensing scientist specializing in Sentinel-2 multispectral satellite imagery analysis, land cover classification, and change detection.
 
 CRITICAL DATA AUTHENTICITY REQUIREMENTS:
-- All percentage values MUST be realistic and based on plausible Landsat spectral analysis
+- All percentage values MUST be realistic and based on plausible Sentinel-2 spectral analysis
 - Do NOT generate suspiciously round numbers. Use precise values (e.g., 12.7% not 50%)
 - Change percentages should reflect realistic environmental change rates (typically 1-25% for most events over 1-2 year periods)
 - Always explain the methodology used to derive each percentage
@@ -386,25 +673,25 @@ CRITICAL DATA AUTHENTICITY REQUIREMENTS:
 - Clearly distinguish between measured values and AI-estimated projections
 
 CRITICAL REQUIREMENTS:
-1. LANDSAT IMAGERY: Always base analysis on Landsat 8/9 OLI (Operational Land Imager) multispectral data
-2. SPECTRAL BANDS: Reference specific Landsat bands:
-   - Band 2 (Blue, 0.45-0.51 μm): Water body delineation
-   - Band 3 (Green, 0.53-0.59 μm): Vegetation vigor
-   - Band 4 (Red, 0.64-0.67 μm): Chlorophyll absorption
-   - Band 5 (NIR, 0.85-0.88 μm): Vegetation health, biomass
-   - Band 6 (SWIR1, 1.57-1.65 μm): Moisture content, burn scars
-   - Band 7 (SWIR2, 2.11-2.29 μm): Geology, soil moisture
-3. CLOUD DETECTION: Report accurate cloud coverage using Landsat QA band (90%+ accuracy target)
+1. SENTINEL-2 IMAGERY: Always base analysis on Sentinel-2 MSI (MultiSpectral Instrument) Level-2A surface reflectance data
+2. SPECTRAL BANDS: Reference specific Sentinel-2 bands:
+   - B02 (Blue, 0.458-0.523 μm, 10m): Water body delineation
+   - B03 (Green, 0.543-0.578 μm, 10m): Vegetation vigor
+   - B04 (Red, 0.650-0.680 μm, 10m): Chlorophyll absorption
+   - B08 (NIR, 0.785-0.900 μm, 10m): Vegetation health, biomass
+   - B11 (SWIR1, 1.565-1.655 μm, 20m): Moisture content, burn scars
+   - B12 (SWIR2, 2.100-2.280 μm, 20m): Geology, soil moisture
+3. CLOUD DETECTION: Report accurate cloud coverage using the Sentinel-2 Scene Classification Layer (SCL) (90%+ accuracy target)
 4. SPECTRAL INDICES: Calculate and report:
-   - NDVI = (NIR - Red) / (NIR + Red) for vegetation
-   - NDWI = (Green - NIR) / (Green + NIR) for water
-   - NBR = (NIR - SWIR2) / (NIR + SWIR2) for burn severity
-   - NDBI = (SWIR1 - NIR) / (SWIR1 + NIR) for built-up areas
-5. RADIOMETRIC QUALITY: Report TOA reflectance values and atmospheric correction status
+   - NDVI = (B08 - B04) / (B08 + B04) for vegetation
+   - NDWI = (B03 - B08) / (B03 + B08) for water
+   - NBR = (B08 - B12) / (B08 + B12) for burn severity
+   - NDBI = (B11 - B08) / (B11 + B08) for built-up areas
+5. RADIOMETRIC QUALITY: Report Bottom-of-Atmosphere (BOA) reflectance values and atmospheric correction status
 
 POLLUTION & CONTAMINATION ANALYSIS:
 When analyzing heavy_metal_pollution, water_contamination, soil_contamination, industrial_pollution, oil_spill, or acid_mine_drainage:
-- Use spectral anomaly detection in SWIR bands (B6, B7) for mineral/chemical signatures
+- Use spectral anomaly detection in SWIR bands (B11, B12) for mineral/chemical signatures
 - Monitor vegetation stress via NDVI decline as proxy for soil contamination
 - Use water turbidity indices from Blue/Green band ratios for water quality
 - Detect thermal anomalies from industrial discharge
@@ -448,7 +735,7 @@ IMPORTANT: Return your response as a JSON object with this structure:
   "detailed_analysis": "4-8 sentence full analysis grounded in this specific location's known geography (named rivers/land cover/terrain where relevant) and this event type's typical drivers - avoid generic statements that could apply to any region",
   "severity": "low|medium|high|critical",
   "recommendations": ["4-6 specific, actionable recommendations, each naming a concrete action and a plausible responsible actor or monitoring approach (e.g. 'Deploy ground survey teams to verify X within 30 days' rather than 'monitor the situation')"],
-  "data_sources": ["Landsat 8 OLI", "Landsat 9 OLI", ...],
+  "data_sources": ["Sentinel-2 MSI"],
   "cloud_coverage": {
     "percentage": number (0-100),
     "detection_accuracy": number (target 90%+),
@@ -466,12 +753,12 @@ IMPORTANT: Return your response as a JSON object with this structure:
   },
   "analysis_confidence": number (0-100, aim for 90+),
   "landsat_info": {
-    "sensor": "Landsat 8 OLI|Landsat 9 OLI",
-    "path_row": "path/row",
+    "sensor": "Sentinel-2 MSI",
+    "tile_id": "MGRS tile ID",
     "acquisition_dates": ["date1", "date2"],
-    "spatial_resolution": "30m",
-    "bands_used": ["B2", "B3", "B4", "B5", "B6", "B7"],
-    "processing_level": "Level-2|Level-1"
+    "spatial_resolution": "10m",
+    "bands_used": ["B02", "B03", "B04", "B08", "B11", "B12"],
+    "processing_level": "Level-2A|Level-1C"
   },
   "spectral_indices": {
     "ndvi": { "min": number, "max": number, "mean": number, "std": number },
@@ -537,9 +824,19 @@ IMPORTANT: Return your response as a JSON object with this structure:
   }
 }`;
 
-    const userPrompt = `Analyze Landsat multispectral satellite imagery for ${isMultiEvent ? 'MULTIPLE EVENTS: ' : ''}${eventTypeLabels} in ${region}, Africa.
+    const userPrompt = `Analyze Sentinel-2 multispectral satellite imagery for ${isMultiEvent ? 'MULTIPLE EVENTS: ' : ''}${eventTypeLabels} in ${region}, Africa.
 Time period: ${startDate} to ${endDate}
 Coordinates: ${coordinates ? JSON.stringify(coordinates) : "Not specified"}
+${realStats ? `
+REAL MEASURED DATA (from actual Sentinel-2 satellite pixels, not an estimate):
+- NDVI mean: ${realStats.before.ndvi!.mean.toFixed(3)} (start of period) -> ${realStats.after.ndvi!.mean.toFixed(3)} (end of period)
+- NDVI-derived change: ${realChangePercent!.toFixed(1)}%
+${realStats.before.ndwi && realStats.after.ndwi ? `- NDWI mean: ${realStats.before.ndwi.mean.toFixed(3)} -> ${realStats.after.ndwi.mean.toFixed(3)}` : ''}
+${realStats.before.nbr && realStats.after.nbr ? `- NBR mean: ${realStats.before.nbr.mean.toFixed(3)} -> ${realStats.after.nbr.mean.toFixed(3)}` : ''}
+- Valid (cloud-free) pixel coverage: ${(realStats.after.validPixelRatio * 100).toFixed(0)}%
+- Area analyzed: ${realAreaKm2} km² (the real bounding box these statistics were computed over)
+You MUST use change_percent = ${realChangePercent!.toFixed(1)} and area_km2 = ${realAreaKm2} exactly (these are measured, not estimated) and ground your summary/detailed_analysis/severity/recommendations in this real figure and these real index values - do not invent different numbers.
+` : ''}
 
 TEMPORAL BREAKDOWN REQUIRED:
 - Break the ${startDate} to ${endDate} study period into 3-6 realistic sub-periods (quarterly if the span is 2 years or less, yearly if longer).
@@ -565,10 +862,10 @@ ${isMultiEvent ? `MULTI-EVENT REQUIREMENTS:
 - Provide combined impact assessment
 ` : ''}
 
-LANDSAT DATA REQUIREMENTS:
-- Use Landsat 8/9 OLI multispectral bands
+SENTINEL-2 DATA REQUIREMENTS:
+- Use Sentinel-2 MSI multispectral bands
 - Report specific spectral indices (NDVI, NDWI, NBR, NDBI)
-- Target 90%+ cloud detection accuracy using QA band
+- Target 90%+ cloud detection accuracy using the Scene Classification Layer (SCL)
 - Include radiometric and geometric quality metrics
 
 ${earthEngineContext.available ? `Access imagery via Google Earth Engine using authenticated service account access for project ${earthEngineContext.projectId}.` : `Google Earth Engine is unavailable for this request: ${earthEngineContext.message}`}`;
@@ -601,15 +898,43 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
     let lastErrorText = "";
     let lastStatus = 0;
     const attemptsPerModel = 2;
+    // 4 models x 2 attempts, each a real network round-trip to an overloaded
+    // API, can otherwise compound to 40-90s on a degraded/rate-limited key -
+    // long enough that a user watching a spinner reasonably assumes the app
+    // is broken. The overall deadline alone doesn't bound this tightly
+    // enough, since it only gates whether a NEW attempt starts - a single
+    // slow in-flight request past that point can still run long. Each
+    // attempt also gets its own timeout so no single request can consume
+    // the whole budget by itself.
+    const retryDeadline = Date.now() + 18000;
 
     outer: for (const model of modelChain) {
+      if (Date.now() > retryDeadline) {
+        console.warn("Gemini retry time budget exceeded, stopping early.");
+        break outer;
+      }
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
       for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
-        aiResponse = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: requestBody,
-        });
+        if (Date.now() > retryDeadline) break outer;
+        const perRequestTimeoutMs = Math.min(8000, Math.max(2000, retryDeadline - Date.now()));
+        const requestController = new AbortController();
+        const requestTimeoutId = setTimeout(() => requestController.abort(), perRequestTimeoutMs);
+        try {
+          aiResponse = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: requestBody,
+            signal: requestController.signal,
+          });
+        } catch (e) {
+          console.error(`AI request to ${model} timed out or failed (attempt ${attempt}):`, e instanceof Error ? e.message : e);
+          aiResponse = null;
+          lastStatus = 503; // treat a timeout the same as an overloaded provider for the fallback path below
+          lastErrorText = "Request timed out";
+          continue;
+        } finally {
+          clearTimeout(requestTimeoutId);
+        }
         if (aiResponse.ok) {
           console.log(`AI success on model ${model} (attempt ${attempt})`);
           break outer;
@@ -620,7 +945,7 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
         const isRetryable = aiResponse.status === 503 || aiResponse.status === 429 || aiResponse.status === 500;
         if (!isRetryable) break outer;
         // Short backoff between attempts on same model; rotate to next model after.
-        if (attempt < attemptsPerModel) {
+        if (attempt < attemptsPerModel && Date.now() < retryDeadline) {
           const delayMs = 800 * attempt + Math.random() * 400;
           await new Promise((r) => setTimeout(r, delayMs));
         }
@@ -679,13 +1004,27 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
         detailed_analysis: analysis,
         severity: "medium",
         recommendations: [],
-        data_sources: ["Landsat 8 OLI"],
+        data_sources: ["Sentinel-2 MSI"],
         cloud_coverage: { percentage: 5, detection_accuracy: 92, impact: "minimal", affected_areas: "None detected", qa_band_quality: "good" },
         data_quality: { overall_score: 87, radiometric_quality: 90, geometric_accuracy: 88, temporal_coverage: 85, atmospheric_correction: "applied", reflectance_type: "SR" },
         analysis_confidence: 87,
-        landsat_info: { sensor: "Landsat 8 OLI", spatial_resolution: "30m", bands_used: ["B2", "B3", "B4", "B5", "B6", "B7"], processing_level: "Level-2" },
+        landsat_info: { sensor: "Sentinel-2 MSI", spatial_resolution: "10m", bands_used: ["B02", "B03", "B04", "B08", "B11", "B12"], processing_level: "Level-2A" },
         spectral_indices: { ndvi: { min: 0.1, max: 0.8, mean: 0.45, std: 0.15 } },
       };
+    }
+
+    // Real data, where fetched above, wins over whatever Gemini produced -
+    // this guarantees the "real" claim in dataProvenance is actually true
+    // every time real stats succeeded, rather than merely "true if Gemini
+    // happened to follow the prompt's instruction to use them."
+    const usedRealStats = !!realStats;
+    const finalChangePercent = usedRealStats ? realChangePercent! : (parsedAnalysis.change_percent || 0);
+
+    const realSpectralIndices: Record<string, SpectralBandStats> = {};
+    if (usedRealStats) {
+      if (realStats!.after.ndvi) realSpectralIndices.ndvi = realStats!.after.ndvi;
+      if (realStats!.after.ndwi) realSpectralIndices.ndwi = realStats!.after.ndwi;
+      if (realStats!.after.nbr) realSpectralIndices.nbr = realStats!.after.nbr;
     }
 
     const result = {
@@ -695,30 +1034,38 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
       region,
       startDate,
       endDate,
-      area: parsedAnalysis.area_km2 ? `${parsedAnalysis.area_km2} km²` : "Analysis in progress",
-      changePercent: parsedAnalysis.change_percent || 0,
-      temporalBreakdown: Array.isArray(parsedAnalysis.temporal_breakdown) && parsedAnalysis.temporal_breakdown.length > 0
-        ? parsedAnalysis.temporal_breakdown.map((p: any) => ({
-            label: String(p.period || "Period"),
-            changePercent: typeof p.change_percent === "number" ? p.change_percent : parseFloat(p.change_percent),
-            months: typeof p.months === "number" ? p.months : undefined,
-          }))
-        : null,
+      area: realAreaKm2 !== null ? `${realAreaKm2} km²` : (parsedAnalysis.area_km2 ? `${parsedAnalysis.area_km2} km²` : "Analysis in progress"),
+      changePercent: finalChangePercent,
+      temporalBreakdown: realTemporalBreakdown && realTemporalBreakdown.length > 0
+        ? realTemporalBreakdown
+        : (Array.isArray(parsedAnalysis.temporal_breakdown) && parsedAnalysis.temporal_breakdown.length > 0
+            ? parsedAnalysis.temporal_breakdown.map((p: any) => ({
+                label: String(p.period || "Period"),
+                changePercent: typeof p.change_percent === "number" ? p.change_percent : parseFloat(p.change_percent),
+                months: typeof p.months === "number" ? p.months : undefined,
+              }))
+            : null),
       summary: parsedAnalysis.summary || parsedAnalysis.detailed_analysis?.split('\n')[0] || "Environmental analysis complete",
       fullAnalysis: parsedAnalysis.detailed_analysis || analysis,
       severity: parsedAnalysis.severity || "medium",
       recommendations: cleanTextArray(parsedAnalysis.recommendations),
       // Not taken from the model's own self-reported "data_sources" field -
-      // Gemini has no actual way to know what it "used" since it never
-      // queried any imagery provider; this is an honest fixed description.
-      dataSources: ["Google Gemini 2.5 (AI-estimated, not measured imagery)"],
+      // Gemini has no actual way to know what it "used". This is computed
+      // by this function based on what was actually fetched, not phrased.
+      dataSources: usedRealStats
+        ? ["Sentinel-2 L2A (Copernicus Data Space Ecosystem) - real NDVI/NDWI/NBR statistics", "Google Gemini 2.5 (AI-generated narrative analysis)"]
+        : ["Google Gemini 2.5 (AI-estimated, not measured imagery)"],
       // Enhanced quality metrics
-      cloudCoverage: parsedAnalysis.cloud_coverage || { percentage: 5, detection_accuracy: 92, impact: "minimal" },
+      cloudCoverage: usedRealStats
+        ? { percentage: Math.round((1 - realStats!.after.validPixelRatio) * 100), detection_accuracy: null, impact: realStats!.after.validPixelRatio > 0.7 ? "minimal" : "moderate", affected_areas: "Computed from real Sentinel-2 Scene Classification Layer masking", qa_band_quality: "measured" }
+        : (parsedAnalysis.cloud_coverage || { percentage: 5, detection_accuracy: 92, impact: "minimal" }),
       dataQuality: parsedAnalysis.data_quality || { overall_score: 87 },
       analysisConfidence: parsedAnalysis.analysis_confidence || 87,
-      // Landsat-specific info
-      landsatInfo: parsedAnalysis.landsat_info || { sensor: "Landsat 8 OLI", spatial_resolution: "30m" },
-      spectralIndices: parsedAnalysis.spectral_indices || {},
+      // Sensor info (field name kept as landsatInfo for backward compatibility
+      // with existing stored analysis_results rows and frontend prop names -
+      // the actual sensor described is always Sentinel-2, never Landsat)
+      landsatInfo: parsedAnalysis.landsat_info || { sensor: "Sentinel-2 MSI", spatial_resolution: "10m" },
+      spectralIndices: { ...(parsedAnalysis.spectral_indices || {}), ...realSpectralIndices },
       // Classification results
       classificationResults: parsedAnalysis.classification_results || null,
       classificationType,
@@ -727,22 +1074,29 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
       enableChangeDetection,
       // Multi-event results
       multiEventAnalysis: parsedAnalysis.multi_event_analysis || null,
-      // Predictive modeling
-      predictiveModeling: parsedAnalysis.predictive_modeling || null,
+      // Predictive modeling - real regression numbers (when available) win
+      // for the quantitative fields; trend_direction stays Gemini's call
+      // since "improving vs declining" is a judgment about this specific
+      // event type, not something the regression slope alone can determine.
+      predictiveModeling: realPredictiveModeling
+        ? { ...(parsedAnalysis.predictive_modeling || {}), ...realPredictiveModeling }
+        : (parsedAnalysis.predictive_modeling || null),
       // Methodology transparency
       methodologyTransparency: parsedAnalysis.methodology_transparency || null,
       // Computed by this function, not the model - guarantees an honest
       // provenance statement regardless of how the AI phrases its own text.
       dataProvenance: {
-        analysisMethod: "ai_estimated",
-        disclaimer: "Spectral index values, percentages, and classification statistics in this analysis are AI-generated plausible estimates based on the model's training knowledge of typical environmental patterns for this region/event type - they are not measurements derived from actual satellite pixel data. No Landsat or Sentinel imagery was fetched or processed for this specific analysis.",
+        analysisMethod: usedRealStats ? "real_sentinel_statistics" : "ai_estimated",
+        disclaimer: usedRealStats
+          ? `The change percentage and spectral index values (NDVI${realSpectralIndices.ndwi ? '/NDWI' : ''}${realSpectralIndices.nbr ? '/NBR' : ''}) above are real measurements computed from actual Sentinel-2 satellite pixels (Copernicus Data Space Ecosystem), comparing the start and end of the study period over an ~11km area around the given coordinates (${(realStats!.after.validPixelRatio * 100).toFixed(0)}% cloud-free pixel coverage). The narrative summary, severity assessment, recommendations, and any classification/change-matrix breakdown are still AI-generated (Google Gemini) interpretation grounded in these real numbers, not independently measured themselves.`
+          : "Spectral index values, percentages, and classification statistics in this analysis are AI-generated plausible estimates based on the model's training knowledge of typical environmental patterns for this region/event type - they are not measurements derived from actual satellite pixel data. No real satellite imagery was fetched or processed for this specific analysis.",
         earthEngine: {
           configured: earthEngineContext.available,
           note: earthEngineContext.available
             ? "An Earth Engine service account is configured and authenticates successfully, but its access token is not currently used to fetch real pixel data for this analysis."
             : earthEngineContext.message,
         },
-        realDataSourcesUsed: [] as string[],
+        realDataSourcesUsed: usedRealStats ? ["Sentinel-2 L2A (Copernicus Data Space Ecosystem)"] : [],
       },
       coordinates,
       timestamp: new Date().toISOString(),
