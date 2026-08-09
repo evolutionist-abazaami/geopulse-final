@@ -13,9 +13,15 @@ interface DatePickerProps {
   minDate?: string;
   maxDate?: string;
   disabled?: boolean;
-  dropdownPosition?: "top" | "bottom";
+  /** "auto" (default) measures available viewport space on open and flips
+   * upward if the dropdown would otherwise run off the bottom of the
+   * screen - matching how native pickers behave. Pass "top"/"bottom" to
+   * force a direction instead. */
+  dropdownPosition?: "top" | "bottom" | "auto";
   dropdownAlign?: "left" | "right";
 }
+
+const ESTIMATED_DROPDOWN_HEIGHT = 320;
 
 function parseDate(dateStr: string): Date | null {
   if (!dateStr || dateStr.trim() === "") return null;
@@ -42,10 +48,11 @@ const DatePickerImpl: React.FC<DatePickerProps> = ({
   minDate,
   maxDate,
   disabled = false,
-  dropdownPosition = "bottom",
+  dropdownPosition = "auto",
   dropdownAlign = "left",
 }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [resolvedPosition, setResolvedPosition] = useState<"top" | "bottom">("bottom");
   const [month, setMonth] = useState(() => parseDate(value) ?? new Date());
   const [viewMode, setViewMode] = useState<"days" | "months" | "years">("days");
   const [dayInput, setDayInput] = useState(() => { const d = parseDate(value); return d ? format(d, "dd") : ""; });
@@ -98,10 +105,23 @@ const DatePickerImpl: React.FC<DatePickerProps> = ({
 
   const openPicker = useCallback(() => {
     if (disabled) return;
+
+    if (dropdownPosition === "auto") {
+      const rect = pickerRef.current?.getBoundingClientRect();
+      if (rect) {
+        const spaceBelow = window.innerHeight - rect.bottom;
+        const spaceAbove = rect.top;
+        const fitsBelow = spaceBelow >= ESTIMATED_DROPDOWN_HEIGHT;
+        setResolvedPosition(fitsBelow ? "bottom" : spaceAbove > spaceBelow ? "top" : "bottom");
+      }
+    } else {
+      setResolvedPosition(dropdownPosition);
+    }
+
     setIsOpen(true);
     setViewMode("days");
     setMonth(dateObj ?? new Date());
-  }, [dateObj, disabled]);
+  }, [dateObj, disabled, dropdownPosition]);
 
   const handleDateSelect = useCallback((date: Date) => {
     onChange(formatDateForInput(date));
@@ -302,7 +322,7 @@ const DatePickerImpl: React.FC<DatePickerProps> = ({
               "absolute z-50 rounded-lg shadow-lg p-2.5 w-60",
               "bg-white dark:bg-surface-2 border border-gray-200 dark:border-border-default",
               dropdownAlign === "right" ? "right-0" : "left-0",
-              dropdownPosition === "top" ? "bottom-full mb-2" : "mt-2"
+              resolvedPosition === "top" ? "bottom-full mb-2" : "mt-2"
             )}
           >
             <div className="flex items-center justify-between mb-2">
