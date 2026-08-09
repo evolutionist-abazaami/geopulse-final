@@ -114,6 +114,14 @@ const generateLocalSatelliteAnalysis = (
   ];
 
   return {
+    // Not a real analysis - no imagery was fetched or processed. These
+    // numbers are deterministically generated from the coordinates so the
+    // UI has something to show when the edge function is unreachable. The
+    // existing `results.fallback` banner (see the results panel below)
+    // already exists for this; without this flag it was being shown as a
+    // normal successful result.
+    fallback: true,
+    fallbackReason: "LOCAL_SIMULATION",
     eventType: mainEvent,
     eventTypes: eventTypesToAnalyze,
     isMultiEvent,
@@ -303,17 +311,23 @@ export function GeoWitnessPanel() {
         east: coordinates.lng + boundarySize, west: coordinates.lng - boundarySize,
       });
 
-      saveAnalysis({
-        type: "geowitness",
-        eventType: eventTypesToAnalyze[0],
-        regionName: targetRegionName,
-        regionBounds: {
-          north: coordinates.lat + boundarySize, south: coordinates.lat - boundarySize,
-          east: coordinates.lng + boundarySize, west: coordinates.lng - boundarySize,
-        },
-        dateRange: { start: startDate, end: endDate },
-        resultPayload: data,
-      });
+      // Don't persist locally-simulated results into history - they're not
+      // a real analysis, and every future reader of analysis_history
+      // (Reports, GeoSearch grounding, etc.) would otherwise have to
+      // remember to filter them back out.
+      if (data?.fallbackReason !== "LOCAL_SIMULATION") {
+        saveAnalysis({
+          type: "geowitness",
+          eventType: eventTypesToAnalyze[0],
+          regionName: targetRegionName,
+          regionBounds: {
+            north: coordinates.lat + boundarySize, south: coordinates.lat - boundarySize,
+            east: coordinates.lng + boundarySize, west: coordinates.lng - boundarySize,
+          },
+          dateRange: { start: startDate, end: endDate },
+          resultPayload: data,
+        });
+      }
     };
 
     try {
@@ -348,16 +362,18 @@ export function GeoWitnessPanel() {
         : generateLocalSatelliteAnalysis(eventTypesToAnalyze, targetRegionName, startDate, endDate, coordinates, classificationType, enableChangeDetection, numClasses);
 
       applyResult(data);
-      if (isFallbackAnalysis(data)) {
+      if (data?.fallbackReason === "LOCAL_SIMULATION") {
+        toast.warning("Analysis service unreachable - showing a simulated preview, not real satellite data.");
+      } else if (isFallbackAnalysis(data)) {
         toast.warning("AI analysis is temporarily delayed due to provider load. Showing a fallback result.");
       } else {
         toast.success("Satellite analysis complete!");
       }
     } catch (error) {
-      console.warn("Analysis API unreachable. Engaging GeoPulse Local Intelligence Engine:", error);
+      console.warn("Analysis API unreachable, showing a local simulated preview:", error);
       const fallbackData = generateLocalSatelliteAnalysis(eventTypesToAnalyze, targetRegionName, startDate, endDate, coordinates, classificationType, enableChangeDetection, numClasses);
       applyResult(fallbackData);
-      toast.success("Analysis complete (GeoPulse Intelligence Engine)");
+      toast.warning("Analysis service unreachable - showing a simulated preview, not real satellite data.");
     } finally {
       setIsAnalyzing(false);
     }
@@ -500,10 +516,14 @@ export function GeoWitnessPanel() {
                   <AlertTriangle className="h-5 w-5 text-critical mt-0.5 flex-shrink-0" />
                   <div>
                     <p className="font-semibold text-critical text-sm">
-                      {results.fallback ? "Analysis Delayed" : results.severity === "critical" ? "Critical Impact" : results.severity === "high" ? "High Impact" : results.severity === "medium" ? "Moderate Impact" : "Low Impact"} Detected
+                      {results.fallback ? (results.fallbackReason === "LOCAL_SIMULATION" ? "Simulated Result - Not Real Data" : "Analysis Delayed") : results.severity === "critical" ? "Critical Impact" : results.severity === "high" ? "High Impact" : results.severity === "medium" ? "Moderate Impact" : "Low Impact"} Detected
                     </p>
                     <p className="text-[11px] text-gray-400 dark:text-v2-muted">
-                      {results.fallback ? "The AI provider is temporarily overloaded. Retry shortly for full results." : "Attention recommended"}
+                      {results.fallback
+                        ? (results.fallbackReason === "LOCAL_SIMULATION"
+                            ? "The analysis service is unreachable. These numbers are generated on your device for preview only - no satellite imagery was processed. Retry once you're back online for a real result."
+                            : "The AI provider is temporarily overloaded. Retry shortly for full results.")
+                        : "Attention recommended"}
                     </p>
                   </div>
                 </div>

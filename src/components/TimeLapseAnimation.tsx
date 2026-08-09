@@ -19,6 +19,8 @@ interface TimeFrame {
   label: string;
   value: number;
   data?: any;
+  /** True when `value` is a locally-generated placeholder, not a real measurement. */
+  isSimulated?: boolean;
 }
 
 const eventTypes = [
@@ -99,27 +101,36 @@ const TimeLapseAnimation = ({ onFrameChange, mapCenter }: TimeLapseAnimationProp
                 data,
               };
             }
-            return {
-              ...frame,
-              value: data.changePercent || Math.random() * 60 + 20,
-              data,
-            };
+            if (typeof data.changePercent === "number") {
+              return {
+                ...frame,
+                value: data.changePercent,
+                data,
+              };
+            }
           }
         } catch (error) {
           console.error(`Error loading frame ${frame.label}:`, error);
         }
-        
-        // Fallback with simulated data
+
+        // No real measurement available for this frame - placeholder value,
+        // not a result. Marked isSimulated so the UI doesn't present it as real.
         return {
           ...frame,
           value: Math.random() * 60 + 20,
+          isSimulated: true,
         };
       });
 
       const loadedFrames = await Promise.all(frameRequests);
       setFrames(loadedFrames);
       setCurrentFrameIndex(0);
-      toast.success(`Loaded ${loadedFrames.length} time frames`);
+      const simulatedCount = loadedFrames.filter((f) => f.isSimulated).length;
+      if (simulatedCount > 0) {
+        toast.warning(`Loaded ${loadedFrames.length} time frames - ${simulatedCount} could not be measured and are simulated placeholders.`);
+      } else {
+        toast.success(`Loaded ${loadedFrames.length} time frames`);
+      }
 
     } catch (error) {
       console.error("Timelapse load error:", error);
@@ -303,10 +314,15 @@ const TimeLapseAnimation = ({ onFrameChange, mapCenter }: TimeLapseAnimationProp
           </div>
 
           {currentFrame && (
-            <div className="p-3 rounded-lg bg-muted/50">
+            <div className={currentFrame.isSimulated ? "p-3 rounded-lg bg-warning-dim border border-warning/30" : "p-3 rounded-lg bg-muted/50"}>
               <p className="text-sm">
-                <span className="font-medium">{eventType}</span>: {currentFrame.value.toFixed(1)}% change detected
+                <span className="font-medium">{eventType}</span>: {currentFrame.value.toFixed(1)}% change {currentFrame.isSimulated ? "(simulated placeholder)" : "detected"}
               </p>
+              {currentFrame.isSimulated && (
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  No real measurement available for {currentFrame.label} - this value isn't from satellite imagery.
+                </p>
+              )}
             </div>
           )}
 

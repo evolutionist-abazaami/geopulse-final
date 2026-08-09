@@ -31,7 +31,7 @@ export function useAnalysisHistory() {
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
       .limit(50);
-    setRows((data as AnalysisHistoryRow[]) || []);
+    setRows((data as unknown as AnalysisHistoryRow[]) || []);
     setIsLoading(false);
   }, []);
 
@@ -95,7 +95,7 @@ export function useAnalysisHistory() {
       console.error("Failed to save analysis history:", error);
       return null;
     }
-    const row = data as AnalysisHistoryRow;
+    const row = data as unknown as AnalysisHistoryRow;
     setRows((prev) => [row, ...prev]);
     return row;
   }, []);

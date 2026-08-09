@@ -5,7 +5,11 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist"] },
+  // supabase/functions is Deno code, linted separately via `deno lint`
+  // (see deno.json + .github/workflows/deno.yml) - Node/browser ESLint
+  // rules and globals don't apply there. geopulse-migration is a stale
+  // point-in-time export snapshot, not live app code.
+  { ignores: ["dist", "supabase/functions", "geopulse-migration"] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ["**/*.{ts,tsx}"],

@@ -10,7 +10,32 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "13.0.5"
+    PostgrestVersion: "14.15"
+  }
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
   }
   public: {
     Tables: {
@@ -43,6 +68,42 @@ export type Database = {
           id?: string
           min_severity?: string
           updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      analysis_history: {
+        Row: {
+          created_at: string
+          date_range: Json | null
+          event_type: string | null
+          id: string
+          region_bounds: Json
+          region_name: string
+          result_payload: Json
+          type: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          date_range?: Json | null
+          event_type?: string | null
+          id?: string
+          region_bounds: Json
+          region_name: string
+          result_payload: Json
+          type: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          date_range?: Json | null
+          event_type?: string | null
+          id?: string
+          region_bounds?: Json
+          region_name?: string
+          result_payload?: Json
+          type?: string
           user_id?: string
         }
         Relationships: []
@@ -533,6 +594,29 @@ export type Database = {
       }
     }
     Functions: {
+      get_shared_report: {
+        Args: { p_share_id: string }
+        Returns: {
+          created_at: string
+          created_by: string | null
+          event_type: string
+          expires_at: string | null
+          id: string
+          is_active: boolean
+          location_name: string
+          report_data: Json
+          report_type: string
+          share_id: string
+          title: string
+          view_count: number
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "shared_reports"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
       increment_shared_report_view: {
         Args: { p_share_id: string }
         Returns: undefined
@@ -665,6 +749,9 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {},
   },

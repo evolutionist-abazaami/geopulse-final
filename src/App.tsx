@@ -86,7 +86,9 @@ const App = () => (
 
               <Route path="*" element={<NotFound />} />
             </Routes>
-            <DemoRecorder />
+            {/* Internal sales/marketing screen-capture tool, not a monitoring
+                feature - opt-in only so real users don't see it. */}
+            {import.meta.env.VITE_ENABLE_DEMO_RECORDER === "true" && <DemoRecorder />}
           </RightPanelProvider>
         </MapProvider>
       </BrowserRouter>

@@ -24,10 +24,7 @@ const SharedReport = () => {
 
       try {
         const { data, error: fetchError } = await supabase
-          .from("shared_reports")
-          .select("*")
-          .eq("share_id", shareId)
-          .eq("is_active", true)
+          .rpc("get_shared_report", { p_share_id: shareId })
           .single();
 
         if (fetchError || !data) {
