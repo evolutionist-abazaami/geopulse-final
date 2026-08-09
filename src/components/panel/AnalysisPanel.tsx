@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { ReactCompareSlider, ReactCompareSliderImage } from "react-compare-slider";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { Sparkles, Download, Bell } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -8,12 +7,6 @@ import type { AnalysisHistoryRow } from "@/contexts/RightPanelContext";
 import { AiPanel } from "./AiPanel";
 
 type Tab = "overview" | "trend" | "ai";
-
-function formatDate(value?: string) {
-  if (!value) return "—";
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString();
-}
 
 export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
@@ -69,25 +62,6 @@ export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
 
       {activeTab === "overview" && (
         <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden scrollbar-thin p-3.5 space-y-3">
-          {payload.beforeImageUrl && payload.afterImageUrl ? (
-            <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-border-subtle">
-              <ReactCompareSlider
-                itemOne={<ReactCompareSliderImage src={payload.beforeImageUrl} alt="Before" style={{ height: 140, objectFit: "cover" }} />}
-                itemTwo={<ReactCompareSliderImage src={payload.afterImageUrl} alt="After" style={{ height: 140, objectFit: "cover" }} />}
-              />
-            </div>
-          ) : (
-            <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-border-subtle">
-              <div className="h-[68px] bg-gray-100 dark:bg-surface-2 flex items-center justify-center">
-                <span className="text-[11px] text-gray-400 dark:text-v2-muted">Before · {formatDate(data.date_range?.start)}</span>
-              </div>
-              <div className="h-px bg-gray-200 dark:bg-border-default" />
-              <div className="h-[68px] bg-gray-100 dark:bg-surface-3 flex items-center justify-center">
-                <span className="text-[11px] text-gray-400 dark:text-v2-muted">After · {formatDate(data.date_range?.end)}</span>
-              </div>
-            </div>
-          )}
-
           {metrics.length > 0 && (
             <div className="grid grid-cols-2 gap-2">
               {metrics.map(({ label, formatted, sentiment }) => (
