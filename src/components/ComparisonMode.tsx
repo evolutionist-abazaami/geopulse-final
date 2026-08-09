@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { DatePicker } from "@/components/ui/date-picker";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Loader2, GitCompare, TrendingUp, TrendingDown, Minus, Map, PlayCircle } from "lucide-react";
 import { toast } from "sonner";
@@ -258,11 +258,11 @@ const ComparisonMode = ({ onComparisonComplete }: ComparisonModeProps) => {
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className="text-xs text-muted-foreground">Start</label>
-              <Input type="date" value={period1Start} onChange={(e) => setPeriod1Start(e.target.value)} />
+              <DatePicker value={period1Start} onChange={setPeriod1Start} className="w-full" />
             </div>
             <div>
               <label className="text-xs text-muted-foreground">End</label>
-              <Input type="date" value={period1End} onChange={(e) => setPeriod1End(e.target.value)} />
+              <DatePicker value={period1End} onChange={setPeriod1End} className="w-full" />
             </div>
           </div>
         </Card>
@@ -272,11 +272,11 @@ const ComparisonMode = ({ onComparisonComplete }: ComparisonModeProps) => {
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className="text-xs text-muted-foreground">Start</label>
-              <Input type="date" value={period2Start} onChange={(e) => setPeriod2Start(e.target.value)} />
+              <DatePicker value={period2Start} onChange={setPeriod2Start} className="w-full" />
             </div>
             <div>
               <label className="text-xs text-muted-foreground">End</label>
-              <Input type="date" value={period2End} onChange={(e) => setPeriod2End(e.target.value)} />
+              <DatePicker value={period2End} onChange={setPeriod2End} className="w-full" />
             </div>
           </div>
         </Card>

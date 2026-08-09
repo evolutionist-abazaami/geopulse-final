@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
+import { DatePicker } from "@/components/ui/date-picker";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
@@ -437,11 +437,11 @@ export function GeoWitnessPanel() {
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="text-[13px] font-medium mb-2 block text-gray-900 dark:text-v2-primary">Start Date</label>
-                <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+                <DatePicker value={startDate} onChange={setStartDate} className="w-full" />
               </div>
               <div>
                 <label className="text-[13px] font-medium mb-2 block text-gray-900 dark:text-v2-primary">End Date</label>
-                <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+                <DatePicker value={endDate} onChange={setEndDate} className="w-full" />
               </div>
             </div>
 
