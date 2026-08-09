@@ -140,7 +140,7 @@ export function Sidebar() {
       {!collapsed && (
         <div className="flex flex-col flex-1 overflow-hidden px-2 pb-2">
           <p className="text-[10px] text-gray-400 dark:text-v2-muted uppercase tracking-[0.08em] px-2 py-2 flex-shrink-0">Analysis history</p>
-          <div className="flex-1 overflow-y-auto scrollbar-thin">
+          <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden scrollbar-thin">
             {isLoading ? (
               Array.from({ length: 5 }).map((_, i) => (
                 <div key={i} className="flex items-start gap-2 p-2">

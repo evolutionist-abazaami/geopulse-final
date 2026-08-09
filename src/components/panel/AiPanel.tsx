@@ -20,7 +20,7 @@ export function AiPanel() {
 
   return (
     <div className="flex flex-col h-full">
-      <div ref={scrollRef} className="flex-1 overflow-y-auto scrollbar-thin p-3.5 space-y-3">
+      <div ref={scrollRef} className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden scrollbar-thin p-3.5 space-y-3">
         <div className="flex flex-col gap-3">
           {messages.map((msg, i) => (
             <div

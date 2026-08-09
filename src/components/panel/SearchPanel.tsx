@@ -11,7 +11,7 @@ export function SearchPanel({ data }: { data: GeoSearchResult }) {
   const firstLocation = data.locations?.[0];
 
   return (
-    <div className="flex-1 overflow-y-auto scrollbar-thin p-3.5 space-y-3">
+    <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden scrollbar-thin p-3.5 space-y-3">
       <div>
         <p className="text-[18px] font-semibold text-gray-900 dark:text-v2-primary leading-snug">
           {firstLocation?.name || data.reportLocation?.name || "Search result"}

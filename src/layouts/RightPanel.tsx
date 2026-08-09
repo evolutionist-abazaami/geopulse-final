@@ -20,11 +20,11 @@ export function RightPanel() {
     <AnimatePresence>
       {mode && (
         <motion.aside
-          initial={{ x: 320, opacity: 0 }}
+          initial={{ x: 380, opacity: 0 }}
           animate={{ x: 0, opacity: 1 }}
-          exit={{ x: 320, opacity: 0 }}
+          exit={{ x: 380, opacity: 0 }}
           transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-          className="w-[320px] flex-shrink-0 flex flex-col bg-white dark:bg-surface-1 border-l border-gray-200 dark:border-border-subtle overflow-hidden"
+          className="w-[380px] flex-shrink-0 flex flex-col bg-white dark:bg-surface-1 border-l border-gray-200 dark:border-border-subtle overflow-hidden"
         >
           <div className="flex items-start justify-between px-3.5 py-3 border-b border-gray-200 dark:border-border-subtle flex-shrink-0">
             <div>

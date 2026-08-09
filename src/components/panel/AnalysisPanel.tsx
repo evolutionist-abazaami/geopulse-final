@@ -68,7 +68,7 @@ export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
       </div>
 
       {activeTab === "overview" && (
-        <div className="flex-1 overflow-y-auto scrollbar-thin p-3.5 space-y-3">
+        <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden scrollbar-thin p-3.5 space-y-3">
           {payload.beforeImageUrl && payload.afterImageUrl ? (
             <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-border-subtle">
               <ReactCompareSlider
@@ -137,7 +137,7 @@ export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
       )}
 
       {activeTab === "trend" && (
-        <div className="flex-1 overflow-y-auto scrollbar-thin p-3.5">
+        <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden scrollbar-thin p-3.5">
           <p className="text-[12px] text-gray-400 dark:text-v2-muted mb-3">Historical trend</p>
           {timeSeries.length > 0 ? (
             <ResponsiveContainer width="100%" height={180}>

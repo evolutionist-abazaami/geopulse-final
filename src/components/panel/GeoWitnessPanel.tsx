@@ -365,13 +365,13 @@ export function GeoWitnessPanel() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex border-b border-gray-200 dark:border-border-subtle overflow-x-auto scrollbar-thin flex-shrink-0">
+      <div className="flex flex-wrap border-b border-gray-200 dark:border-border-subtle flex-shrink-0">
         {TOOLS.map((t) => (
           <button
             key={t.id}
             onClick={() => setTool(t.id)}
             className={cn(
-              "flex items-center gap-1.5 text-[12px] py-2.5 px-3 border-b-2 transition-all duration-fast whitespace-nowrap flex-shrink-0",
+              "flex items-center gap-1.5 text-[12px] py-2.5 px-3 border-b-2 transition-all duration-fast whitespace-nowrap",
               tool === t.id
                 ? "text-brand border-brand"
                 : "text-gray-400 dark:text-v2-muted border-transparent hover:text-gray-600 dark:hover:text-v2-secondary"
@@ -383,7 +383,7 @@ export function GeoWitnessPanel() {
         ))}
       </div>
 
-      <div className="flex-1 overflow-y-auto scrollbar-thin p-3.5 space-y-4">
+      <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden scrollbar-thin p-3.5 space-y-4">
         {tool === "analysis" && (
           <div className="space-y-4">
             <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-surface-2 rounded-lg">
