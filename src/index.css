@@ -120,3 +120,24 @@ All colors MUST be HSL.
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
 }
+
+/* --- Landing page utilities --- */
+
+/* Gradient text — used on landing page headlines */
+.text-gradient {
+  background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 60%, #06b6d4 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Lenis smooth scroll (landing page only) */
+html.lenis {
+  height: auto;
+}
+.lenis.lenis-smooth {
+  scroll-behavior: auto !important;
+}
+.lenis.lenis-smooth [data-lenis-prevent] {
+  overscroll-behavior: contain;
+}
