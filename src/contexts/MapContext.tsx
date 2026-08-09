@@ -76,13 +76,21 @@ export function MapProvider({ children }: { children: ReactNode }) {
   const [polygons, setPolygons] = useState<MapPolygon[]>([]);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedArea, setSelectedArea] = useState<{ lat: number; lng: number; radius?: number } | null>(null);
-  const [onLocationSelect, setOnLocationSelect] = useState<LocationSelectHandler | undefined>(undefined);
+  const [onLocationSelect, setOnLocationSelectState] = useState<LocationSelectHandler | undefined>(undefined);
   const [is3DEnabled, setIs3DEnabled] = useState(false);
   const [activeHeatmapLayer, setActiveHeatmapLayer] = useState<HeatmapLayerType>("none");
 
   const setView = useCallback((nextCenter: [number, number], nextZoom: number) => {
     setCenter(nextCenter);
     setZoom(nextZoom);
+  }, []);
+
+  // Storing a function in useState needs the functional-updater form
+  // (setState(() => fn)), otherwise React treats a plain function argument
+  // as an updater and immediately calls it with the *previous* state -
+  // wrapped here once so every caller can just pass the handler directly.
+  const setOnLocationSelect = useCallback((fn: LocationSelectHandler | undefined) => {
+    setOnLocationSelectState(() => fn);
   }, []);
 
   const ensureRegionLayers = useCallback((map: maplibregl.Map) => {
