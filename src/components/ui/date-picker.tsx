@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { Calendar, ChevronLeft, ChevronRight } from "lucide-react";
 import {
   format, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isSameDay,
@@ -13,15 +14,13 @@ interface DatePickerProps {
   minDate?: string;
   maxDate?: string;
   disabled?: boolean;
-  /** "auto" (default) measures available viewport space on open and flips
-   * upward if the dropdown would otherwise run off the bottom of the
-   * screen - matching how native pickers behave. Pass "top"/"bottom" to
-   * force a direction instead. */
-  dropdownPosition?: "top" | "bottom" | "auto";
+  /** Preferred horizontal edge to align to the trigger before viewport
+   * clamping kicks in. Vertical direction is always auto-measured. */
   dropdownAlign?: "left" | "right";
 }
 
-const ESTIMATED_DROPDOWN_HEIGHT = 320;
+const VIEWPORT_PADDING = 8;
+const TRIGGER_GAP = 6;
 
 function parseDate(dateStr: string): Date | null {
   if (!dateStr || dateStr.trim() === "") return null;
@@ -48,17 +47,20 @@ const DatePickerImpl: React.FC<DatePickerProps> = ({
   minDate,
   maxDate,
   disabled = false,
-  dropdownPosition = "auto",
   dropdownAlign = "left",
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [resolvedPosition, setResolvedPosition] = useState<"top" | "bottom">("bottom");
   const [month, setMonth] = useState(() => parseDate(value) ?? new Date());
   const [viewMode, setViewMode] = useState<"days" | "months" | "years">("days");
   const [dayInput, setDayInput] = useState(() => { const d = parseDate(value); return d ? format(d, "dd") : ""; });
   const [monthInput, setMonthInput] = useState(() => { const d = parseDate(value); return d ? format(d, "MM") : ""; });
   const [yearInput, setYearInput] = useState(() => { const d = parseDate(value); return d ? format(d, "yyyy") : ""; });
+  // Fixed-position screen coordinates, computed after the (portaled) dropdown
+  // mounts so its real measured size can be clamped into the viewport - null
+  // while unmeasured so it renders invisibly instead of flashing at (0,0).
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
   const dayRef = useRef<HTMLInputElement>(null);
   const monthRef = useRef<HTMLInputElement>(null);
   const yearRef = useRef<HTMLInputElement>(null);
@@ -83,15 +85,52 @@ const DatePickerImpl: React.FC<DatePickerProps> = ({
   }
 
   useEffect(() => {
+    // The dropdown is portaled to document.body (see below), so it's no
+    // longer a DOM descendant of pickerRef - both refs need checking or
+    // every click inside the calendar would register as "outside".
     const handleClickOutside = (event: MouseEvent) => {
-      if (pickerRef.current && !pickerRef.current.contains(event.target as Node)) {
-        setIsOpen(false);
-        setViewMode("days");
-      }
+      const target = event.target as Node;
+      if (pickerRef.current?.contains(target)) return;
+      if (dropdownRef.current?.contains(target)) return;
+      setIsOpen(false);
+      setViewMode("days");
     };
     if (isOpen) document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [isOpen]);
+
+  // Measures the trigger and the (already-mounted-but-invisible) dropdown,
+  // then picks fixed-position coordinates that keep it fully inside the
+  // viewport on both axes - same principle native pickers use, and the only
+  // way to guarantee no clipping regardless of what overflow:hidden/auto
+  // ancestor the trigger happens to sit inside.
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      setPosition(null);
+      return;
+    }
+    const trigger = pickerRef.current;
+    const dropdown = dropdownRef.current;
+    if (!trigger || !dropdown) return;
+
+    const triggerRect = trigger.getBoundingClientRect();
+    const dropdownWidth = dropdown.offsetWidth;
+    const dropdownHeight = dropdown.offsetHeight;
+
+    const spaceBelow = window.innerHeight - triggerRect.bottom;
+    const spaceAbove = triggerRect.top;
+    const top = spaceBelow >= dropdownHeight + VIEWPORT_PADDING || spaceBelow >= spaceAbove
+      ? Math.min(triggerRect.bottom + TRIGGER_GAP, window.innerHeight - dropdownHeight - VIEWPORT_PADDING)
+      : Math.max(VIEWPORT_PADDING, triggerRect.top - dropdownHeight - TRIGGER_GAP);
+
+    const preferredLeft = dropdownAlign === "right" ? triggerRect.right - dropdownWidth : triggerRect.left;
+    const left = Math.max(
+      VIEWPORT_PADDING,
+      Math.min(preferredLeft, window.innerWidth - dropdownWidth - VIEWPORT_PADDING)
+    );
+
+    setPosition({ top, left });
+  }, [isOpen, viewMode, dropdownAlign]);
 
   const calendarDays = useMemo(() => {
     const monthStart = startOfMonth(month);
@@ -105,23 +144,10 @@ const DatePickerImpl: React.FC<DatePickerProps> = ({
 
   const openPicker = useCallback(() => {
     if (disabled) return;
-
-    if (dropdownPosition === "auto") {
-      const rect = pickerRef.current?.getBoundingClientRect();
-      if (rect) {
-        const spaceBelow = window.innerHeight - rect.bottom;
-        const spaceAbove = rect.top;
-        const fitsBelow = spaceBelow >= ESTIMATED_DROPDOWN_HEIGHT;
-        setResolvedPosition(fitsBelow ? "bottom" : spaceAbove > spaceBelow ? "top" : "bottom");
-      }
-    } else {
-      setResolvedPosition(dropdownPosition);
-    }
-
     setIsOpen(true);
     setViewMode("days");
     setMonth(dateObj ?? new Date());
-  }, [dateObj, disabled, dropdownPosition]);
+  }, [dateObj, disabled]);
 
   const handleDateSelect = useCallback((date: Date) => {
     onChange(formatDateForInput(date));
@@ -314,15 +340,20 @@ const DatePickerImpl: React.FC<DatePickerProps> = ({
         </div>
       </div>
 
-      {isOpen && !disabled && (
+      {isOpen && !disabled && createPortal(
         <>
           <div className="fixed inset-0 z-40" onClick={() => { setIsOpen(false); setViewMode("days"); }} />
           <div
+            ref={dropdownRef}
+            style={{
+              position: "fixed",
+              top: position?.top ?? 0,
+              left: position?.left ?? 0,
+              visibility: position ? "visible" : "hidden",
+            }}
             className={cn(
-              "absolute z-50 rounded-lg shadow-lg p-2.5 w-60",
-              "bg-white dark:bg-surface-2 border border-gray-200 dark:border-border-default",
-              dropdownAlign === "right" ? "right-0" : "left-0",
-              resolvedPosition === "top" ? "bottom-full mb-2" : "mt-2"
+              "z-50 rounded-lg shadow-lg p-2.5 w-60",
+              "bg-white dark:bg-surface-2 border border-gray-200 dark:border-border-default"
             )}
           >
             <div className="flex items-center justify-between mb-2">
@@ -449,7 +480,8 @@ const DatePickerImpl: React.FC<DatePickerProps> = ({
               </button>
             </div>
           </div>
-        </>
+        </>,
+        document.body
       )}
     </div>
   );
