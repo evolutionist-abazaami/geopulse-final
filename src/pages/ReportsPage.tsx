@@ -1,4 +1,5 @@
-import { Download, FileText } from "lucide-react";
+import { useState } from "react";
+import { Download, FileText, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import ReportGenerator from "@/components/ReportGenerator";
@@ -24,6 +25,7 @@ function exportToJSON(data: any[], filename: string) {
 
 export default function ReportsPage() {
   const { rows, isLoading } = useAnalysisHistory();
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   return (
     <div className="h-full overflow-y-auto scrollbar-thin bg-gray-50 dark:bg-surface-base p-8">
@@ -46,48 +48,69 @@ export default function ReportsPage() {
 
       <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full">
+          <table className="w-full table-fixed">
             <thead>
               <tr className="bg-gray-50 dark:bg-surface-2 border-b border-gray-200 dark:border-border-subtle">
-                {["Region", "Type", "Date", "Report"].map((col) => (
-                  <th key={col} className="text-left text-[11px] text-gray-400 dark:text-v2-muted uppercase tracking-[0.06em] px-4 py-2.5 font-medium">
+                {[
+                  ["Region", "w-2/5"],
+                  ["Type", "w-1/5"],
+                  ["Date", "w-1/5"],
+                  ["", "w-1/5"],
+                ].map(([col, width]) => (
+                  <th key={col || "action"} className={cn("text-left text-[11px] text-gray-400 dark:text-v2-muted uppercase tracking-[0.06em] px-4 py-2.5 font-medium", width)}>
                     {col}
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {rows.map((row, i) => {
+              {rows.map((row) => {
                 const centerLat = (row.region_bounds.north + row.region_bounds.south) / 2;
                 const centerLng = (row.region_bounds.east + row.region_bounds.west) / 2;
+                const isExpanded = expandedId === row.id;
                 return (
-                  <tr
-                    key={row.id}
-                    className={cn(
-                      "border-b border-gray-200 dark:border-border-subtle transition-colors duration-fast hover:bg-gray-50 dark:hover:bg-surface-2",
-                      i === rows.length - 1 && "border-b-0"
+                  <>
+                    <tr
+                      key={row.id}
+                      className="border-b border-gray-200 dark:border-border-subtle transition-colors duration-fast hover:bg-gray-50 dark:hover:bg-surface-2"
+                    >
+                      <td className="px-4 py-3 text-[13px] text-gray-900 dark:text-v2-primary truncate">{row.region_name}</td>
+                      <td className="px-4 py-3">
+                        <span className={cn("text-[11px] font-medium px-2 py-0.5 rounded-full capitalize", typePillStyles[row.type])}>
+                          {row.event_type ? row.event_type.replace(/_/g, " ") : row.type}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-[13px] text-gray-400 dark:text-v2-muted">{new Date(row.created_at).toLocaleDateString()}</td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => setExpandedId(isExpanded ? null : row.id)}
+                          className={cn(
+                            "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded-md transition-all duration-fast ml-auto",
+                            isExpanded
+                              ? "text-brand bg-brand-dim"
+                              : "text-gray-600 dark:text-v2-secondary bg-gray-100 dark:bg-surface-2 hover:text-gray-900 dark:hover:text-v2-primary"
+                          )}
+                        >
+                          Generate report
+                          <ChevronDown className={cn("w-3.5 h-3.5 transition-transform duration-fast", isExpanded && "rotate-180")} />
+                        </button>
+                      </td>
+                    </tr>
+                    {isExpanded && (
+                      <tr className="border-b border-gray-200 dark:border-border-subtle bg-gray-50 dark:bg-surface-2">
+                        <td colSpan={4} className="px-4 py-4">
+                          <ReportGenerator
+                            analysisData={row.result_payload}
+                            eventType={row.event_type || undefined}
+                            region={row.region_name}
+                            lat={centerLat}
+                            lng={centerLng}
+                            onCaptureMap={() => Promise.resolve(null)}
+                          />
+                        </td>
+                      </tr>
                     )}
-                  >
-                    <td className="px-4 py-3 text-[13px] text-gray-900 dark:text-v2-primary">{row.region_name}</td>
-                    <td className="px-4 py-3">
-                      <span className={cn("text-[11px] font-medium px-2 py-0.5 rounded-full capitalize", typePillStyles[row.type])}>
-                        {row.event_type ? row.event_type.replace(/_/g, " ") : row.type}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-[13px] text-gray-400 dark:text-v2-muted">{new Date(row.created_at).toLocaleDateString()}</td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="inline-flex">
-                        <ReportGenerator
-                          analysisData={row.result_payload}
-                          eventType={row.event_type || undefined}
-                          region={row.region_name}
-                          lat={centerLat}
-                          lng={centerLng}
-                          onCaptureMap={() => Promise.resolve(null)}
-                        />
-                      </div>
-                    </td>
-                  </tr>
+                  </>
                 );
               })}
             </tbody>

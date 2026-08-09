@@ -25,7 +25,6 @@ export interface GeoSearchResult {
 
 export type RightPanelMode =
   | { type: "analysis"; data: AnalysisHistoryRow }
-  | { type: "alerts" }
   | { type: "search"; data: GeoSearchResult }
   | { type: "ai" }
   | { type: "geowitness" }

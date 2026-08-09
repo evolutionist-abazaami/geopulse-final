@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
-  Map as MapIcon, Satellite, Shield, Bell, FileText, Settings,
+  Map as MapIcon, Satellite, Shield, FileText, Settings,
   ChevronLeft, ChevronRight, Clock, TreePine, Droplets, Flame, Sun, Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -78,8 +78,7 @@ export function Sidebar() {
   const navItems = [
     { label: "Map", icon: MapIcon, onClick: () => { rightPanel.close(); navigate("/"); }, active: location.pathname === "/" && !rightPanel.mode },
     { label: "GeoWitness", icon: Satellite, onClick: () => { navigate("/"); rightPanel.open({ type: "geowitness" }); mapCtx.setSelectionMode(true); }, active: rightPanel.mode?.type === "geowitness" },
-    { label: "Early Warning", icon: Shield, onClick: () => navigate("/early-warning"), active: location.pathname === "/early-warning" },
-    { label: "Alerts", icon: Bell, onClick: () => rightPanel.open({ type: "alerts" }), active: rightPanel.mode?.type === "alerts", badgeCount: alertCount },
+    { label: "Early Warning", icon: Shield, onClick: () => navigate("/early-warning"), active: location.pathname === "/early-warning", badgeCount: alertCount },
     { label: "Reports", icon: FileText, onClick: () => navigate("/reports"), active: location.pathname === "/reports" },
     { label: "Settings", icon: Settings, onClick: () => navigate("/settings"), active: location.pathname === "/settings" },
   ];

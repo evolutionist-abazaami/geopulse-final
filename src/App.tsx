@@ -6,6 +6,8 @@ import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { MapProvider } from "@/contexts/MapContext";
+import { RightPanelProvider } from "@/contexts/RightPanelContext";
 import { AppShell } from "@/layouts/AppShell";
 import DemoRecorder from "./components/DemoRecorder";
 import Home from "./pages/Home";
@@ -62,27 +64,31 @@ const App = () => (
       <Toaster />
       <Sonner position="bottom-right" />
       <BrowserRouter>
-        <Routes>
-          {/* Public routes - no shell */}
-          <Route path="/shared/:shareId" element={<SharedReport />} />
-          <Route path="/auth" element={<Auth />} />
-          <Route path="/reset-password" element={<ResetPassword />} />
+        <MapProvider>
+          <RightPanelProvider>
+            <Routes>
+              {/* Public routes - no shell */}
+              <Route path="/shared/:shareId" element={<SharedReport />} />
+              <Route path="/auth" element={<Auth />} />
+              <Route path="/reset-password" element={<ResetPassword />} />
 
-          {/* Map-centric shell */}
-          <Route path="/" element={<RootRoute />} />
-          <Route path="/reports" element={<AppShell><ReportsPage /></AppShell>} />
-          <Route path="/settings" element={<AppShell><SettingsPage /></AppShell>} />
-          <Route path="/early-warning" element={<AppShell><EarlyWarningPage /></AppShell>} />
+              {/* Map-centric shell */}
+              <Route path="/" element={<RootRoute />} />
+              <Route path="/reports" element={<AppShell><ReportsPage /></AppShell>} />
+              <Route path="/settings" element={<AppShell><SettingsPage /></AppShell>} />
+              <Route path="/early-warning" element={<AppShell><EarlyWarningPage /></AppShell>} />
 
-          {/* Retired routes - redirect so bookmarks don't 404 */}
-          <Route path="/dashboard" element={<Navigate to="/" replace />} />
-          <Route path="/analytics" element={<Navigate to="/" replace />} />
-          <Route path="/geowitness" element={<Navigate to="/" replace />} />
-          <Route path="/geosearch" element={<Navigate to="/" replace />} />
+              {/* Retired routes - redirect so bookmarks don't 404 */}
+              <Route path="/dashboard" element={<Navigate to="/" replace />} />
+              <Route path="/analytics" element={<Navigate to="/" replace />} />
+              <Route path="/geowitness" element={<Navigate to="/" replace />} />
+              <Route path="/geosearch" element={<Navigate to="/" replace />} />
 
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-        <DemoRecorder />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+            <DemoRecorder />
+          </RightPanelProvider>
+        </MapProvider>
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>

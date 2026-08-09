@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Search, X, Loader2, Bell, MessageCircle, Sun, Moon, User, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
@@ -117,9 +118,14 @@ export function TopBar() {
   const { isSearching, search } = useGeoSearch();
   const rightPanel = useRightPanel();
   const { saveAnalysis } = useAnalysisHistory();
+  const navigate = useNavigate();
 
   const handleSearch = async () => {
     if (!query.trim()) return;
+    // Search results land on the map (marker + boundary + fly-to, same as
+    // v1's GeoSearch page) - navigate to it first so that's actually visible
+    // even if the search was triggered from Reports/Settings/Early Warning.
+    navigate("/");
     const result = await search(query);
     if (!result) return;
     rightPanel.open({ type: "search", data: result });
@@ -153,7 +159,7 @@ export function TopBar() {
         )}
         <input
           type="text"
-          placeholder="Search regions, events, coordinates…"
+          placeholder='Ask about environmental changes… e.g. "Flooding in Lagos 2023"'
           className="flex-1 bg-transparent border-none outline-none text-[14px] text-gray-900 dark:text-v2-primary placeholder:text-gray-400 dark:placeholder:text-v2-muted"
           onKeyDown={(e) => e.key === "Enter" && handleSearch()}
           onChange={(e) => setQuery(e.target.value)}
@@ -167,7 +173,7 @@ export function TopBar() {
       </div>
 
       <div className="flex items-center gap-1 ml-auto">
-        <TopBarIconButton icon={Bell} onClick={() => rightPanel.open({ type: "alerts" })} active={rightPanel.mode?.type === "alerts"} />
+        <TopBarIconButton icon={Bell} onClick={() => navigate("/early-warning")} active={false} />
         <TopBarIconButton icon={MessageCircle} onClick={() => rightPanel.open({ type: "ai" })} active={rightPanel.mode?.type === "ai"} />
         <div className="w-px h-5 bg-gray-200 dark:bg-border-subtle mx-1" />
         <UserAvatar />

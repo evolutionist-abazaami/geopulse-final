@@ -2,14 +2,12 @@ import { AnimatePresence, motion } from "framer-motion";
 import { X } from "lucide-react";
 import { useRightPanel } from "@/contexts/RightPanelContext";
 import { AnalysisPanel } from "@/components/panel/AnalysisPanel";
-import { AlertsPanel } from "@/components/panel/AlertsPanel";
 import { SearchPanel } from "@/components/panel/SearchPanel";
 import { AiPanel } from "@/components/panel/AiPanel";
 import { GeoWitnessPanel } from "@/components/panel/GeoWitnessPanel";
 
 const PANEL_TITLE: Record<string, string> = {
   analysis: "Analysis",
-  alerts: "Alerts",
   search: "Search results",
   ai: "AI Assistant",
   geowitness: "GeoWitness",
@@ -45,7 +43,6 @@ export function RightPanel() {
 
           <div className="flex-1 overflow-hidden flex flex-col">
             {mode.type === "analysis" && <AnalysisPanel data={mode.data} />}
-            {mode.type === "alerts" && <AlertsPanel />}
             {mode.type === "search" && <SearchPanel data={mode.data} />}
             {mode.type === "ai" && <AiPanel />}
             {mode.type === "geowitness" && <GeoWitnessPanel />}

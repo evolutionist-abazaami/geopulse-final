@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import maplibregl from "maplibre-gl";
 import { supabase } from "@/integrations/supabase/client";
 import { useMapContext } from "@/contexts/MapContext";
-import { useRightPanel } from "@/contexts/RightPanelContext";
 
 type Severity = "low" | "moderate" | "high" | "critical";
 
@@ -28,8 +28,8 @@ const SEVERITY_COLOR: Record<string, string> = {
  * shared map pans/zooms, unlike an absolutely-positioned HTML overlay would.
  */
 export function AlertMarkers() {
-  const { map, mapReady, flyToBounds } = useMapContext();
-  const rightPanel = useRightPanel();
+  const { map, mapReady } = useMapContext();
+  const navigate = useNavigate();
   const [alerts, setAlerts] = useState<HazardAlertRow[]>([]);
 
   useEffect(() => {
@@ -93,15 +93,7 @@ export function AlertMarkers() {
         el.appendChild(ring);
       }
 
-      el.addEventListener("click", () => {
-        rightPanel.open({ type: "alerts" });
-        flyToBounds({
-          north: alert.lat + 0.3,
-          south: alert.lat - 0.3,
-          east: alert.lng + 0.3,
-          west: alert.lng - 0.3,
-        });
-      });
+      el.addEventListener("click", () => navigate("/early-warning"));
 
       const marker = new maplibregl.Marker({ element: el })
         .setLngLat([alert.lng, alert.lat])
@@ -110,7 +102,7 @@ export function AlertMarkers() {
     });
 
     return () => markers.forEach((m) => m.remove());
-  }, [map, mapReady, alerts, rightPanel, flyToBounds]);
+  }, [map, mapReady, alerts, navigate]);
 
   return null;
 }
