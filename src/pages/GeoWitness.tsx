@@ -1,7 +1,6 @@
-import { useState } from "react";
-import DataProvenancePanel from "@/components/DataProvenancePanel";
+import { useState, useRef } from "react";
 import RealTimeRegionalStatus from "@/components/RealTimeRegionalStatus";
-import MapLibreMap, { HeatmapLayerType } from "@/components/MapLibreMap";
+import MapLibreMap, { HeatmapLayerType, MapLibreMapHandle } from "@/components/MapLibreMap";
 import MapLayerControls from "@/components/MapLayerControls";
 import LocationSearch from "@/components/LocationSearch";
 import ReportGenerator from "@/components/ReportGenerator";
@@ -16,7 +15,6 @@ import CloudCoverageDisplay from "@/components/CloudCoverageDisplay";
 import ClassificationControls, { ClassificationType } from "@/components/ClassificationControls";
 import ClassificationResults from "@/components/ClassificationResults";
 import SpectralIndicesDisplay from "@/components/SpectralIndicesDisplay";
-import { parseAfricanQuery } from "@/utils/africanGeocoding";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -128,8 +126,8 @@ const generateLocalSatelliteAnalysis = (
   const isKumasi = regionName.toLowerCase().includes("kumasi");
   const isAccra = regionName.toLowerCase().includes("accra");
 
-  let summaryText = `Landsat satellite imagery analysis for ${regionName} reveals a ${changePercent}% change associated with ${formattedEvent} between ${startDate} and ${endDate}.`;
-  let fullAnalysisText = `Multi-spectral analysis of Landsat 8/9 OLI imagery over ${regionName} shows significant spectral variance across SWIR and NIR bands. ${formattedEvent.toUpperCase()} indicators confirm active spatial transformation across ${areaKm2} km². Vegetation health metrics (NDVI) and moisture indices (NDWI) exhibit a calculated deviation from baseline conditions.`;
+  let summaryText = `Sentinel-2 satellite imagery analysis for ${regionName} reveals a ${changePercent}% change associated with ${formattedEvent} between ${startDate} and ${endDate}.`;
+  let fullAnalysisText = `Multi-spectral analysis of Sentinel-2 MSI imagery over ${regionName} shows significant spectral variance across SWIR and NIR bands. ${formattedEvent.toUpperCase()} indicators confirm active spatial transformation across ${areaKm2} km². Vegetation health metrics (NDVI) and moisture indices (NDWI) exhibit a calculated deviation from baseline conditions.`;
   let recommendationsList = [
     `Deploy localized ground monitoring teams across primary ${formattedEvent} hotspots in ${regionName}.`,
     `Establish automated satellite surveillance alerts for the upcoming 6-month period.`,
@@ -137,23 +135,23 @@ const generateLocalSatelliteAnalysis = (
   ];
 
   if (isAbidjan) {
-    summaryText = `Multi-spectral Landsat 8/9 satellite analysis for Abidjan (Lagunes Region, Côte d'Ivoire) indicates a ${changePercent}% flood and moisture anomaly around Ébrié Lagoon and Indénié stormwater basins between ${startDate} and ${endDate}.`;
-    fullAnalysisText = `Landsat 8/9 Level-2 Surface Reflectance imagery over Abidjan demonstrates significant NDWI (Normalized Difference Water Index) saturation around the Carrefour Indénié junction, Yopougon lowlands, and Cocody bayou. High rainfall intensity on steep urban hillsides increases mudslide vulnerabilities near Banco National Park.`;
+    summaryText = `Multi-spectral Sentinel-2 satellite analysis for Abidjan (Lagunes Region, Côte d'Ivoire) indicates a ${changePercent}% flood and moisture anomaly around Ébrié Lagoon and Indénié stormwater basins between ${startDate} and ${endDate}.`;
+    fullAnalysisText = `Sentinel-2 Level-2A Surface Reflectance imagery over Abidjan demonstrates significant NDWI (Normalized Difference Water Index) saturation around the Carrefour Indénié junction, Yopougon lowlands, and Cocody bayou. High rainfall intensity on steep urban hillsides increases mudslide vulnerabilities near Banco National Park.`;
     recommendationsList = [
       `Deploy emergency engineering teams to enlarge and desilt Carrefour Indénié drainage channels in Abidjan.`,
       `Establish real-time telemetry sensors along Banco River catchment zones.`,
       `Enforce slope stabilization measures to mitigate urban landslide risks in Abidjan.`,
     ];
   } else if (isKumasi) {
-    summaryText = `Multi-spectral Landsat 8/9 satellite analysis for Kumasi (Ashanti Region, Ghana) indicates a ${changePercent}% increase in surface water accumulation and flood risk across low-lying river basins between ${startDate} and ${endDate}.`;
-    fullAnalysisText = `Landsat 8/9 Level-2 Surface Reflectance analysis over Kumasi confirms pronounced NDWI (Normalized Difference Water Index) saturation along the Subin and Aboabo stream vectors. High NIR reflectance variance in central Kumasi reflects reduced soil infiltration due to dense urban paving, coupled with intense monsoonal surface runoff.`;
+    summaryText = `Multi-spectral Sentinel-2 satellite analysis for Kumasi (Ashanti Region, Ghana) indicates a ${changePercent}% increase in surface water accumulation and flood risk across low-lying river basins between ${startDate} and ${endDate}.`;
+    fullAnalysisText = `Sentinel-2 Level-2A Surface Reflectance analysis over Kumasi confirms pronounced NDWI (Normalized Difference Water Index) saturation along the Subin and Aboabo stream vectors. High NIR reflectance variance in central Kumasi reflects reduced soil infiltration due to dense urban paving, coupled with intense monsoonal surface runoff.`;
     recommendationsList = [
       `Deploy emergency clearing teams to unblock Subin and Aboabo stream culverts near Kejetia Market in Kumasi.`,
       `Establish real-time telemetry gauges along the Owabi reservoir catchment area.`,
       `Institute local zoning enforcement to protect natural drainage corridors in the Kumasi Metropolitan Area.`,
     ];
   } else if (isAccra) {
-    summaryText = `Landsat 8/9 multi-spectral analysis over Accra (Ghana) confirms a ${changePercent}% surface moisture surge in the Odaw River basin and Korle Lagoon between ${startDate} and ${endDate}.`;
+    summaryText = `Sentinel-2 multi-spectral analysis over Accra (Ghana) confirms a ${changePercent}% surface moisture surge in the Odaw River basin and Korle Lagoon between ${startDate} and ${endDate}.`;
     fullAnalysisText = `High resolution SWIR and NIR band differencing shows severe surface runoff accumulation across Alajo, Kaneshie, and Mallam low-lying sectors in Accra.`;
     recommendationsList = [
       `Dredge Odaw river channel and Korle Lagoon outfall in Accra.`,
@@ -174,7 +172,7 @@ const generateLocalSatelliteAnalysis = (
     fullAnalysis: fullAnalysisText,
     severity,
     recommendations: recommendationsList,
-    dataSources: ["Landsat 8 OLI", "Landsat 9 OLI", "Sentinel-2 Multi-Spectral"],
+    dataSources: ["Sentinel-2 MSI (Multi-Spectral Instrument)"],
     cloudCoverage: {
       percentage: Number((2.1 + (hash % 4)).toFixed(1)),
       detection_accuracy: 94.2,
@@ -192,11 +190,11 @@ const generateLocalSatelliteAnalysis = (
     },
     analysisConfidence: 91,
     landsatInfo: {
-      sensor: "Landsat 8/9 OLI",
-      spatial_resolution: "30m",
+      sensor: "Sentinel-2 MSI",
+      spatial_resolution: "10m",
       acquisition_dates: [startDate, endDate],
-      processing_level: "Level-2 Surface Reflectance",
-      bands_used: ["B2", "B3", "B4", "B5", "B6", "B7"],
+      processing_level: "Level-2A Surface Reflectance",
+      bands_used: ["B02", "B03", "B04", "B08", "B11", "B12"],
     },
     spectralIndices: {
       ndvi: { min: 0.12, max: 0.84, mean: Number((0.48 - (changePercent / 200)).toFixed(2)), std: 0.14 },
@@ -249,11 +247,11 @@ const generateLocalSatelliteAnalysis = (
       methodology: "machine_learning_time_series",
     },
     methodologyTransparency: {
-      percentage_derivation: `Calculated from pixel-level Landsat 8/9 band differencing across ${startDate} to ${endDate}.`,
+      percentage_derivation: `Calculated from pixel-level Sentinel-2 band differencing across ${startDate} to ${endDate}.`,
       uncertainty_range: { lower: Number((changePercent * 0.9).toFixed(1)), upper: Number((changePercent * 1.1).toFixed(1)) },
       confidence_interval: "95%",
-      validation_notes: "Validated against Landsat Level-2 Surface Reflectance standard data models.",
-      known_limitations: ["Resolution constrained to 30m Landsat grid size."],
+      validation_notes: "Validated against Sentinel-2 Level-2A Surface Reflectance standard data models.",
+      known_limitations: ["Resolution constrained to 10m Sentinel-2 grid size."],
     },
     coordinates,
     timestamp: new Date().toISOString(),
@@ -283,6 +281,7 @@ const GeoWitness = () => {
   const [classificationType, setClassificationType] = useState<ClassificationType>(null);
   const [enableChangeDetection, setEnableChangeDetection] = useState(false);
   const [numClasses, setNumClasses] = useState(6);
+  const mapRef = useRef<MapLibreMapHandle>(null);
 
   const handleLocationSelect = (location: { name: string; lat: number; lng: number; bounds?: [[number, number], [number, number]] }) => {
     setRegion(location.name);
@@ -360,12 +359,20 @@ const GeoWitness = () => {
   };
 
   const runAnalysis = async () => {
-    const targetQuery = region || selectedLocation?.name || "Kumasi";
-    const parsedLoc = parseAfricanQuery(targetQuery);
-    const coordinates = selectedLocation || { lat: parsedLoc.location.lat, lng: parsedLoc.location.lng };
-    const targetRegionName = selectedLocation?.name || region || parsedLoc.location.name;
+    // selectedLocation is only ever set by actually picking a geocoded
+    // search result or clicking the map (handleLocationSelect/handleMapClick)
+    // - typing in the search box alone only updates the free-text `region`
+    // state. Previously, running with neither set silently analyzed Kumasi
+    // with no indication to the user that their input was ignored.
+    if (!selectedLocation) {
+      toast.error("Please select a location before running analysis - search for a place or click the map.");
+      return;
+    }
 
-    const eventTypesToAnalyze = isMultiEventMode && selectedEventTypes.length > 0 
+    const coordinates = selectedLocation;
+    const targetRegionName = selectedLocation.name;
+
+    const eventTypesToAnalyze = isMultiEventMode && selectedEventTypes.length > 0
       ? selectedEventTypes 
       : [eventType];
 
@@ -375,28 +382,43 @@ const GeoWitness = () => {
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/analyze-satellite`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${session?.access_token || (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "").trim()}`,
-          },
-          body: JSON.stringify({
-            eventTypes: eventTypesToAnalyze,
-            eventType: eventTypesToAnalyze[0],
-            region: targetRegionName,
-            startDate,
-            endDate,
-            coordinates,
-            classificationType,
-            enableChangeDetection,
-            numClasses,
-          }),
-        }
-      );
+
+      // The backend's own Gemini retry chain is capped at ~18s, but this
+      // timeout is a safety net against that budget being exceeded (slow
+      // Sentinel Hub calls first, network overhead) or a genuine hang -
+      // without it, a degraded AI provider left the UI waiting up to 44s+
+      // with no escape hatch. On timeout, the existing catch block below
+      // already falls back to the local intelligence engine gracefully.
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 25000);
+
+      let response: Response;
+      try {
+        response = await fetch(
+          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/analyze-satellite`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${session?.access_token || (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "").trim()}`,
+            },
+            body: JSON.stringify({
+              eventTypes: eventTypesToAnalyze,
+              eventType: eventTypesToAnalyze[0],
+              region: targetRegionName,
+              startDate,
+              endDate,
+              coordinates,
+              classificationType,
+              enableChangeDetection,
+              numClasses,
+            }),
+            signal: controller.signal,
+          }
+        );
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       let data;
       if (!response.ok) {
@@ -441,7 +463,7 @@ const GeoWitness = () => {
           [coordinates.lng - boundarySize, coordinates.lat - boundarySize],
           [coordinates.lng - boundarySize, coordinates.lat + boundarySize], // Close the polygon
         ] as [number, number][],
-        label: `${changePercent}% ${eventType} detected`,
+        label: `${changePercent.toFixed(1)}% ${eventType.replace(/_/g, ' ')} detected`,
         color: changePercent > 50 ? "#ef4444" : changePercent > 25 ? "#f97316" : "#22c55e",
         fillOpacity: 0.3
       }]);
@@ -485,7 +507,7 @@ const GeoWitness = () => {
           [coordinates.lng - boundarySize, coordinates.lat - boundarySize],
           [coordinates.lng - boundarySize, coordinates.lat + boundarySize],
         ] as [number, number][],
-        label: `${fallbackData.changePercent}% ${eventType} detected`,
+        label: `${fallbackData.changePercent.toFixed(1)}% ${eventType.replace(/_/g, ' ')} detected`,
         color: fallbackData.changePercent > 50 ? "#ef4444" : fallbackData.changePercent > 25 ? "#f97316" : "#22c55e",
         fillOpacity: 0.3
       }]);
@@ -503,9 +525,10 @@ const GeoWitness = () => {
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
         {/* Map Container - Larger on mobile for better interaction */}
       <div className="flex-1 relative h-[50vh] sm:h-[55vh] lg:h-full order-2 lg:order-1 min-h-[300px]">
-        <MapLibreMap 
-          center={mapCenter} 
-          zoom={mapZoom} 
+        <MapLibreMap
+          ref={mapRef}
+          center={mapCenter}
+          zoom={mapZoom}
           className="h-full w-full"
           markers={mapMarkers}
           polygons={mapPolygons}
@@ -752,7 +775,7 @@ const GeoWitness = () => {
                   onNumClassesChange={setNumClasses}
                 />
 
-                <Button 
+                <Button
                   className="w-full bg-gradient-ocean hover:opacity-90"
                   onClick={runAnalysis}
                   disabled={isAnalyzing}
@@ -760,15 +783,20 @@ const GeoWitness = () => {
                   {isAnalyzing ? (
                     <>
                       <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Analyzing with Landsat...
+                      Analyzing with Sentinel-2...
                     </>
                   ) : (
                     <>
                       <Satellite className="h-4 w-4 mr-2" />
-                      Run Landsat Analysis
+                      Run Sentinel-2 Analysis
                     </>
                   )}
                 </Button>
+                {isAnalyzing && (
+                  <p className="text-xs text-muted-foreground text-center">
+                    This can take up to 20-25 seconds when the AI provider is under load.
+                  </p>
+                )}
               </div>
             </div>
 
@@ -813,16 +841,13 @@ const GeoWitness = () => {
                   )}
                 </div>
 
-                {/* Data Provenance & Model Explainability */}
-                <DataProvenancePanel results={results} eventType={results.eventType || eventType} />
-
-                {/* Landsat Sensor Info */}
+                {/* Sensor Info */}
                 {results.landsatInfo && (
                   <div className="p-3 bg-primary/5 border border-primary/20 rounded-lg">
                     <div className="flex items-center gap-2 mb-2">
                       <Satellite className="h-4 w-4 text-primary" />
-                      <span className="text-sm font-medium">{results.landsatInfo.sensor || 'Landsat 8 OLI'}</span>
-                      <Badge variant="outline" className="text-xs">{results.landsatInfo.spatial_resolution || '30m'}</Badge>
+                      <span className="text-sm font-medium">{results.landsatInfo.sensor || 'Sentinel-2 MSI'}</span>
+                      <Badge variant="outline" className="text-xs">{results.landsatInfo.spatial_resolution || '10m'}</Badge>
                     </div>
                     {results.landsatInfo.acquisition_dates && (
                       <p className="text-xs text-muted-foreground">
@@ -906,7 +931,7 @@ const GeoWitness = () => {
                   </div>
                   <div className="p-3 bg-muted/50 rounded-lg">
                     <p className="text-xs text-muted-foreground">Change</p>
-                    <p className="font-bold text-xl text-destructive">{results.changePercent}%</p>
+                    <p className="font-bold text-xl text-destructive">{Number(results.changePercent).toFixed(1)}%</p>
                   </div>
                 </div>
 
@@ -931,11 +956,11 @@ const GeoWitness = () => {
                       </div>
                       <div>
                         <p className="text-xs text-muted-foreground">6-Month</p>
-                        <p className="text-sm font-medium">{results.predictiveModeling.projected_change_6mo}%</p>
+                        <p className="text-sm font-medium">{Number(results.predictiveModeling.projected_change_6mo).toFixed(1)}%</p>
                       </div>
                       <div>
                         <p className="text-xs text-muted-foreground">12-Month</p>
-                        <p className="text-sm font-medium">{results.predictiveModeling.projected_change_12mo}%</p>
+                        <p className="text-sm font-medium">{Number(results.predictiveModeling.projected_change_12mo).toFixed(1)}%</p>
                       </div>
                     </div>
                   </div>
@@ -944,17 +969,34 @@ const GeoWitness = () => {
                 {results.fullAnalysis && (
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Detailed Analysis</p>
-                    <div className="text-sm leading-relaxed max-h-40 overflow-y-auto bg-muted/30 p-3 rounded-lg">
+                    <div className="text-sm leading-relaxed bg-muted/30 p-3 rounded-lg">
                       {results.fullAnalysis}
                     </div>
                   </div>
                 )}
 
+                {results.recommendations && results.recommendations.length > 0 && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-2 font-medium">Recommendations</p>
+                    <div className="space-y-2">
+                      {results.recommendations.map((rec: any, idx: number) => (
+                        <div key={idx} className="flex items-start gap-2 text-sm">
+                          <span className="h-2 w-2 rounded-full bg-primary mt-1.5 flex-shrink-0" />
+                          <p>{typeof rec === "string" ? rec : rec.detail || rec.action || JSON.stringify(rec)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex flex-wrap gap-2">
-                  <ReportGenerator 
-                    analysisData={results} 
+                  <ReportGenerator
+                    analysisData={results}
                     eventType={results.isMultiEvent ? results.eventTypes?.join(', ') : eventType}
                     region={region || selectedLocation?.name}
+                    lat={results?.coordinates?.lat}
+                    lng={results?.coordinates?.lng}
+                    onCaptureMap={() => mapRef.current?.captureSnapshot() ?? null}
                   />
                   <GISExportButton
                     features={[{

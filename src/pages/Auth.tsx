@@ -26,14 +26,16 @@ const Auth = () => {
     // Check if user is already logged in
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session) {
-        navigate("/");
+        navigate("/dashboard");
       }
     });
 
-    // Listen for auth changes
+    // Listen for auth changes - this fires for sign-in, sign-up (when email
+    // confirmation is off), and OAuth callbacks alike, so this one listener
+    // covers every path into the app.
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (session) {
-        navigate("/");
+        navigate("/dashboard");
       }
     });
 
@@ -55,7 +57,7 @@ const Auth = () => {
       const { error } = await supabase.auth.signInWithOAuth({
         provider,
         options: {
-          redirectTo: `${window.location.origin}/`,
+          redirectTo: `${window.location.origin}/dashboard`,
         },
       });
 
@@ -95,7 +97,7 @@ const Auth = () => {
       const { error } = await supabase.auth.signInWithOtp({
         email: magicLinkEmail,
         options: {
-          emailRedirectTo: `${window.location.origin}/`,
+          emailRedirectTo: `${window.location.origin}/dashboard`,
         },
       });
 
@@ -167,9 +169,9 @@ const Auth = () => {
     setIsLoading(true);
 
     try {
-      const redirectUrl = `${window.location.origin}/`;
-      
-      const { error } = await supabase.auth.signUp({
+      const redirectUrl = `${window.location.origin}/dashboard`;
+
+      const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
@@ -186,7 +188,17 @@ const Auth = () => {
         return;
       }
 
-      toast.success("Account created successfully! You can now sign in.");
+      if (data.session) {
+        // Email confirmation is off (or this address was already confirmed) -
+        // a real session exists immediately. The onAuthStateChange listener
+        // above will pick this up and redirect to /dashboard on its own.
+        toast.success("Account created! Taking you to your dashboard...");
+      } else {
+        // A real account now exists in Supabase, but it can't be used to
+        // sign in until the confirmation link is clicked - say so plainly
+        // instead of implying sign-in will work right away.
+        toast.success("Account created! Check your email to confirm it before signing in.");
+      }
       setEmail("");
       setPassword("");
       setConfirmPassword("");
@@ -222,6 +234,8 @@ const Auth = () => {
       if (error) {
         if (error.message.includes("Invalid login credentials")) {
           toast.error("Invalid email or password. Please try again.");
+        } else if (error.message.toLowerCase().includes("email not confirmed")) {
+          toast.error("Please confirm your email first - check your inbox for the confirmation link.");
         } else {
           toast.error(error.message);
         }

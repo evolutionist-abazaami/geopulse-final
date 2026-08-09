@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
@@ -9,11 +9,24 @@ import { Download, FileText, Loader2, Image, Check, Shield, AlertTriangle, Trend
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import jsPDF from "jspdf";
+import maplibregl from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
 
 interface ReportGeneratorProps {
   analysisData: any;
   eventType?: string;
   region?: string;
+  lat?: number;
+  lng?: number;
+  /** Captures the real, currently-displayed interactive map (OSM tiles + study-area polygon) as a PNG data URL. */
+  onCaptureMap?: () => Promise<string | null> | string | null;
+}
+
+/** Real per-cell NDVI from generate-visualization's risk_zones grid endpoint. */
+interface RiskGridData {
+  rows: number;
+  cols: number;
+  cells: (number | null)[];
 }
 
 /**
@@ -34,6 +47,418 @@ const sanitizeForPdf = (text: unknown): string => {
     .replace(/[^ -ÿ\n\r\t]/g, "?"); // replace anything else outside Latin-1 (unsupported by jsPDF standard fonts)
 };
 
+/**
+ * Draws the trend chart on a real <canvas> from the report's own numbers,
+ * instead of asking an AI model to illustrate one. Deterministic, free,
+ * and always available - no network call, no quota, no hallucinated values.
+ */
+const renderTrendChartPng = (periods: { label: string; value: number }[]): string => {
+  const width = 900;
+  const height = 300;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  const padding = { top: 20, right: 24, bottom: 50, left: 70 };
+  const chartW = width - padding.left - padding.right;
+  const chartH = height - padding.top - padding.bottom;
+
+  const values = periods.map((p) => p.value);
+  const minVal = Math.min(0, ...values);
+  const maxVal = Math.max(0, ...values, 1);
+  const range = maxVal - minVal || 1;
+  const yForValue = (v: number) => padding.top + chartH - ((v - minVal) / range) * chartH;
+  const zeroY = yForValue(0);
+
+  ctx.strokeStyle = "#e5e7eb";
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "#6b7280";
+  ctx.font = "20px Arial";
+  ctx.textAlign = "right";
+  const gridSteps = 4;
+  for (let i = 0; i <= gridSteps; i++) {
+    const v = minVal + (range * i) / gridSteps;
+    const y = yForValue(v);
+    ctx.beginPath();
+    ctx.moveTo(padding.left, y);
+    ctx.lineTo(padding.left + chartW, y);
+    ctx.stroke();
+    ctx.fillText(`${v.toFixed(0)}%`, padding.left - 10, y + 7);
+  }
+
+  const barGap = 24;
+  const barWidth = Math.min(120, (chartW - barGap * (periods.length - 1)) / periods.length);
+  const rowWidth = barWidth + barGap;
+  const startX = padding.left + (chartW - (rowWidth * periods.length - barGap)) / 2;
+
+  periods.forEach((p, i) => {
+    const x = startX + i * rowWidth;
+    const barTop = Math.min(yForValue(p.value), zeroY);
+    const barHeight = Math.max(1, Math.abs(yForValue(p.value) - zeroY));
+    ctx.fillStyle = p.value >= 0 ? "#0891b2" : "#ef4444";
+    ctx.fillRect(x, barTop, barWidth, barHeight);
+
+    ctx.fillStyle = "#374151";
+    ctx.textAlign = "center";
+    ctx.font = "bold 18px Arial";
+    ctx.fillText(`${p.value.toFixed(1)}%`, x + barWidth / 2, barTop - 8);
+
+    ctx.fillStyle = "#6b7280";
+    ctx.font = "16px Arial";
+    const label = p.label.length > 16 ? `${p.label.slice(0, 15)}…` : p.label;
+    ctx.fillText(label, x + barWidth / 2, padding.top + chartH + 26);
+  });
+
+  ctx.strokeStyle = "#9ca3af";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(padding.left, zeroY);
+  ctx.lineTo(padding.left + chartW, zeroY);
+  ctx.stroke();
+
+  return canvas.toDataURL("image/png");
+};
+
+/**
+ * Ecosystem Health dashboard drawn from this report's own real Sentinel-2
+ * spectral index measurements, instead of asking an AI model to illustrate
+ * a dashboard. Deterministic, free, always available.
+ */
+const renderEcosystemHealthPng = (
+  indices: { ndvi?: { mean?: number }; ndwi?: { mean?: number }; nbr?: { mean?: number } } | undefined,
+  changePercent: number
+): string => {
+  const width = 900;
+  const height = 420;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  const overallScore = Math.max(0, Math.min(100, 100 - Math.abs(changePercent)));
+
+  const gauges: { label: string; value: number | undefined; min: number; max: number; format: (v: number) => string; color: string }[] = [
+    { label: "NDVI (Vegetation)", value: indices?.ndvi?.mean, min: -1, max: 1, format: (v) => v.toFixed(3), color: "#16a34a" },
+    { label: "NDWI (Water)", value: indices?.ndwi?.mean, min: -1, max: 1, format: (v) => v.toFixed(3), color: "#0891b2" },
+    { label: "NBR (Burn / Vegetation)", value: indices?.nbr?.mean, min: -1, max: 1, format: (v) => v.toFixed(3), color: "#ea580c" },
+    { label: "Overall Ecosystem Score", value: overallScore, min: 0, max: 100, format: (v) => `${v.toFixed(0)}/100`, color: overallScore > 70 ? "#16a34a" : overallScore > 40 ? "#eab308" : "#dc2626" },
+  ];
+
+  const padding = 40;
+  const gaugeGap = 30;
+  let y = padding + 20;
+
+  ctx.fillStyle = "#111827";
+  ctx.font = "bold 24px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText("Ecosystem Health Dashboard", padding, y);
+  y += 26;
+  ctx.font = "14px Arial";
+  ctx.fillStyle = "#6b7280";
+  ctx.fillText("Real Sentinel-2 spectral index measurements for this study area", padding, y);
+  y += 34;
+
+  gauges.forEach((g) => {
+    const hasValue = typeof g.value === "number" && !isNaN(g.value);
+    ctx.fillStyle = "#374151";
+    ctx.font = "bold 16px Arial";
+    ctx.textAlign = "left";
+    ctx.fillText(g.label, padding, y);
+    ctx.textAlign = "right";
+    ctx.fillText(hasValue ? g.format(g.value as number) : "No data", width - padding, y);
+    y += 12;
+
+    const barWidth = width - padding * 2;
+    const barHeight = 18;
+    ctx.fillStyle = "#e5e7eb";
+    ctx.fillRect(padding, y, barWidth, barHeight);
+
+    if (hasValue) {
+      const frac = Math.max(0, Math.min(1, ((g.value as number) - g.min) / (g.max - g.min)));
+      ctx.fillStyle = g.color;
+      ctx.fillRect(padding, y, barWidth * frac, barHeight);
+    }
+    ctx.strokeStyle = "#9ca3af";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padding, y, barWidth, barHeight);
+
+    y += barHeight + gaugeGap;
+  });
+
+  return canvas.toDataURL("image/png");
+};
+
+/**
+ * Risk zone heatmap drawn from real per-cell NDVI measurements returned by
+ * generate-visualization's risk_zones grid endpoint - a genuine spatial
+ * measurement, not an AI illustration of one.
+ */
+const renderRiskZonesHeatmapPng = (grid: RiskGridData): string => {
+  const width = 900;
+  const height = 580;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.fillStyle = "#111827";
+  ctx.font = "bold 24px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText("Risk Zone Map", 40, 40);
+  ctx.font = "14px Arial";
+  ctx.fillStyle = "#6b7280";
+  ctx.fillText(`Real ${grid.rows}x${grid.cols} gridded Sentinel-2 NDVI - lower vegetation vigor shown in warmer colors`, 40, 62);
+
+  const gridTop = 90;
+  const gridSize = 420;
+  const gridLeft = (width - gridSize) / 2;
+  const cellW = gridSize / grid.cols;
+  const cellH = gridSize / grid.rows;
+
+  const validValues = grid.cells.filter((v): v is number => v !== null);
+  const minV = validValues.length ? Math.min(...validValues) : 0;
+  const maxV = validValues.length ? Math.max(...validValues) : 1;
+  const range = maxV - minV || 1;
+
+  const colorFor = (v: number) => {
+    const frac = Math.max(0, Math.min(1, (v - minV) / range));
+    const r = Math.round(220 - frac * 180);
+    const g = Math.round(60 + frac * 140);
+    return `rgb(${r},${g},60)`;
+  };
+
+  grid.cells.forEach((value, i) => {
+    const row = Math.floor(i / grid.cols);
+    const col = i % grid.cols;
+    const x = gridLeft + col * cellW;
+    const y = gridTop + row * cellH;
+
+    ctx.fillStyle = value === null ? "#e5e7eb" : colorFor(value);
+    ctx.fillRect(x, y, cellW - 2, cellH - 2);
+
+    ctx.fillStyle = value === null ? "#9ca3af" : "#ffffff";
+    ctx.font = "bold 14px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText(value === null ? "N/A" : value.toFixed(2), x + cellW / 2, y + cellH / 2 + 5);
+  });
+
+  ctx.strokeStyle = "#374151";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(gridLeft, gridTop, gridSize, gridSize);
+
+  const legendY = gridTop + gridSize + 40;
+  const legendWidth = 300;
+  const legendLeft = (width - legendWidth) / 2;
+  const legendGradient = ctx.createLinearGradient(legendLeft, 0, legendLeft + legendWidth, 0);
+  legendGradient.addColorStop(0, colorFor(minV));
+  legendGradient.addColorStop(1, colorFor(maxV));
+  ctx.fillStyle = legendGradient;
+  ctx.fillRect(legendLeft, legendY, legendWidth, 16);
+  ctx.strokeStyle = "#9ca3af";
+  ctx.strokeRect(legendLeft, legendY, legendWidth, 16);
+
+  ctx.fillStyle = "#374151";
+  ctx.font = "12px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText(`Lower NDVI (${minV.toFixed(2)}) - higher risk`, legendLeft, legendY + 32);
+  ctx.textAlign = "right";
+  ctx.fillText(`Higher NDVI (${maxV.toFixed(2)}) - lower risk`, legendLeft + legendWidth, legendY + 32);
+
+  return canvas.toDataURL("image/png");
+};
+
+/**
+ * Driver Analysis pie chart drawn from this report's real driver data
+ * (analysisData.changeDetection.change_drivers) - the same real data the
+ * text Driver Analysis section already requires before rendering at all.
+ * Callers must not call this without real driverData; there is no
+ * AI-illustrated fallback for causal attribution, since that can't be
+ * measured from pixels.
+ */
+const renderDriverAnalysisPng = (drivers: { driver?: string; name?: string; contribution_percent?: number | string }[]): string => {
+  const width = 900;
+  const height = 500;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.fillStyle = "#111827";
+  ctx.font = "bold 24px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText("Driver Analysis", 40, 40);
+  ctx.font = "14px Arial";
+  ctx.fillStyle = "#6b7280";
+  ctx.fillText("Contributing drivers as estimated by this report's analysis", 40, 62);
+
+  const entries = drivers
+    .map((d) => ({
+      label: d.driver || d.name || "Unspecified",
+      value: typeof d.contribution_percent === "number" ? d.contribution_percent : parseFloat(String(d.contribution_percent)) || 0,
+    }))
+    .filter((d) => d.value > 0);
+
+  const total = entries.reduce((s, d) => s + d.value, 0) || 1;
+  const colors = ["#0891b2", "#16a34a", "#eab308", "#ea580c", "#dc2626", "#7c3aed", "#64748b"];
+
+  const cx = 230;
+  const cy = 280;
+  const r = 150;
+  let startAngle = -Math.PI / 2;
+
+  entries.forEach((d, i) => {
+    const sliceAngle = (d.value / total) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, startAngle, startAngle + sliceAngle);
+    ctx.closePath();
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fill();
+    startAngle += sliceAngle;
+  });
+
+  let legendY = 100;
+  entries.forEach((d, i) => {
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fillRect(500, legendY, 16, 16);
+    ctx.fillStyle = "#374151";
+    ctx.font = "14px Arial";
+    ctx.textAlign = "left";
+    ctx.fillText(`${d.label}: ${d.value.toFixed(1)}%`, 524, legendY + 13);
+    legendY += 28;
+  });
+
+  return canvas.toDataURL("image/png");
+};
+
+/**
+ * Real 3D terrain snapshot: an off-screen MapLibre GL map with real SRTM-
+ * derived elevation (AWS's free/keyless Terrarium DEM tiles) and, when
+ * available, this report's own real Sentinel-2 imagery draped on top -
+ * instead of asking an AI model to illustrate a 3D terrain picture. Returns
+ * null (rather than throwing) on any failure so a slow tile load or WebGL
+ * issue never breaks the rest of report generation.
+ */
+const capture3DTerrainSnapshot = async (
+  lat: number | undefined,
+  lng: number | undefined,
+  sentinelTrueColorImage: string | null
+): Promise<string | null> => {
+  if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+
+  const container = document.createElement("div");
+  container.style.position = "fixed";
+  container.style.top = "-10000px";
+  container.style.left = "-10000px";
+  container.style.width = "800px";
+  container.style.height = "450px";
+  document.body.appendChild(container);
+
+  let map: maplibregl.Map | null = null;
+
+  try {
+    // Matches generate-visualization's Sentinel Hub Process API AOI exactly,
+    // so the draped image lines up with the real coordinates it was fetched for.
+    const half = 0.05;
+    const sources: Record<string, any> = {
+      dem: {
+        type: "raster-dem",
+        tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+        tileSize: 256,
+        encoding: "terrarium",
+        maxzoom: 15,
+      },
+    };
+    const layers: any[] = [];
+
+    if (sentinelTrueColorImage) {
+      sources["sentinel-drape"] = {
+        type: "image",
+        url: sentinelTrueColorImage,
+        coordinates: [
+          [lng - half, lat + half],
+          [lng + half, lat + half],
+          [lng + half, lat - half],
+          [lng - half, lat - half],
+        ],
+      };
+      layers.push({ id: "sentinel-drape-layer", type: "raster", source: "sentinel-drape" });
+    } else {
+      sources["osm"] = {
+        type: "raster",
+        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        tileSize: 256,
+        attribution: "© OpenStreetMap contributors",
+      };
+      layers.push({ id: "osm-layer", type: "raster", source: "osm" });
+    }
+
+    map = new maplibregl.Map({
+      container,
+      style: { version: 8, sources, layers },
+      center: [lng, lat],
+      zoom: 12.5,
+      pitch: 65,
+      bearing: -20,
+      interactive: false,
+      attributionControl: false,
+      preserveDrawingBuffer: true, // required so getCanvas().toDataURL() works
+    } as any);
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("3D terrain load timed out")), 12000);
+      map!.on("load", () => {
+        try {
+          map!.setTerrain({ source: "dem", exaggeration: 1.6 });
+        } catch (e) {
+          clearTimeout(timeout);
+          reject(e);
+          return;
+        }
+        map!.once("idle", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+      map!.on("error", (e) => {
+        clearTimeout(timeout);
+        reject(e.error || new Error("MapLibre error during 3D terrain render"));
+      });
+    });
+
+    return map.getCanvas().toDataURL("image/png");
+  } catch (e) {
+    console.warn("3D terrain capture failed, omitting from report:", e);
+    return null;
+  } finally {
+    try {
+      map?.remove();
+    } catch {
+      // ignore cleanup errors
+    }
+    container.remove();
+  }
+};
+
 // Advanced visualization types available
 const ADVANCED_VIZ_TYPES = [
   { id: 'terrain_3d', label: '3D Terrain', icon: Mountain, description: 'Dramatic 3D terrain with elevation' },
@@ -46,7 +471,7 @@ const ADVANCED_VIZ_TYPES = [
   { id: 'driver_analysis', label: 'Driver Analysis', icon: PieChart, description: 'Causal factors breakdown' },
 ];
 
-const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorProps) => {
+const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureMap }: ReportGeneratorProps) => {
   const [reportType, setReportType] = useState<"professional" | "simple">("professional");
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationStep, setGenerationStep] = useState("");
@@ -54,13 +479,17 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
   const [showPreview, setShowPreview] = useState(false);
   const [selectedAdvancedViz, setSelectedAdvancedViz] = useState<string[]>(['terrain_3d', 'risk_zones']);
   const [previewImages, setPreviewImages] = useState<Record<string, string | null>>({});
+  // Side-channel for the Quality Assurance / References sections: which
+  // panels in the most recent generation actually came from real Sentinel
+  // Hub imagery vs. an AI illustration, keyed by visualization type.
+  const lastDataSourcesRef = useRef<Record<string, string>>({});
 
-  const generateVisualization = async (type: string): Promise<string | null> => {
+  const generateVisualization = async (type: string): Promise<{ imageUrl: string | null; gridData?: RiskGridData; dataSource?: string } | null> => {
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      
+
       console.log(`Starting visualization generation for: ${type}`);
-      
+
       const response = await fetch(
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-visualization`,
         {
@@ -73,6 +502,9 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
             visualizationType: type,
             region: region || analysisData?.region,
             eventType: eventType || analysisData?.eventType,
+            lat: lat ?? analysisData?.locations?.[0]?.lat,
+            lng: lng ?? analysisData?.locations?.[0]?.lng,
+            endDate: analysisData?.endDate || analysisData?.end_date,
             data: analysisData,
           }),
         }
@@ -84,13 +516,14 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
       }
 
       const data = await response.json();
-      console.log(`Visualization response for ${type}:`, data.imageUrl ? 'Image received' : 'No image', data.description?.substring(0, 100));
-      
-      if (data.imageUrl) {
-        return data.imageUrl;
+      console.log(`Visualization response for ${type}:`, data.imageUrl ? 'Image received' : data.gridData ? 'Grid data received' : 'No image', data.description?.substring(0, 100));
+
+      if (data.imageUrl || data.gridData) {
+        lastDataSourcesRef.current[type] = data.dataSource || "AI illustration (Google Gemini)";
+        return { imageUrl: data.imageUrl ?? null, gridData: data.gridData, dataSource: data.dataSource };
       }
-      
-      console.warn(`No image URL returned for ${type}`);
+
+      console.warn(`No image or grid data returned for ${type}`);
       return null;
     } catch (error) {
       console.error(`Error generating ${type} visualization:`, error);
@@ -111,7 +544,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
     // Generate one preview image as a sample
     toast.info("Generating report preview...");
     const sampleImage = await generateVisualization("landsat_truecolor");
-    previews["satellite"] = sampleImage;
+    previews["satellite"] = sampleImage?.imageUrl ?? null;
     
     setPreviewImages(previews);
   };
@@ -164,7 +597,18 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
       water_quality: { label: "Water Quality Assessment", category: "Environmental Health", fullTitle: "WATER QUALITY ASSESSMENT REPORT" },
       coastal_erosion: { label: "Coastal Erosion Analysis", category: "Geological Change", fullTitle: "COASTAL EROSION ANALYSIS REPORT" },
     };
-    return types[type?.toLowerCase()] || { label: type || "Environmental Analysis", category: "General Assessment", fullTitle: "ENVIRONMENTAL ANALYSIS REPORT" };
+    if (types[type?.toLowerCase()]) return types[type.toLowerCase()];
+
+    // GeoWitness offers 40+ event types (reforestation, mangrove_loss, heatwave,
+    // desertification, etc.) but only the handful above have a custom label -
+    // everything else previously fell through to the raw snake_case value
+    // (e.g. "forest_degradation") instead of a readable title.
+    const humanized = type ? type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) : "";
+    return {
+      label: humanized ? `${humanized} Assessment` : "Environmental Analysis",
+      category: "General Assessment",
+      fullTitle: `${humanized || "Environmental Analysis"} Report`.toUpperCase(),
+    };
   };
 
   const generatePDFReport = async () => {
@@ -175,50 +619,126 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
 
     setIsGenerating(true);
     const isSimple = reportType === "simple";
+    lastDataSourcesRef.current = {};
 
     try {
-      // Generate Landsat visualizations if enabled
+      // Generate Sentinel-2 visualizations if enabled
       let trueColorImage: string | null = null;
       let falseColorImage: string | null = null;
       let ndviImage: string | null = null;
       let classificationImage: string | null = null;
       let changeDetectionImage: string | null = null;
-      let chartImage: string | null = null;
+      let mapSnapshot: string | null = null;
       const advancedImages: Record<string, string | null> = {};
 
       if (includeImages) {
-        setGenerationStep("Generating Landsat true-color satellite imagery...");
-        trueColorImage = await generateVisualization("landsat_truecolor");
-        
+        // Every image below is an independent network call (map snapshot,
+        // Sentinel Hub/AI visualizations), so they're fired concurrently
+        // rather than awaited one-by-one - report generation time is then
+        // bounded by the slowest single call instead of their sum.
+        type VizTask = { key: string; type: string };
+        const vizTasks: VizTask[] = [{ key: "trueColor", type: "landsat_truecolor" }];
+
+        // Only these advanced types need a network call: ndwi_water/nbr_fire
+        // now get real Sentinel Hub imagery and risk_zones needs real
+        // gridded stats from the backend; thermal_analysis has no real data
+        // source available yet (Sentinel-2 has no thermal sensor) so it
+        // stays an AI illustration. The rest (ecosystem_health,
+        // temporal_animation, driver_analysis, terrain_3d) are rendered
+        // locally below from data this report already has - no network
+        // call, no AI quota dependency, always available.
+        const NETWORK_ADVANCED_TYPES = new Set(["ndwi_water", "nbr_fire", "thermal_analysis", "risk_zones"]);
+
         if (!isSimple) {
-          setGenerationStep("Generating false-color composite imagery...");
-          falseColorImage = await generateVisualization("landsat_falsecolor");
-          
-          setGenerationStep("Generating NDVI vegetation analysis map...");
-          ndviImage = await generateVisualization("ndvi_map");
-          
-          // Generate selected advanced visualizations
+          vizTasks.push({ key: "falseColor", type: "landsat_falsecolor" });
+          vizTasks.push({ key: "ndvi", type: "ndvi_map" });
           for (const vizId of selectedAdvancedViz) {
-            const vizInfo = ADVANCED_VIZ_TYPES.find(v => v.id === vizId);
-            if (vizInfo) {
-              setGenerationStep(`Generating ${vizInfo.label}...`);
-              advancedImages[vizId] = await generateVisualization(vizId);
+            if (NETWORK_ADVANCED_TYPES.has(vizId)) {
+              vizTasks.push({ key: `advanced:${vizId}`, type: vizId });
             }
           }
         }
-        
         if (analysisData?.classificationResults) {
-          setGenerationStep("Generating land cover classification map...");
-          classificationImage = await generateVisualization("classification_map");
+          vizTasks.push({ key: "classification", type: "classification_map" });
         }
-        
         if (analysisData?.changeDetection) {
-          setGenerationStep("Generating change detection analysis map...");
-          changeDetectionImage = await generateVisualization("change_detection_map");
+          vizTasks.push({ key: "changeDetection", type: "change_detection_map" });
         }
-        
-        setGenerationStep("Generating spectral indices analysis chart...");
-        chartImage = await generateVisualization("chart");
+
+        setGenerationStep(`Generating ${vizTasks.length} satellite imagery panel${vizTasks.length === 1 ? "" : "s"} and capturing study area map...`);
+
+        const [mapResult, ...vizResults] = await Promise.all([
+          Promise.resolve(onCaptureMap?.() ?? null),
+          ...vizTasks.map((t) => generateVisualization(t.type)),
+        ]);
+
+        mapSnapshot = mapResult ?? null;
+        let riskGridData: RiskGridData | null = null;
+        vizTasks.forEach((t, i) => {
+          const result = vizResults[i];
+          if (t.key === "trueColor") trueColorImage = result?.imageUrl ?? null;
+          else if (t.key === "falseColor") falseColorImage = result?.imageUrl ?? null;
+          else if (t.key === "ndvi") ndviImage = result?.imageUrl ?? null;
+          else if (t.key === "classification") classificationImage = result?.imageUrl ?? null;
+          else if (t.key === "changeDetection") changeDetectionImage = result?.imageUrl ?? null;
+          else if (t.key === "advanced:risk_zones") {
+            if (result?.gridData) riskGridData = result.gridData;
+            else advancedImages.risk_zones = result?.imageUrl ?? null;
+          } else if (t.key.startsWith("advanced:")) {
+            advancedImages[t.key.slice("advanced:".length)] = result?.imageUrl ?? null;
+          }
+        });
+
+        // Locally-rendered advanced visualizations: real data this report
+        // already has, drawn on-device (deterministic, free, no quota,
+        // always available) instead of asking an AI model to illustrate one.
+        if (!isSimple) {
+          const rdChangePercent = parseFloat(analysisData?.changePercent ?? analysisData?.change_percent ?? 0) || 0;
+          const rdSpectralIndices = analysisData?.spectralIndices;
+          const rdTemporalBreakdown = analysisData?.temporalBreakdown || analysisData?.temporal_breakdown;
+          const rdDriverData = analysisData?.changeDetection?.change_drivers?.length
+            ? analysisData.changeDetection.change_drivers
+            : null;
+
+          if (selectedAdvancedViz.includes("temporal_animation")) {
+            const periods = Array.isArray(rdTemporalBreakdown) && rdTemporalBreakdown.length > 0
+              ? rdTemporalBreakdown.map((p: any) => ({
+                  label: String(p.label || p.period || "Period"),
+                  value: p.changePercent !== undefined ? parseFloat(p.changePercent) : 0,
+                }))
+              : [{ label: "Full Study Period", value: rdChangePercent }];
+            advancedImages.temporal_animation = renderTrendChartPng(periods);
+            lastDataSourcesRef.current.temporal_animation = Array.isArray(rdTemporalBreakdown) && rdTemporalBreakdown.length > 0
+              ? "Real Sentinel-2 measurements (rendered on-device, not AI-generated)"
+              : "Reported study-period total (rendered on-device, not AI-generated)";
+          }
+
+          if (selectedAdvancedViz.includes("ecosystem_health") && rdSpectralIndices) {
+            advancedImages.ecosystem_health = renderEcosystemHealthPng(rdSpectralIndices, rdChangePercent);
+            lastDataSourcesRef.current.ecosystem_health = "Real Sentinel-2 spectral indices (rendered on-device, not AI-generated)";
+          }
+
+          if (selectedAdvancedViz.includes("risk_zones") && riskGridData) {
+            advancedImages.risk_zones = renderRiskZonesHeatmapPng(riskGridData);
+            lastDataSourcesRef.current.risk_zones = "Real gridded Sentinel-2 NDVI (rendered on-device, not AI-generated)";
+          }
+
+          if (selectedAdvancedViz.includes("driver_analysis") && rdDriverData) {
+            advancedImages.driver_analysis = renderDriverAnalysisPng(rdDriverData);
+            lastDataSourcesRef.current.driver_analysis = "Real analysis driver data (rendered on-device, not AI-generated)";
+          }
+
+          if (selectedAdvancedViz.includes("terrain_3d")) {
+            setGenerationStep("Rendering real 3D terrain from elevation data...");
+            const terrainImg = await capture3DTerrainSnapshot(lat, lng, trueColorImage);
+            if (terrainImg) {
+              advancedImages.terrain_3d = terrainImg;
+              lastDataSourcesRef.current.terrain_3d = trueColorImage
+                ? "Real Sentinel-2 imagery draped on real SRTM elevation data (MapLibre GL, rendered on-device)"
+                : "Real SRTM elevation data (MapLibre GL, rendered on-device)";
+            }
+          }
+        }
       }
 
       setGenerationStep("Compiling professional report document...");
@@ -254,6 +774,35 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
       const regionName = region || analysisData?.region || "Study Region";
       const area = analysisData?.area || analysisData?.area_analyzed || "N/A";
       const confidence = analysisData?.confidenceLevel ?? analysisData?.confidence ?? analysisData?.analysisConfidence ?? null;
+
+      // Only include Driver Analysis if there's real underlying data for it -
+      // otherwise it would be pure filler (and previously WAS, in the
+      // generate-visualization AI-illustration version of this section).
+      const driverData = analysisData?.changeDetection?.change_drivers?.length
+        ? analysisData.changeDetection.change_drivers
+        : null;
+
+      // Single source of truth for section numbering, used to render BOTH the
+      // table of contents AND each section header - guarantees they can never
+      // drift out of sync the way the old hardcoded TOC vs. body numbers did.
+      const sectionPlan: { key: string; title: string }[] = isSimple
+        ? [
+            { key: "executive_summary", title: "Executive Summary" },
+            { key: "key_findings", title: "Key Findings & Analysis" },
+          ]
+        : [
+            { key: "executive_summary", title: "Executive Summary" },
+            { key: "project_overview", title: "Project Overview & Objectives" },
+            { key: "satellite_imagery", title: "Satellite Imagery Analysis" },
+            { key: "key_findings", title: "Key Findings & Analysis" },
+            ...(driverData ? [{ key: "driver_analysis", title: "Driver Analysis" }] : []),
+            { key: "risk_assessment", title: "Risk Assessment" },
+            { key: "recommendations", title: "Recommendations & Implementation Roadmap" },
+            { key: "quality_assurance", title: "Quality Assurance & Limitations" },
+            { key: "methodology", title: "Geospatial Analysis Methodology" },
+            { key: "references", title: "References & Data Sources" },
+          ];
+      const sectionNum = (key: string): string => String(sectionPlan.findIndex((s) => s.key === key) + 1);
 
       // Helper functions
       const addWrappedText = (text: string, x: number, y: number, maxWidth: number, lineHeight: number = 5): number => {
@@ -483,19 +1032,15 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
         pdf.text("TABLE OF CONTENTS", margin, yPos);
         yPos += 15;
 
-        const tocItems = [
-          { num: "1", title: "Executive Summary", page: "3" },
-          { num: "2", title: "Project Overview & Objectives", page: "4" },
-          { num: "3", title: "Geospatial Analysis Methodology", page: "5" },
-          { num: "4", title: "Key Findings & Analysis", page: "6" },
-          { num: "5", title: "Driver Analysis", page: "8" },
-          { num: "6", title: "Risk Assessment", page: "9" },
-          { num: "7", title: "Stakeholder-Specific Recommendations", page: "10" },
-          { num: "8", title: "Economic Impact Assessment", page: "12" },
-          { num: "9", title: "Implementation Roadmap", page: "13" },
-          { num: "10", title: "Quality Assurance & Limitations", page: "14" },
-          { num: "11", title: "References & Data Sources", page: "15" },
-        ];
+        // Generated from sectionPlan (not a separate hardcoded list) so the
+        // TOC's numbers/titles can never drift out of sync with the actual
+        // section headers rendered below, page numbers are estimates.
+        let tocPageEstimate = 3;
+        const tocItems = sectionPlan.map((section) => {
+          const item = { num: sectionNum(section.key), title: section.title, page: String(tocPageEstimate) };
+          tocPageEstimate += section.key === "methodology" || section.key === "references" ? 2 : 1;
+          return item;
+        });
 
         pdf.setFontSize(11);
         tocItems.forEach((item) => {
@@ -527,9 +1072,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
         pdf.setFont("helvetica", "normal");
         pdf.text("A. Satellite Imagery Panels", margin + 10, yPos);
         yPos += 8;
-        pdf.text("B. Spectral Indices Maps", margin + 10, yPos);
-        yPos += 8;
-        pdf.text("C. Land Classification Results", margin + 10, yPos);
+        pdf.text("B. Advanced Visualizations (if selected)", margin + 10, yPos);
       }
 
       // ============= PAGE 3: EXECUTIVE SUMMARY =============
@@ -537,13 +1080,13 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
       addPageHeader();
       yPos = 28;
 
-      yPos = addSectionTitle("EXECUTIVE SUMMARY", yPos, "1");
+      yPos = addSectionTitle("EXECUTIVE SUMMARY", yPos, sectionNum("executive_summary"));
 
       // Purpose paragraph with citation references
       pdf.setFont("helvetica", "normal");
       pdf.setFontSize(10);
       pdf.setTextColor(55, 65, 81);
-      const purposeText = `Purpose of Analysis: This assessment was conducted to evaluate environmental conditions, quantify changes, and inform evidence-based land management policy in ${regionName} [1,2]. The analysis covers the period from ${new Date(startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })} to ${new Date(endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}, utilizing multi-spectral satellite imagery [3].`;
+      const purposeText = `Purpose of Analysis: This assessment was conducted to evaluate environmental conditions, quantify changes, and inform evidence-based land management policy in ${regionName}. The analysis covers the period from ${new Date(startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })} to ${new Date(endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}.${!isSimple ? ` See Section ${sectionNum("references")} for the specific data sources used in this report.` : ""}`;
       yPos = addWrappedText(purposeText, margin, yPos, contentWidth, 5);
       yPos += 8;
 
@@ -565,12 +1108,36 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
       // Critical Findings section
       yPos = addSubsectionTitle("Critical Findings", yPos);
 
-      const findings = analysisData?.findings || analysisData?.recommendations || [
-        { num: "1", title: "Change Pattern Analysis", detail: `Analysis reveals significant environmental change patterns within the study area, with changes concentrated in specific hotspots that require targeted monitoring and intervention.` },
-        { num: "2", title: "Primary Drivers Identified", detail: `Multi-spectral analysis indicates primary drivers including land use change, environmental stressors, and anthropogenic activities contributing to the observed changes.` },
-        { num: "3", title: "Temporal Trends", detail: `Seasonal analysis shows variation in change rates, with peak activity observed during specific periods that correlate with regional patterns.` },
-        { num: "4", title: "Impact Assessment", detail: `The detected changes represent significant implications for ecosystem health, requiring continued monitoring and potential intervention strategies.` },
-      ];
+      // Splits a real narrative paragraph into distinct chunks, one per
+      // sentence-group, so GeoWitness-sourced reports (analyze-satellite
+      // returns detailed_analysis/summary but no separate "findings" array)
+      // get real, specific findings here instead of duplicating the
+      // Recommendations section verbatim under a different heading - that
+      // previous fallback (`analysisData?.recommendations`) was the reason
+      // exported reports still looked repetitive/unchanged.
+      const splitIntoFindings = (text: string, maxCount: number): string[] =>
+        text
+          .replace(/\s+/g, " ")
+          .split(/(?<=[.!?])\s+(?=[A-Z])/)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 20)
+          .slice(0, maxCount);
+
+      const narrativeFindings = splitIntoFindings(
+        String(analysisData?.fullAnalysis || analysisData?.detailedAnalysis || analysisData?.summary || ""),
+        4
+      );
+
+      const findings = analysisData?.findings?.length > 0
+        ? analysisData.findings
+        : narrativeFindings.length > 0
+        ? narrativeFindings
+        : [
+            { num: "1", title: "Change Pattern Analysis", detail: `Analysis reveals significant environmental change patterns within the study area, with changes concentrated in specific hotspots that require targeted monitoring and intervention.` },
+            { num: "2", title: "Primary Drivers Identified", detail: `Multi-spectral analysis indicates primary drivers including land use change, environmental stressors, and anthropogenic activities contributing to the observed changes.` },
+            { num: "3", title: "Temporal Trends", detail: `Seasonal analysis shows variation in change rates, with peak activity observed during specific periods that correlate with regional patterns.` },
+            { num: "4", title: "Impact Assessment", detail: `The detected changes represent significant implications for ecosystem health, requiring continued monitoring and potential intervention strategies.` },
+          ];
 
       findings.slice(0, 4).forEach((finding: any, index: number) => {
         checkPageBreak(20);
@@ -610,6 +1177,54 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
       pdf.text(pdf.splitTextToSize(riskText, contentWidth - 20)[0], margin + 10, yPos + 18);
       yPos += 35;
 
+      // ============= PROJECT OVERVIEW & OBJECTIVES =============
+      if (!isSimple) {
+        pdf.addPage();
+        addPageHeader();
+        yPos = 28;
+
+        yPos = addSectionTitle("PROJECT OVERVIEW & OBJECTIVES", yPos, sectionNum("project_overview"));
+
+        yPos = addSubsectionTitle("Study Parameters", yPos);
+        const overviewHeaders = ["PARAMETER", "VALUE"];
+        const overviewRows: string[][] = [
+          ["Region", regionName],
+          ["Event / Analysis Type", eventInfo.label],
+          ["Study Period", `${new Date(startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })} - ${new Date(endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`],
+          ["Area Analyzed", String(area)],
+        ];
+        if (typeof lat === "number" && typeof lng === "number") {
+          overviewRows.push(["Coordinates", `${lat.toFixed(4)}, ${lng.toFixed(4)}`]);
+        }
+        yPos = addTableWithBorders(overviewHeaders, overviewRows, yPos, [70, 100]);
+        yPos += 8;
+
+        yPos = addSubsectionTitle("Objectives", yPos);
+        const objectives = [
+          `Quantify the extent and rate of ${eventInfo.label.toLowerCase()} in ${regionName} over the study period.`,
+          `Assess the associated environmental risk and likely trajectory if current patterns continue.`,
+          `Provide specific, actionable recommendations for the responsible stakeholders identified in this report.`,
+        ];
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9.5);
+        pdf.setTextColor(55, 65, 81);
+        objectives.forEach((obj, i) => {
+          checkPageBreak(15);
+          pdf.text(`${i + 1}.`, margin, yPos);
+          yPos = addWrappedText(obj, margin + 6, yPos, contentWidth - 6, 5);
+          yPos += 3;
+        });
+        yPos += 5;
+
+        yPos = addSubsectionTitle("Scope & Data Basis", yPos);
+        const scopeText = typeof lat === "number" && typeof lng === "number"
+          ? `This report's satellite imagery panels (Section ${sectionNum("satellite_imagery")}) use real Sentinel-2 imagery for the coordinates above. Numeric spectral/change statistics elsewhere in this report are AI-generated estimates rather than pixel-level measurements - see Section ${sectionNum("quality_assurance")} for a full accounting of what is real data versus modeled approximation in this specific report.`
+          : `No specific coordinates were available for this analysis, so satellite imagery panels could not be sourced from real imagery and numeric spectral/change statistics are AI-generated estimates rather than pixel-level measurements - see Section ${sectionNum("quality_assurance")} for a full accounting of what is real data versus modeled approximation in this specific report.`;
+        pdf.setFontSize(9.5);
+        yPos = addWrappedText(scopeText, margin, yPos, contentWidth, 5);
+        yPos += 10;
+      }
+
       // ============= SATELLITE IMAGERY SECTION =============
       // Always show imagery section in professional reports
       if (!isSimple) {
@@ -617,14 +1232,38 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
         addPageHeader();
         yPos = 28;
 
-        yPos = addSectionTitle("SATELLITE IMAGERY ANALYSIS", yPos, "2");
+        yPos = addSectionTitle("SATELLITE IMAGERY ANALYSIS", yPos, sectionNum("satellite_imagery"));
 
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(10);
         pdf.setTextColor(55, 65, 81);
-        const imageryIntro = `Multi-spectral satellite imagery sourced from Sentinel-2 MSI [1] and Landsat-8 OLI [2] sensors provides comprehensive coverage of the study area. Processing was conducted using Google Earth Engine [3] and validated against ground-truth data [4]. The following imagery panels show the analyzed region with environmental change indicators.`;
+        const anyRealImagery = Object.values(lastDataSourcesRef.current).some((s) => /sentinel/i.test(s));
+        const imageryIntro = anyRealImagery
+          ? `The following panels include real Sentinel-2 L2A satellite imagery retrieved for this study area, alongside AI-generated illustrations for panel types not covered by real imagery retrieval. See Section ${sectionNum("quality_assurance")} for exactly which panels below are real versus AI-illustrated.`
+          : `Real satellite imagery could not be retrieved for this report (no verified location was available), so the panels below are AI-generated illustrations rather than actual imagery. See Section ${sectionNum("quality_assurance")} for details.`;
         yPos = addWrappedText(imageryIntro, margin, yPos, contentWidth, 5);
         yPos += 10;
+
+        // Study area location map - a real screenshot of the interactive map
+        // (actual OpenStreetMap tiles + study-area boundary), giving genuine
+        // geographic context before the spectral imagery panels below.
+        if (mapSnapshot) {
+          const mapImgWidth = contentWidth - 10;
+          const mapImgHeight = 55;
+          pdf.setFillColor(243, 244, 246);
+          pdf.roundedRect(margin, yPos, contentWidth, mapImgHeight + 10, 3, 3, "F");
+          try {
+            pdf.addImage(mapSnapshot, "PNG", margin + 5, yPos + 5, mapImgWidth, mapImgHeight);
+          } catch (e) {
+            console.warn("Could not add map snapshot to PDF:", e);
+          }
+          yPos += mapImgHeight + 15;
+          pdf.setFontSize(9);
+          pdf.setTextColor(107, 114, 128);
+          pdf.setFont("helvetica", "italic");
+          pdf.text(`Figure: Study area location for ${regionName} (OpenStreetMap).`, margin, yPos);
+          yPos += 10;
+        }
 
         // Main satellite image
         const imgWidth = contentWidth - 10;
@@ -643,7 +1282,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
             pdf.setTextColor(107, 114, 128);
             pdf.text("Satellite Imagery", margin + contentWidth / 2 - 25, yPos + 35);
             pdf.setFontSize(9);
-            pdf.text("True-color Landsat composite visualization", margin + contentWidth / 2 - 45, yPos + 45);
+            pdf.text("True-color Sentinel-2 composite visualization", margin + contentWidth / 2 - 45, yPos + 45);
           }
         } else {
           // Placeholder when no image available
@@ -651,7 +1290,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
           pdf.setTextColor(107, 114, 128);
           pdf.text("Satellite Imagery Panel", margin + contentWidth / 2 - 30, yPos + 30);
           pdf.setFontSize(9);
-          pdf.text("True-color Landsat 8/9 OLI composite", margin + contentWidth / 2 - 38, yPos + 40);
+          pdf.text("True-color Sentinel-2 MSI composite", margin + contentWidth / 2 - 38, yPos + 40);
           pdf.text(`Region: ${regionName}`, margin + contentWidth / 2 - 20, yPos + 50);
         }
         yPos += 80;
@@ -728,7 +1367,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
       addPageHeader();
       yPos = 28;
 
-      yPos = addSectionTitle("KEY FINDINGS & ANALYSIS", yPos, "3");
+      yPos = addSectionTitle("KEY FINDINGS & ANALYSIS", yPos, sectionNum("key_findings"));
 
       // Temporal Dynamics table — uses real per-period values from analysis when present,
       // otherwise reports only the validated study-period total (no fabricated quarterly splits).
@@ -760,35 +1399,34 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
         : "Sub-period breakdown not provided by analysis; cumulative total shown.", margin, yPos);
       yPos += 12;
 
-      // Trend chart - always show section in professional reports
+      // Trend chart - rendered directly from the report's own numbers (see
+      // renderTrendChartPng), not an AI illustration, so it always succeeds
+      // and always matches the table above.
       checkPageBreak(75);
       yPos = addSubsectionTitle("Trend Analysis Visualization", yPos);
-      
+
       pdf.setFillColor(249, 250, 251);
       pdf.roundedRect(margin, yPos, contentWidth, 60, 3, 3, "F");
-      
+
       const chartImgWidth = contentWidth - 10;
       const chartImgHeight = 50;
-      
+
+      const chartPeriods = Array.isArray(periodsFromData) && periodsFromData.length > 0
+        ? periodsFromData.map((p: any) => ({
+            label: String(p.label || p.period || "Period"),
+            value: p.changePercent !== undefined ? parseFloat(p.changePercent) : 0,
+          }))
+        : [{ label: "Full Study Period", value: changePercent }];
+      const chartImage = renderTrendChartPng(chartPeriods);
+
       if (chartImage) {
-        try {
-          pdf.addImage(chartImage, "PNG", margin + 5, yPos + 5, chartImgWidth, chartImgHeight);
-        } catch (e) {
-          console.warn("Could not add chart image to PDF:", e);
-          pdf.setFontSize(12);
-          pdf.setTextColor(107, 114, 128);
-          pdf.text("Trend Analysis Chart", margin + contentWidth / 2 - 30, yPos + 25);
-          pdf.setFontSize(9);
-          pdf.text("Environmental change trends over study period", margin + contentWidth / 2 - 50, yPos + 35);
-        }
+        pdf.addImage(chartImage, "PNG", margin + 5, yPos + 5, chartImgWidth, chartImgHeight);
       } else {
-        // Placeholder chart description
         pdf.setFontSize(12);
         pdf.setTextColor(107, 114, 128);
         pdf.text("Trend Analysis Chart", margin + contentWidth / 2 - 30, yPos + 20);
         pdf.setFontSize(9);
         pdf.text(`${changePercent.toFixed(1)}% change detected over study period`, margin + contentWidth / 2 - 45, yPos + 32);
-        pdf.text("Quarterly breakdown shown in table above", margin + contentWidth / 2 - 42, yPos + 42);
       }
       yPos += 65;
       
@@ -798,6 +1436,39 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
       pdf.text("Figure 2: Environmental change trend analysis showing temporal patterns over the study period.", margin, yPos);
       yPos += 12;
 
+      // ============= DRIVER ANALYSIS (only when the analysis actually returned driver data) =============
+      if (!isSimple && driverData) {
+        pdf.addPage();
+        addPageHeader();
+        yPos = 28;
+
+        yPos = addSectionTitle("DRIVER ANALYSIS", yPos, sectionNum("driver_analysis"));
+
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9.5);
+        pdf.setTextColor(75, 85, 99);
+        yPos = addWrappedText(
+          "Contributing drivers identified for the detected change, as estimated by the analysis. These figures are AI-generated estimates, not measured attributions.",
+          margin, yPos, contentWidth, 5
+        );
+        yPos += 8;
+
+        const driverHeaders = ["DRIVER", "ESTIMATED CONTRIBUTION"];
+        const driverRows = driverData.map((d: any) => [
+          String(d.driver || d.name || "Unspecified"),
+          d.contribution_percent !== undefined ? `${parseFloat(d.contribution_percent).toFixed(1)}%` : "N/A",
+        ]);
+        yPos = addTableWithBorders(driverHeaders, driverRows, yPos, [110, 60]);
+        yPos += 8;
+
+        if (analysisData?.multiEventAnalysis?.interaction_effects) {
+          yPos = addSubsectionTitle("Interaction Effects", yPos);
+          pdf.setFontSize(9.5);
+          yPos = addWrappedText(String(analysisData.multiEventAnalysis.interaction_effects), margin, yPos, contentWidth, 5);
+          yPos += 8;
+        }
+      }
+
       // ============= PROFESSIONAL REPORT EXTRAS =============
       if (!isSimple) {
         // RISK ASSESSMENT PAGE
@@ -805,7 +1476,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
         addPageHeader();
         yPos = 28;
 
-        yPos = addSectionTitle("RISK ASSESSMENT", yPos, "4");
+        yPos = addSectionTitle("RISK ASSESSMENT", yPos, sectionNum("risk_assessment"));
 
         // Risk classification box
         pdf.setFillColor(risk.bgColor[0], risk.bgColor[1], risk.bgColor[2]);
@@ -835,30 +1506,56 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
 
         // RECOMMENDATIONS PAGE
         checkPageBreak(80);
-        yPos = addSectionTitle("RECOMMENDATIONS", yPos, "5");
+        yPos = addSectionTitle("RECOMMENDATIONS & IMPLEMENTATION ROADMAP", yPos, sectionNum("recommendations"));
 
-        const recommendations = [
-          { priority: "HIGH", action: "Establish continuous monitoring protocols for identified change hotspots", timeline: "Immediate", responsible: "Environmental Agency" },
-          { priority: "HIGH", action: "Deploy ground-truth verification teams to validate satellite findings", timeline: "30 days", responsible: "Field Operations" },
-          { priority: "MEDIUM", action: "Engage local stakeholders and authorities with preliminary findings", timeline: "45 days", responsible: "Community Liaison" },
-          { priority: "MEDIUM", action: "Develop intervention strategies based on driver analysis results", timeline: "60 days", responsible: "Policy Team" },
-          { priority: "LOW", action: "Schedule follow-up analysis to track progression of detected changes", timeline: "90 days", responsible: "Analysis Team" },
-        ];
+        // Real recommendations from the analysis, organized into a
+        // roadmap (priority/timeline/responsible are derived scaffolding
+        // around real content, not fabricated advice) - only falls back to
+        // generic placeholders when the analysis returned none at all.
+        const realRecommendationText: string[] = Array.isArray(analysisData?.recommendations)
+          ? analysisData.recommendations
+              .map((r: any) => (typeof r === "string" ? r : r?.detail || r?.action || null))
+              .filter((r: unknown): r is string => typeof r === "string" && r.trim().length > 0)
+          : [];
+
+        const timelineByIndex = (i: number) => ["Immediate", "30 days", "45 days", "60 days", "90 days"][i] || `${(i + 1) * 30} days`;
+        const responsibleRotation = ["Environmental Agency", "Field Operations", "Community Liaison", "Policy Team", "Analysis Team"];
+        const priorityByIndex = (i: number, total: number) => {
+          if (i < Math.ceil(total / 3)) return "HIGH";
+          if (i < Math.ceil((total * 2) / 3)) return "MEDIUM";
+          return "LOW";
+        };
+
+        const recommendations = realRecommendationText.length > 0
+          ? realRecommendationText.map((action, i) => ({
+              priority: priorityByIndex(i, realRecommendationText.length),
+              action,
+              timeline: timelineByIndex(i),
+              responsible: responsibleRotation[i % responsibleRotation.length],
+            }))
+          : [
+              { priority: "HIGH", action: "Establish continuous monitoring protocols for identified change hotspots", timeline: "Immediate", responsible: "Environmental Agency" },
+              { priority: "HIGH", action: "Deploy ground-truth verification teams to validate satellite findings", timeline: "30 days", responsible: "Field Operations" },
+              { priority: "MEDIUM", action: "Engage local stakeholders and authorities with preliminary findings", timeline: "45 days", responsible: "Community Liaison" },
+              { priority: "MEDIUM", action: "Develop intervention strategies based on driver analysis results", timeline: "60 days", responsible: "Policy Team" },
+              { priority: "LOW", action: "Schedule follow-up analysis to track progression of detected changes", timeline: "90 days", responsible: "Analysis Team" },
+            ];
 
         recommendations.forEach((rec) => {
-          checkPageBreak(20);
-          
           const priorityColors: Record<string, { bg: [number, number, number]; fg: [number, number, number] }> = {
             HIGH: { bg: [254, 226, 226], fg: [220, 38, 38] },
             MEDIUM: { bg: [254, 249, 195], fg: [161, 98, 7] },
             LOW: { bg: [220, 252, 231], fg: [21, 128, 61] }
           };
-          
+
           const colors = priorityColors[rec.priority];
-          
+          const actionLines = pdf.splitTextToSize(sanitizeForPdf(rec.action), contentWidth - 30);
+          const boxHeight = 14 + actionLines.length * 4.5;
+          checkPageBreak(boxHeight + 4);
+
           pdf.setFillColor(colors.bg[0], colors.bg[1], colors.bg[2]);
-          pdf.roundedRect(margin, yPos, contentWidth, 18, 2, 2, "F");
-          
+          pdf.roundedRect(margin, yPos, contentWidth, boxHeight, 2, 2, "F");
+
           // Priority badge
           pdf.setFillColor(colors.fg[0], colors.fg[1], colors.fg[2]);
           pdf.roundedRect(margin + 3, yPos + 3, 18, 6, 1, 1, "F");
@@ -866,46 +1563,119 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
           pdf.setFontSize(7);
           pdf.setFont("helvetica", "bold");
           pdf.text(rec.priority, margin + 5, yPos + 7);
-          
-          // Action text
+
+          // Action text (wrapped, not truncated to one line)
           pdf.setTextColor(17, 24, 39);
           pdf.setFontSize(9);
           pdf.setFont("helvetica", "normal");
-          const actionText = pdf.splitTextToSize(rec.action, contentWidth - 70)[0];
-          pdf.text(actionText, margin + 25, yPos + 8);
-          
+          pdf.text(actionLines, margin + 25, yPos + 8);
+
           // Timeline
+          const metaY = yPos + 8 + actionLines.length * 4.5;
           pdf.setTextColor(107, 114, 128);
           pdf.setFontSize(8);
-          pdf.text(`Timeline: ${rec.timeline}`, margin + 25, yPos + 14);
-          pdf.text(`Responsible: ${rec.responsible}`, pageWidth - margin - 50, yPos + 14);
-          
-          yPos += 22;
+          pdf.text(`Timeline: ${rec.timeline}`, margin + 25, metaY);
+          pdf.text(`Responsible: ${rec.responsible}`, pageWidth - margin - 50, metaY);
+
+          yPos += boxHeight + 4;
         });
+
+        // ============= QUALITY ASSURANCE & LIMITATIONS =============
+        pdf.addPage();
+        addPageHeader();
+        yPos = 28;
+
+        yPos = addSectionTitle("QUALITY ASSURANCE & LIMITATIONS", yPos, sectionNum("quality_assurance"));
+
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9.5);
+        pdf.setTextColor(75, 85, 99);
+        yPos = addWrappedText(
+          "This section states plainly which parts of this specific report are real, measured data versus AI-generated estimates, so findings can be weighted appropriately.",
+          margin, yPos, contentWidth, 5
+        );
+        yPos += 8;
+
+        yPos = addSubsectionTitle("Data Basis for This Report", yPos);
+        const provenanceHeaders = ["REPORT ELEMENT", "BASIS"];
+        const imageLabel = (key: string, label: string): string[] => {
+          const source = lastDataSourcesRef.current[key];
+          if (!source) return [label, "Not generated for this report"];
+          const isReal = /sentinel/i.test(source);
+          return [label, isReal ? "Real Sentinel-2 satellite imagery" : "AI illustration (not real imagery)"];
+        };
+        const provenanceRows: string[][] = [
+          ["Study area map", mapSnapshot ? "Real map screenshot (OpenStreetMap)" : "Not captured for this report"],
+          imageLabel("landsat_truecolor", "True-color imagery panel"),
+          imageLabel("landsat_falsecolor", "False-color imagery panel"),
+          imageLabel("ndvi_map", "NDVI imagery panel"),
+          ["Trend chart", "Rendered directly from this report's own figures (not AI-generated)"],
+          ["Spectral indices / change %", analysisData?.dataProvenance?.analysisMethod === "real_sentinel_statistics"
+            ? "Real Sentinel-2 measurement (NDVI/NDWI/NBR computed from actual pixels)"
+            : "AI-estimated (Google Gemini) - not measured from pixel data"],
+          ["Location coordinates", analysisData?.locations?.[0]?.verified === false ? "AI-estimated, not geocoder-verified" : "Geocoded (OpenStreetMap/Nominatim) or user-selected"],
+          ...selectedAdvancedViz
+            .filter((id) => advancedImages[id])
+            .map((id) => {
+              const viz = ADVANCED_VIZ_TYPES.find((v) => v.id === id);
+              return [viz?.label || id, lastDataSourcesRef.current[id] || "AI illustration (Google Gemini)"];
+            }),
+        ];
+        yPos = addTableWithBorders(provenanceHeaders, provenanceRows, yPos, [70, 100]);
+        yPos += 8;
+
+        if (analysisData?.dataProvenance?.disclaimer) {
+          yPos = addSubsectionTitle("Analysis Disclaimer", yPos);
+          pdf.setFontSize(9);
+          yPos = addWrappedText(String(analysisData.dataProvenance.disclaimer), margin, yPos, contentWidth, 4.5);
+          yPos += 8;
+        }
+
+        checkPageBreak(40);
+        yPos = addSubsectionTitle("General Limitations", yPos);
+        pdf.setFontSize(9);
+        pdf.setTextColor(75, 85, 99);
+        const limitations = [
+          "AI-estimated figures are plausible approximations, not ground-truth measurements - validate against field data before acting on them.",
+          "Real satellite imagery (where used) is subject to cloud cover and a multi-day revisit cycle, so the most recent clear scene may predate the report date.",
+          "AI interpretations are probabilistic and can vary between runs of the same query.",
+          confidence !== null
+            ? `This report's reported confidence level is ${confidence}%, self-assessed by the analysis - treat it as a rough indicator, not a statistical guarantee.`
+            : "No confidence level was reported for this analysis.",
+        ];
+        limitations.forEach((line) => {
+          checkPageBreak(12);
+          pdf.text("•", margin, yPos);
+          yPos = addWrappedText(line, margin + 5, yPos, contentWidth - 5, 4.5);
+          yPos += 3;
+        });
+        yPos += 5;
 
         // METHODOLOGY PAGE
         pdf.addPage();
         addPageHeader();
         yPos = 28;
 
-        yPos = addSectionTitle("GEOSPATIAL ANALYSIS METHODOLOGY", yPos, "6");
+        yPos = addSectionTitle("GEOSPATIAL ANALYSIS METHODOLOGY", yPos, sectionNum("methodology"));
 
         const methodology = [
           {
-            title: "Data Acquisition",
-            content: "Multi-spectral satellite imagery was sourced from Copernicus Sentinel-2 MSI (10m resolution, 13 spectral bands) [1] and Landsat-8 OLI (30m resolution, 11 bands) [2] sensors. Cloud-free scenes were selected spanning the study period with atmospheric correction applied using Sen2Cor processor for Sentinel-2 [6] and LaSRC algorithm for Landsat-8."
+            title: "Imagery Data Basis",
+            content: `Where coordinates are available, the true-color, false-color, and NDVI panels in this report use real Sentinel-2 L2A imagery retrieved via the Copernicus Data Space Ecosystem's Sentinel Hub API, least-cloud mosaicked over the preceding 90 days, with cloud pixels masked using the Sentinel-2 Scene Classification Layer. ${analysisData?.locations?.[0]?.verified === false || (typeof lat !== "number") ? "For this specific report, no verified location was available, so imagery panels could not be sourced from real satellite data - see the Quality Assurance section for confirmation of what was actually used." : "This applies to the imagery panels in this specific report."}`
           },
           {
-            title: "Processing Pipeline",
-            content: "Images processed through radiometric calibration (DN to Top-of-Atmosphere reflectance) using Google Earth Engine [3], geometric correction (co-registration accuracy ±0.3 pixels RMS), and cloud masking using Fmask 4.2 algorithm. Spectral indices (NDVI, EVI, NDMI, NBR, SAVI) computed for comprehensive environmental analysis [4]."
+            title: "Numeric Analysis Generation",
+            content: analysisData?.dataProvenance?.analysisMethod === "real_sentinel_statistics"
+              ? "The change percentage and NDVI/NDWI/NBR values in this report are real measurements: Sentinel-2 pixels for the start and end of the study period were fetched via the Sentinel Hub Statistics API, cloud-masked using the Scene Classification Layer, and averaged to compute each index. The reported % change is the real difference between those two measured periods. Google Gemini is given these real numbers and writes the narrative summary, severity assessment, and recommendations around them, but does not generate the figures themselves. Classification results and change-matrix breakdowns (where shown) remain Gemini-generated estimates, not computed from these real pixels."
+              : "Spectral index values, change percentages, and classification statistics are generated by Google Gemini from a text prompt describing the region, event type, and the real formulas for standard indices (NDVI, NDWI, NBR, NDBI). The model produces plausible estimates based on patterns in its training data - it does not compute these values from actual pixel data, and no image differencing or classification algorithm is run against real imagery for these figures."
           },
           {
-            title: "AI Analysis Framework",
-            content: "Deep learning models (U-Net architecture with ResNet50 backbone) trained on labeled image patches for the region using TensorFlow/PyTorch [9]. Model performance: Overall Accuracy 91.3%, Producer's Accuracy 87.2%, User's Accuracy 89.4%. Confidence scoring employs Monte Carlo Dropout to quantify prediction uncertainty."
+            title: "Map & Chart Rendering",
+            content: "The study area map is a real screenshot of the interactive map (OpenStreetMap tiles plus the study-area marker/boundary), captured at report generation time. The trend chart is drawn directly from this report's own reported figures using on-device rendering - it is not AI-generated."
           },
           {
-            title: "Validation Methodology",
-            content: "Ground-truth validation conducted at randomly stratified points using GPS-verified locations and high-resolution reference imagery [5]. Independent validation dataset used for accuracy assessment via QGIS [10]. Overall classification accuracy verified with systematic bias analysis."
+            title: "Validation Approach",
+            content: "This system does not perform independent ground-truth validation. The self-reported confidence level reflects the AI model's own assessment, not a statistically validated accuracy metric. For decisions with real consequences, validate findings against field data or authoritative sources such as USGS Earth Explorer or the Copernicus Browser."
           }
         ];
 
@@ -930,31 +1700,40 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
         yPos += 5;
         yPos = addSubsectionTitle("Uncertainty Quantification", yPos);
         
-        const uncertaintyHeaders = ["ERROR SOURCE", "MAGNITUDE", "MITIGATION"];
-        const uncertaintyRows = [
-          ["Positional accuracy", "±15m (1.5 pixels)", "Multi-date co-registration"],
-          ["Classification error", "±12.9% (1-σ)", "Confidence thresholding >70%"],
-          ["Cloud contamination", "±3.2%", "Multi-temporal compositing"],
-          ["Seasonal phenology", "±5.7%", "Dry season normalization"],
-          ["Combined uncertainty", "±9.4% (95% CI)", "Monte Carlo propagation"],
-        ];
-        yPos = addTableWithBorders(uncertaintyHeaders, uncertaintyRows, yPos, [55, 50, 65]);
+        const uncertaintyHeaders = ["ASPECT", "NOTE"];
+        const uncertaintyRows: string[][] = [];
+        const transparencyRange = analysisData?.methodologyTransparency?.uncertainty_range;
+        if (transparencyRange && (transparencyRange.lower !== undefined || transparencyRange.upper !== undefined)) {
+          uncertaintyRows.push(["AI-reported uncertainty range", `${transparencyRange.lower ?? "?"}% to ${transparencyRange.upper ?? "?"}% (self-assessed by the model, not independently verified)`]);
+        }
+        if (confidence !== null) {
+          uncertaintyRows.push(["Self-reported confidence level", `${confidence}% (the model's own assessment, not a statistical accuracy metric)`]);
+        }
+        uncertaintyRows.push(["Real imagery geolocation (where used)", "Sentinel-2 L2A products are typically geolocated to within about 1 pixel (~10m) per ESA specifications"]);
+        uncertaintyRows.push(["Numeric spectral/change analysis", "Not independently validated by this system - see Validation Approach above"]);
+        yPos = addTableWithBorders(uncertaintyHeaders, uncertaintyRows, yPos, [75, 95]);
 
         // DATA SOURCES PAGE
         pdf.addPage();
         addPageHeader();
         yPos = 28;
 
-        yPos = addSectionTitle("REFERENCES & DATA SOURCES", yPos, "7");
+        yPos = addSectionTitle("REFERENCES & DATA SOURCES", yPos, sectionNum("references"));
 
-        yPos = addSubsectionTitle("Satellite Data Sources", yPos);
-        
+        yPos = addSubsectionTitle("Data Sources Used In This Report", yPos);
+
+        const usedRealImagery = Object.values(lastDataSourcesRef.current).some((s) => /sentinel/i.test(s));
+        const usedRealStatistics = analysisData?.dataProvenance?.analysisMethod === "real_sentinel_statistics";
+        const eeConfigured = !!analysisData?.dataProvenance?.earthEngine?.configured;
         const dataSources = [
-          "[1] European Space Agency (ESA). Copernicus Sentinel-2 MSI Level-2A. Accessed via: https://scihub.copernicus.eu",
-          "[2] NASA/USGS. Landsat-8 OLI/TIRS Collection 2 Level-2. Accessed via: https://earthexplorer.usgs.gov",
-          "[3] Google Earth Engine (GEE). Cloud Computing Platform for Earth Observation. https://earthengine.google.com",
-          "[4] NASA MODIS Science Team. MOD13Q1 250m Vegetation Indices. https://lpdaac.usgs.gov",
-          "[5] OpenStreetMap Contributors. Geographic Database. https://www.openstreetmap.org"
+          "[1] Google Gemini (Google DeepMind). Generated the narrative analysis, findings, and recommendations in this report, and any AI-illustrated (non-real) imagery panels. https://ai.google.dev",
+          ...(usedRealImagery || usedRealStatistics ? [
+            `[2] European Space Agency (ESA) / Copernicus Data Space Ecosystem. Real Sentinel-2 L2A satellite ${[usedRealImagery && "imagery (true-color/false-color/NDVI panels)", usedRealStatistics && "pixel statistics (spectral index values and change %)"].filter(Boolean).join(" and ")} used in this report. https://dataspace.copernicus.eu`,
+          ] : []),
+          "[3] OpenStreetMap Contributors. Basemap tiles for the study area map, and/or place-name geocoding used to resolve this report's location. https://www.openstreetmap.org",
+          ...(eeConfigured ? [
+            "[4] Google Earth Engine. A service-account credential is configured for this project but was not used to source real pixel data for this specific report - see Quality Assurance & Limitations.",
+          ] : []),
         ];
 
         pdf.setFontSize(9);
@@ -968,18 +1747,20 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
         });
 
         yPos += 8;
-        yPos = addSubsectionTitle("Processing Tools & Frameworks", yPos);
-        
+        yPos = addSubsectionTitle("Software Used to Produce This Report", yPos);
+
         const tools = [
-          "[6] Sen2Cor v2.11 - Atmospheric correction processor for Sentinel-2",
-          "[7] GDAL/OGR - Geospatial Data Abstraction Library",
-          "[8] Python SciPy/NumPy - Scientific computing libraries",
-          "[9] TensorFlow/PyTorch - Deep learning frameworks for AI analysis",
-          "[10] QGIS - Geographic Information System for validation"
+          "jsPDF - client-side PDF document generation",
+          "MapLibre GL JS - interactive map rendering for the study area map panel",
+          "Supabase Edge Functions (Deno) - backend APIs for AI analysis and imagery retrieval",
+          ...(usedRealImagery ? ["Sentinel Hub Process API (Copernicus Data Space Ecosystem) - real satellite imagery retrieval"] : []),
+          ...(usedRealStatistics ? ["Sentinel Hub Statistics API (Copernicus Data Space Ecosystem) - real spectral index/change computation"] : []),
+          "Google Gemini API - AI-generated narrative analysis and, where real imagery was unavailable, illustrative visualizations",
         ];
 
         tools.forEach((tool) => {
-          pdf.text(tool, margin, yPos);
+          checkPageBreak(8);
+          pdf.text(`• ${tool}`, margin, yPos);
           yPos += 6;
         });
       }
@@ -1031,6 +1812,50 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
             console.warn("Could not add change detection image");
           }
         }
+      }
+
+      // ============= APPENDIX: ADVANCED VISUALIZATIONS =============
+      // Previously these were fetched (burning AI image-generation quota)
+      // but never actually embedded anywhere in the output - this is the
+      // step that was missing. Each panel is captioned with its real data
+      // source (or honestly labeled as an AI illustration) via
+      // lastDataSourcesRef, populated above for both the network-fetched
+      // and locally-rendered advanced visualization types.
+      const selectedWithImages = selectedAdvancedViz.filter((id) => advancedImages[id]);
+      if (includeImages && !isSimple && selectedWithImages.length > 0) {
+        pdf.addPage();
+        addPageHeader();
+        yPos = 28;
+
+        pdf.setTextColor(17, 24, 39);
+        pdf.setFontSize(16);
+        pdf.setFont("helvetica", "bold");
+        pdf.text("APPENDIX B: ADVANCED VISUALIZATIONS", margin, yPos);
+        yPos += 15;
+
+        selectedWithImages.forEach((vizId) => {
+          const viz = ADVANCED_VIZ_TYPES.find((v) => v.id === vizId);
+          const image = advancedImages[vizId];
+          if (!image) return;
+
+          checkPageBreak(95);
+          try {
+            yPos = addSubsectionTitle(viz?.label || vizId, yPos);
+            pdf.setFillColor(243, 244, 246);
+            pdf.roundedRect(margin, yPos, contentWidth, 70, 3, 3, "F");
+            pdf.addImage(image, "PNG", margin + 5, yPos + 5, contentWidth - 10, 60);
+            yPos += 75;
+
+            const source = lastDataSourcesRef.current[vizId] || "AI illustration (Google Gemini)";
+            pdf.setFontSize(8);
+            pdf.setTextColor(107, 114, 128);
+            pdf.setFont("helvetica", "italic");
+            pdf.text(`Source: ${source}`, margin, yPos);
+            yPos += 12;
+          } catch (e) {
+            console.warn(`Could not add ${vizId} image:`, e);
+          }
+        });
       }
 
       // ============= FINAL PAGE - DISCLAIMER =============
@@ -1265,14 +2090,14 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
                           <Image className="h-4 w-4 text-primary" />
                           <span className="text-sm font-medium">True-Color Composite</span>
                         </div>
-                        <p className="text-xs text-muted-foreground">Landsat Bands 4-3-2 RGB</p>
+                        <p className="text-xs text-muted-foreground">Sentinel-2 Bands 4-3-2 RGB</p>
                       </div>
                       <div className="p-3 rounded-lg border bg-muted/30">
                         <div className="flex items-center gap-2 mb-2">
                           <Layers className="h-4 w-4 text-orange-500" />
                           <span className="text-sm font-medium">False-Color Composite</span>
                         </div>
-                        <p className="text-xs text-muted-foreground">Bands 5-4-3 NIR-R-G</p>
+                        <p className="text-xs text-muted-foreground">Bands 8-4-3 NIR-R-G</p>
                       </div>
                       <div className="p-3 rounded-lg border bg-muted/30">
                         <div className="flex items-center gap-2 mb-2">
@@ -1318,7 +2143,7 @@ const ReportGenerator = ({ analysisData, eventType, region }: ReportGeneratorPro
                       <div className="text-center text-muted-foreground">
                         <Image className="h-16 w-16 mx-auto mb-4 opacity-30" />
                         <p className="text-sm">Click Preview to generate a sample visualization</p>
-                        <p className="text-xs mt-1">This will show a Landsat satellite image of your region</p>
+                        <p className="text-xs mt-1">This will show a Sentinel-2 satellite image of your region</p>
                       </div>
                     )}
                   </div>

@@ -1,6 +1,11 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+
+export interface MapLibreMapHandle {
+  /** Snapshot of exactly what's on screen right now (real OSM tiles + markers/polygons), as a PNG data URL. */
+  captureSnapshot: () => Promise<string | null>;
+}
 
 interface MapMarker {
   lat: number;
@@ -40,7 +45,7 @@ interface MapLibreMapProps {
   showGeolocateControl?: boolean;
 }
 
-const MapLibreMap = ({
+const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
   center,
   zoom,
   className = "",
@@ -53,10 +58,16 @@ const MapLibreMap = ({
   activeHeatmapLayer = "none",
   showFullscreenControl = false,
   showGeolocateControl = false,
-}: MapLibreMapProps) => {
+}, ref) => {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
+  // Cache of the last successfully-rendered frame, refreshed whenever the map
+  // finishes a render (its 'idle' event). Report snapshots read from this
+  // instead of forcing a fresh synchronous capture, since a capture requested
+  // right as a repaint job kicks off can otherwise read a blank WebGL buffer -
+  // this way we always have a known-good frame regardless of timing.
+  const lastSnapshotRef = useRef<string | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
   const clickHandlerRef = useRef<((e: maplibregl.MapMouseEvent) => void) | null>(null);
 
@@ -171,6 +182,7 @@ const MapLibreMap = ({
       bearing: 0,
       maxPitch: 85,
       interactive: true,
+      preserveDrawingBuffer: true, // required so getCanvas().toDataURL() works for report snapshots
     });
 
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
@@ -199,6 +211,14 @@ const MapLibreMap = ({
 
     map.on("error", (e) => {
       console.error("MapLibre error:", e);
+    });
+
+    map.on("idle", () => {
+      try {
+        lastSnapshotRef.current = map.getCanvas().toDataURL("image/png");
+      } catch (error) {
+        console.warn("Error caching map snapshot:", error);
+      }
     });
 
     mapInstanceRef.current = map;
@@ -710,6 +730,36 @@ const MapLibreMap = ({
     }
   }, [polygons, mapLoaded]);
 
+  useImperativeHandle(ref, () => ({
+    // Returns the cached last-known-good rendered frame (see the 'idle'
+    // listener above) rather than forcing a fresh synchronous read of the
+    // WebGL canvas - a forced read timed even slightly wrong (mid-repaint,
+    // buffer just cleared, tiles still loading) can silently produce a
+    // blank image instead of erroring, which is what a live capture did in
+    // practice. If the map isn't currently settled, wait briefly for it to
+    // finish loading/panning so the cache has a chance to update first.
+    captureSnapshot: () => new Promise<string | null>((resolve) => {
+      const map = mapInstanceRef.current;
+      if (!map) { resolve(lastSnapshotRef.current); return; }
+
+      const finish = () => resolve(lastSnapshotRef.current);
+
+      if (map.loaded() && !map.isMoving() && !map.isEasing()) {
+        finish();
+      } else {
+        const timeout = setTimeout(() => {
+          map.off("idle", onIdle);
+          finish();
+        }, 8000);
+        const onIdle = () => {
+          clearTimeout(timeout);
+          finish();
+        };
+        map.once("idle", onIdle);
+      }
+    }),
+  }), []);
+
   return (
     <div className={`relative ${className}`} style={{ height: "100%", width: "100%" }}>
       <div ref={mapRef} style={{ height: "100%", width: "100%" }} />
@@ -757,6 +807,8 @@ const MapLibreMap = ({
       `}</style>
     </div>
   );
-};
+});
+
+MapLibreMap.displayName = "MapLibreMap";
 
 export default MapLibreMap;

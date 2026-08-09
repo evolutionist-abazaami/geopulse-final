@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { authorizeUserOrCron } from "../_shared/auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -17,6 +18,48 @@ const DEFAULT_MONITORING_LOCATIONS = [
   { name: "Kampala, Uganda", lat: 0.3476, lng: 32.5825 },
   { name: "Lusaka, Zambia", lat: -15.3875, lng: 28.3228 },
 ];
+
+interface MonitoringLocation {
+  name: string;
+  lat: number;
+  lng: number;
+}
+
+const MAX_LOCATIONS = 20;
+
+function validateLocations(value: unknown): MonitoringLocation[] {
+  if (!Array.isArray(value)) {
+    throw new Error("locations must be an array");
+  }
+  if (value.length === 0) {
+    throw new Error("locations must contain at least one entry");
+  }
+  if (value.length > MAX_LOCATIONS) {
+    throw new Error(`locations must contain ${MAX_LOCATIONS} entries or fewer`);
+  }
+
+  return value.map((entry, i) => {
+    if (typeof entry !== "object" || entry === null) {
+      throw new Error(`locations[${i}] is invalid`);
+    }
+    const loc = entry as Record<string, unknown>;
+    if (typeof loc.name !== "string" || loc.name.trim().length === 0) {
+      throw new Error(`locations[${i}] must have a valid name`);
+    }
+    if (loc.name.length > 200) {
+      throw new Error(`locations[${i}].name must be 200 characters or less`);
+    }
+    const lat = Number(loc.lat);
+    const lng = Number(loc.lng);
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+      throw new Error(`locations[${i}].lat must be a number between -90 and 90`);
+    }
+    if (!Number.isFinite(lng) || lng < -180 || lng > 180) {
+      throw new Error(`locations[${i}].lng must be a number between -180 and 180`);
+    }
+    return { name: loc.name.trim(), lat, lng };
+  });
+}
 
 async function fetchWeatherData(lat: number, lng: number) {
   // Open-Meteo API - free, no API key needed
@@ -39,50 +82,70 @@ serve(async (req) => {
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Accept optional locations from request body, otherwise use defaults
-    let locations = DEFAULT_MONITORING_LOCATIONS;
-    try {
-      const body = await req.json();
-      if (body?.locations && Array.isArray(body.locations)) {
-        locations = body.locations;
-      }
-    } catch {
-      // Use defaults if no body
+    if (!(await authorizeUserOrCron(req, supabase))) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
-    const results = [];
-    const errors = [];
+    // Accept optional locations from request body, otherwise use defaults
+    let locations: MonitoringLocation[] = DEFAULT_MONITORING_LOCATIONS;
+    try {
+      const body = await req.json();
+      if (body?.locations !== undefined) {
+        locations = validateLocations(body.locations);
+      }
+    } catch (parseError) {
+      if (parseError instanceof Error && parseError.message.startsWith("locations")) {
+        throw parseError;
+      }
+      // No/invalid JSON body at all (not a locations-validation failure) - use defaults.
+    }
 
-    for (const location of locations) {
-      try {
-        const weatherData = await fetchWeatherData(location.lat, location.lng);
-        const current = weatherData.current;
+    // Each location's fetch+insert is independent, so run them concurrently
+    // rather than one-at-a-time - this matters more now that a pg_cron job
+    // calls this function on a timer with its own timeout to respect.
+    const outcomes = await Promise.all(
+      locations.map(async (location) => {
+        try {
+          const weatherData = await fetchWeatherData(location.lat, location.lng);
+          const current = weatherData.current;
 
-        const observation = {
-          region_name: location.name,
-          lat: location.lat,
-          lng: location.lng,
-          observation_date: new Date().toISOString(),
-          temperature_c: current?.temperature_2m ?? null,
-          rainfall_mm: current?.rain ?? null,
-          soil_moisture: current?.soil_moisture_0_to_7cm ?? null,
-          wind_speed_kmh: current?.wind_speed_10m ?? null,
-          humidity_percent: current?.relative_humidity_2m ?? null,
-          data_source: "open-meteo",
-          raw_data: weatherData,
-        };
+          const observation = {
+            region_name: location.name,
+            lat: location.lat,
+            lng: location.lng,
+            observation_date: new Date().toISOString(),
+            temperature_c: current?.temperature_2m ?? null,
+            rainfall_mm: current?.rain ?? null,
+            soil_moisture: current?.soil_moisture_0_to_7cm ?? null,
+            wind_speed_kmh: current?.wind_speed_10m ?? null,
+            humidity_percent: current?.relative_humidity_2m ?? null,
+            data_source: "open-meteo",
+            raw_data: weatherData,
+          };
 
-        const { error } = await supabase
-          .from("weather_observations")
-          .insert(observation);
+          const { error } = await supabase
+            .from("weather_observations")
+            .insert(observation);
 
-        if (error) {
-          errors.push({ location: location.name, error: error.message });
-        } else {
-          results.push({ location: location.name, status: "success", data: observation });
+          return error
+            ? { ok: false as const, location: location.name, error: error.message }
+            : { ok: true as const, location: location.name, data: observation };
+        } catch (err) {
+          return { ok: false as const, location: location.name, error: err instanceof Error ? err.message : "Unknown error" };
         }
-      } catch (err) {
-        errors.push({ location: location.name, error: err.message });
+      })
+    );
+
+    const results: { location: string; status: string; data: Record<string, unknown> }[] = [];
+    const errors: { location: string; error: string }[] = [];
+    for (const outcome of outcomes) {
+      if (outcome.ok) {
+        results.push({ location: outcome.location, status: "success", data: outcome.data });
+      } else {
+        errors.push({ location: outcome.location, error: outcome.error });
       }
     }
 
@@ -98,9 +161,11 @@ serve(async (req) => {
     );
   } catch (error) {
     console.error("Ingestion error:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+    const status = errorMessage.startsWith("locations") ? 400 : 500;
     return new Response(
-      JSON.stringify({ error: error.message }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      JSON.stringify({ error: errorMessage }),
+      { status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 });

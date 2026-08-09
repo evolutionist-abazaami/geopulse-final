@@ -174,7 +174,7 @@ const ClassificationControls = ({
           {enableChangeDetection && (
             <div className="space-y-2 pt-2 border-t">
               <p className="text-xs text-muted-foreground">
-                Compares Landsat imagery between start and end dates to identify and quantify land cover changes.
+                Compares Sentinel-2 imagery between start and end dates to identify and quantify land cover changes.
               </p>
               <div className="flex flex-wrap gap-2">
                 <Badge variant="outline" className="text-xs">
@@ -190,17 +190,17 @@ const ClassificationControls = ({
           )}
         </Card>
 
-        {/* Landsat Band Info */}
+        {/* Sentinel-2 Band Info */}
         <div className="p-3 bg-muted/30 rounded-lg space-y-2">
-          <p className="text-xs font-medium text-muted-foreground">Landsat 8/9 OLI Bands Used:</p>
+          <p className="text-xs font-medium text-muted-foreground">Sentinel-2 MSI Bands Used:</p>
           <div className="flex flex-wrap gap-1">
             {[
-              { band: 'B2', name: 'Blue' },
-              { band: 'B3', name: 'Green' },
-              { band: 'B4', name: 'Red' },
-              { band: 'B5', name: 'NIR' },
-              { band: 'B6', name: 'SWIR1' },
-              { band: 'B7', name: 'SWIR2' },
+              { band: 'B02', name: 'Blue' },
+              { band: 'B03', name: 'Green' },
+              { band: 'B04', name: 'Red' },
+              { band: 'B08', name: 'NIR' },
+              { band: 'B11', name: 'SWIR1' },
+              { band: 'B12', name: 'SWIR2' },
             ].map(({ band, name }) => (
               <Badge key={band} variant="secondary" className="text-xs">
                 {band} ({name})

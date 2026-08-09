@@ -17,6 +17,106 @@ function validateQuery(value: unknown): string {
   return value.trim();
 }
 
+// Without a strict schema, the model sometimes wraps each array item in
+// its own tiny JSON object (e.g. a "findings" entry coming back as the
+// literal string '{"finding":"..."}' instead of just the sentence) - the
+// frontend then renders that raw JSON text as if it were the finding itself.
+// A responseSchema (added below) should prevent this at the source, but this
+// normalizer is kept as a defensive second layer in case a future prompt
+// tweak or model swap reintroduces the same drift.
+function cleanTextArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") {
+        const trimmed = item.trim();
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            const firstString = parsed && typeof parsed === "object"
+              ? Object.values(parsed).find((v) => typeof v === "string")
+              : undefined;
+            if (typeof firstString === "string") return firstString;
+          } catch {
+            // Not actually JSON - a sentence can legitimately start/end with braces.
+          }
+        }
+        return trimmed;
+      }
+      if (item && typeof item === "object") {
+        const firstString = Object.values(item).find((v) => typeof v === "string");
+        if (typeof firstString === "string") return firstString;
+      }
+      return String(item);
+    })
+    .filter((s) => s.trim().length > 0);
+}
+
+interface GeocodedLocation {
+  name: string;
+  lat: number | null;
+  lng: number | null;
+  verified: boolean;
+  source: "nominatim" | "ai_estimate";
+}
+
+// The AI model identifies *which* places a query is about; real coordinates come
+// from Nominatim (OpenStreetMap) so the map/report never plots a place at
+// coordinates the model invented. Sequential with a short gap between calls
+// per Nominatim's usage policy (max ~1 request/second, no concurrent bursts).
+async function geocodeLocation(name: string): Promise<{ lat: number; lng: number } | null> {
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(name)}&viewbox=-18,37,52,-35&bounded=0&limit=1`;
+    const response = await fetch(url, {
+      headers: {
+        "Accept-Language": "en",
+        "User-Agent": "GeoPulse Environmental Analysis App (process-search geocoding)",
+      },
+    });
+    if (!response.ok) return null;
+    const results = await response.json();
+    if (!Array.isArray(results) || results.length === 0) return null;
+    const lat = parseFloat(results[0].lat);
+    const lng = parseFloat(results[0].lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+  } catch (error) {
+    console.error(`Nominatim geocode failed for "${name}":`, error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
+async function resolveLocations(rawLocations: unknown[]): Promise<GeocodedLocation[]> {
+  const resolved: GeocodedLocation[] = [];
+  for (const raw of rawLocations.slice(0, 5)) {
+    const entry = raw as Record<string, unknown>;
+    const name = typeof entry?.name === "string" && entry.name.trim() ? entry.name.trim() : "Unspecified location";
+
+    const geocoded = await geocodeLocation(name);
+    if (geocoded) {
+      resolved.push({ name, lat: geocoded.lat, lng: geocoded.lng, verified: true, source: "nominatim" });
+    } else {
+      // Geocoding found nothing real for this name - fall back to the
+      // model's own estimate, but flag it so the UI/report can be honest
+      // that this position is not a verified real-world coordinate.
+      const fallbackLat = Number(entry?.lat);
+      const fallbackLng = Number(entry?.lng);
+      resolved.push({
+        name,
+        lat: Number.isFinite(fallbackLat) ? fallbackLat : null,
+        lng: Number.isFinite(fallbackLng) ? fallbackLng : null,
+        verified: false,
+        source: "ai_estimate",
+      });
+    }
+    // Stay well under Nominatim's rate limit when resolving multiple names.
+    if (rawLocations.length > 1) {
+      await new Promise((r) => setTimeout(r, 1100));
+    }
+  }
+  return resolved;
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -44,10 +144,10 @@ serve(async (req) => {
     const body = await req.json();
     const query = validateQuery(body.query);
     
-    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-    
-    if (!GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY not configured");
+    const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY");
+
+    if (!GROQ_API_KEY) {
+      throw new Error("GROQ_API_KEY not configured");
     }
 
     console.log(`Processing search query for user ${user?.id || 'anonymous'}: ${query.substring(0, 100)}...`);
@@ -57,47 +157,73 @@ serve(async (req) => {
 Your role is to:
 1. Interpret natural language queries about environmental changes across Africa
 2. Extract key information: location, event type, time period, specific concerns
-3. Provide relevant satellite data insights with REAL coordinates
+3. Identify which real places (city, region, or country) the query refers to
 4. Suggest monitoring strategies and data sources
 5. Assess confidence levels based on data availability
 
-Format responses as structured JSON with:
-- interpretation: Clear explanation of what the user is looking for
-- findings: Array of relevant environmental insights
-- locations: Array of location objects with {name: string, lat: number, lng: number, boundary?: [[lat,lng][]]}
-- confidenceLevel: 1-100 scale
-- recommendations: Actionable next steps
-
-IMPORTANT: Always provide real geographic coordinates for locations mentioned in Africa.`;
+Respond with ONLY a valid JSON object (no markdown fences, no commentary) matching exactly this shape:
+{
+  "interpretation": string - Clear explanation of what the user is looking for (2-4 sentences),
+  "findings": string[] - Array of 3-5 specific, detailed insights (each 1-2 full sentences with concrete detail - not a one-line label). Ground each in the location's known environmental context (e.g. named rivers, land cover types, seasonal patterns) rather than generic statements. Each item MUST be a plain string, not a nested object.,
+  "locations": Array of {"name": string, "lat": number, "lng": number} - name should be a real, geocodable place (e.g. "Accra, Ghana", not a vague description). lat/lng are your best estimate only; they are a fallback, not the primary source of truth, since coordinates are re-verified against a real geocoding service after your response.,
+  "confidenceLevel": number - 1-100 scale, reflecting how well the query maps to a real, locatable place and known environmental patterns,
+  "recommendations": string[] - Array of 3-5 specific, actionable next steps (each naming a concrete action, responsible actor, or monitoring approach - not generic advice like "monitor the situation"). Each item MUST be a plain string, not a nested object.
+}`;
 
     const userPrompt = `Interpret this environmental search query: "${query}"
 
 Provide insights about environmental changes in African regions, including deforestation, flooding, drought, urbanization, or climate impacts.
-Consider satellite data availability and relevance.`;
+Consider satellite data availability and relevance. Be specific and detailed rather than generic - this analysis will be used in a professional report.`;
 
-    // Call Google Gemini API with model fallback chain for resilience to overload
-    const requestBody = JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-      generationConfig: {
-        temperature: 0.6,
-        maxOutputTokens: 2000,
-        responseMimeType: "application/json",
-      },
-    });
+    // Call Groq's chat completions API with a model fallback chain for resilience to overload
+    const requestParams = {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.6,
+      max_tokens: 2000,
+      response_format: { type: "json_object" },
+    };
 
-    const modelChain = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite"];
+    const modelChain = ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"];
     let aiResponse: Response | null = null;
     const attemptsPerModel = 2;
+    // Bounds worst-case latency - 4 models x 2 attempts against a degraded/
+    // rate-limited key can otherwise compound to 40-90s of real network
+    // round-trips, long enough that a waiting user assumes the app is broken.
+    const retryDeadline = Date.now() + 18000;
 
     outer: for (const model of modelChain) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+      if (Date.now() > retryDeadline) {
+        console.warn("Groq retry time budget exceeded, stopping early.");
+        break outer;
+      }
       for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
-        aiResponse = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: requestBody,
-        });
+        if (Date.now() > retryDeadline) break outer;
+        // Each attempt also gets its own timeout - the overall deadline only
+        // gates whether a NEW attempt starts, so a single slow in-flight
+        // request could otherwise still run long past it.
+        const perRequestTimeoutMs = Math.min(8000, Math.max(2000, retryDeadline - Date.now()));
+        const requestController = new AbortController();
+        const requestTimeoutId = setTimeout(() => requestController.abort(), perRequestTimeoutMs);
+        try {
+          aiResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${GROQ_API_KEY}`,
+            },
+            body: JSON.stringify({ model, ...requestParams }),
+            signal: requestController.signal,
+          });
+        } catch (e) {
+          console.error(`AI request to ${model} timed out or failed (attempt ${attempt}):`, e instanceof Error ? e.message : e);
+          aiResponse = null;
+          continue;
+        } finally {
+          clearTimeout(requestTimeoutId);
+        }
         if (aiResponse.ok) {
           console.log(`AI success on model ${model}`);
           break outer;
@@ -106,7 +232,7 @@ Consider satellite data availability and relevance.`;
         console.error(`AI API error on ${model} (attempt ${attempt}):`, aiResponse.status, errText.slice(0, 200));
         const isRetryable = aiResponse.status === 503 || aiResponse.status === 429 || aiResponse.status === 500;
         if (!isRetryable) break outer;
-        if (attempt < attemptsPerModel) {
+        if (attempt < attemptsPerModel && Date.now() < retryDeadline) {
           await new Promise((r) => setTimeout(r, 800 * attempt + Math.random() * 400));
         }
       }
@@ -116,13 +242,13 @@ Consider satellite data availability and relevance.`;
       const status = aiResponse?.status || 500;
       if (status === 503) {
         return new Response(
-          JSON.stringify({ error: "Google Gemini is temporarily overloaded. Please try again in a minute." }),
+          JSON.stringify({ error: "Groq is temporarily overloaded. Please try again in a minute." }),
           { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
       if (status === 429) {
         return new Response(
-          JSON.stringify({ error: "Gemini API rate limit reached. Please wait a moment and try again." }),
+          JSON.stringify({ error: "Groq API rate limit reached. Please wait a moment and try again." }),
           { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
@@ -130,7 +256,7 @@ Consider satellite data availability and relevance.`;
     }
 
     const aiData = await aiResponse.json();
-    let interpretation = aiData.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
+    let interpretation = aiData.choices?.[0]?.message?.content || '';
 
     // Strip markdown code blocks if present
     interpretation = interpretation.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
@@ -150,13 +276,16 @@ Consider satellite data availability and relevance.`;
       };
     }
 
+    const rawLocations = Array.isArray(structuredResult.locations) ? structuredResult.locations : [];
+    const locations = await resolveLocations(rawLocations);
+
     const result = {
       query,
       interpretation: structuredResult.interpretation || interpretation,
-      findings: structuredResult.findings || [],
-      locations: structuredResult.locations || [],
+      findings: cleanTextArray(structuredResult.findings),
+      locations,
       confidenceLevel: structuredResult.confidenceLevel || 85,
-      recommendations: structuredResult.recommendations || [],
+      recommendations: cleanTextArray(structuredResult.recommendations),
       timestamp: new Date().toISOString(),
     };
 

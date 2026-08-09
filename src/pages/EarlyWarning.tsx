@@ -9,10 +9,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   AlertTriangle, Bell, BellRing, MapPin, Thermometer, Droplets,
   Wind, CloudRain, Loader2, Plus, Trash2, CheckCircle, RefreshCw,
-  TrendingUp, Shield, Eye, EyeOff
+  TrendingUp, Shield, Eye, EyeOff, Info, Zap, ChevronDown
 } from "lucide-react";
 import { toast } from "sonner";
 import { TrendChart } from "@/components/charts/TrendChart";
@@ -69,15 +70,16 @@ const HAZARD_TYPES = [
   { value: "heavy_metal", label: "Heavy Metal Contamination", icon: AlertTriangle, color: "text-rose-500" },
 ];
 
+// NDVI/NDWI/NBR were previously selectable here but no data source ever
+// populated those columns in weather_observations, so any threshold created
+// against them could never fire - silently, with no indication to the user.
+// Removed until a real vegetation-index ingestion pipeline backs them.
 const METRICS = [
   { value: "temperature_c", label: "Temperature (°C)" },
   { value: "rainfall_mm", label: "Rainfall (mm)" },
   { value: "soil_moisture", label: "Soil Moisture" },
   { value: "wind_speed_kmh", label: "Wind Speed (km/h)" },
   { value: "humidity_percent", label: "Humidity (%)" },
-  { value: "ndvi_value", label: "NDVI (Vegetation Index)" },
-  { value: "ndwi_value", label: "NDWI (Water Index)" },
-  { value: "nbr_value", label: "NBR (Burn Ratio)" },
 ];
 
 const OPERATORS = [
@@ -310,7 +312,7 @@ const EarlyWarning = () => {
               Early Warning System
             </h1>
             <p className="text-muted-foreground mt-1">
-              Real-time environmental hazard monitoring and alerts for Africa
+              Automated environmental hazard monitoring and alerts for Africa
             </p>
           </div>
           <div className="flex gap-2 flex-wrap">
@@ -321,7 +323,7 @@ const EarlyWarning = () => {
               disabled={isIngesting}
             >
               {isIngesting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-2" />}
-              Ingest Weather
+              Ingest Weather Now
             </Button>
             <Button
               size="sm"
@@ -330,10 +332,44 @@ const EarlyWarning = () => {
               className="bg-gradient-ocean hover:opacity-90"
             >
               {isEvaluating ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <AlertTriangle className="h-4 w-4 mr-2" />}
-              Evaluate Hazards
+              Check Hazards Now
             </Button>
           </div>
         </div>
+
+        {/* How it works */}
+        <Collapsible>
+          <Card className="p-4 border-primary/20 bg-primary/5">
+            <CollapsibleTrigger className="flex items-center justify-between w-full">
+              <div className="flex items-center gap-2">
+                <Info className="h-4 w-4 text-primary" />
+                <span className="text-sm font-medium">How Early Warning detection works (and why it's useful)</span>
+              </div>
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-3 space-y-3 text-sm text-muted-foreground">
+              <div className="flex items-start gap-2">
+                <div className="h-5 w-5 rounded-full bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary mt-0.5 flex-shrink-0">1</div>
+                <p><strong className="text-foreground">Real weather data is collected automatically.</strong> Every 30 minutes, current temperature, rainfall, soil moisture, wind speed, and humidity are fetched from the Open-Meteo API for each monitored location - no AI involved in this step, these are real measurements.</p>
+              </div>
+              <div className="flex items-start gap-2">
+                <div className="h-5 w-5 rounded-full bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary mt-0.5 flex-shrink-0">2</div>
+                <p><strong className="text-foreground">Your thresholds are checked automatically.</strong> Every 15 minutes, each active threshold you've configured below (e.g. "temperature above 38°C in Accra") is compared against the latest real reading for that region using simple numeric comparison - not AI judgment.</p>
+              </div>
+              <div className="flex items-start gap-2">
+                <div className="h-5 w-5 rounded-full bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary mt-0.5 flex-shrink-0">3</div>
+                <p><strong className="text-foreground">An alert is created when a threshold is exceeded.</strong> Google Gemini adds a short plain-language risk assessment alongside the real reading, but the alert itself is triggered by the real number crossing your real threshold - the AI narrates, it doesn't decide.</p>
+              </div>
+              <div className="pt-2 border-t border-border/50 flex items-start gap-2">
+                <Zap className="h-4 w-4 text-primary mt-0.5 flex-shrink-0" />
+                <p><strong className="text-foreground">Why this matters:</strong> because ingestion and evaluation now run on a schedule in the background, you don't have to keep this page open or click anything to catch an emerging condition (heatwave, heavy rainfall, drought indicators) - alerts accumulate here even while you're away, so you can act on real changes sooner rather than discovering them after the fact.</p>
+              </div>
+              <p className="text-xs italic pt-1">
+                Current scope: temperature, rainfall, soil moisture, wind, and humidity across the monitored locations below. Vegetation-index hazards (NDVI/NDWI/NBR) are not yet available - no real data source is wired up for those metrics yet, so they aren't offered as threshold options today.
+              </p>
+            </CollapsibleContent>
+          </Card>
+        </Collapsible>
 
         {/* Stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

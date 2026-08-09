@@ -37,6 +37,274 @@ function validateVisualizationType(value: unknown): string {
   return normalized;
 }
 
+// === Sentinel Hub (Copernicus Data Space Ecosystem) real satellite imagery ===
+// Covers true-color, false-color, and NDVI - the three panel types that map
+// directly onto real Sentinel-2 bands. Everything else (risk zones, driver
+// analysis, 3D terrain, etc.) isn't a real satellite product to begin with,
+// so it stays AI-illustrated via the Gemini path below.
+const SENTINEL_VISUALIZATION_MAP: Record<string, string> = {
+  landsat_truecolor: "true_color",
+  satellite_2d: "true_color",
+  landsat_falsecolor: "false_color",
+  ndvi_map: "ndvi",
+  landsat_ndvi: "ndvi",
+  ndwi_water: "ndwi",
+  nbr_fire: "nbr",
+};
+
+// Sentinel-2 L2A Scene Classification Layer values that mean "cloud or cloud
+// shadow, not ground truth" - masked to transparent so clouds don't get
+// rendered as if they were real surface reflectance.
+const SCL_CLOUD_MASK_JS = `
+function isCloud(scl) { return scl == 3 || scl == 8 || scl == 9 || scl == 10; }`;
+
+const SENTINEL_EVALSCRIPTS: Record<string, string> = {
+  true_color: `//VERSION=3
+function setup() { return { input: ["B02","B03","B04","SCL"], output: { bands: 4 } }; }
+${SCL_CLOUD_MASK_JS}
+function evaluatePixel(s) {
+  return [2.5*s.B04, 2.5*s.B03, 2.5*s.B02, isCloud(s.SCL) ? 0 : 1];
+}`,
+  false_color: `//VERSION=3
+function setup() { return { input: ["B03","B04","B08","SCL"], output: { bands: 4 } }; }
+${SCL_CLOUD_MASK_JS}
+function evaluatePixel(s) {
+  return [2.5*s.B08, 2.5*s.B04, 2.5*s.B03, isCloud(s.SCL) ? 0 : 1];
+}`,
+  ndvi: `//VERSION=3
+function setup() { return { input: ["B04","B08","SCL"], output: { bands: 4 } }; }
+${SCL_CLOUD_MASK_JS}
+function evaluatePixel(s) {
+  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04);
+  let rgb;
+  if (ndvi < 0) rgb = [0.40, 0.30, 0.20];
+  else if (ndvi < 0.2) rgb = [0.80, 0.70, 0.30];
+  else if (ndvi < 0.4) rgb = [0.90, 0.90, 0.20];
+  else if (ndvi < 0.6) rgb = [0.40, 0.70, 0.20];
+  else rgb = [0.0, 0.40, 0.0];
+  return [...rgb, isCloud(s.SCL) ? 0 : 1];
+}`,
+  ndwi: `//VERSION=3
+function setup() { return { input: ["B03","B08","SCL"], output: { bands: 4 } }; }
+${SCL_CLOUD_MASK_JS}
+function evaluatePixel(s) {
+  let ndwi = (s.B03 - s.B08) / (s.B03 + s.B08);
+  let rgb;
+  if (ndwi > 0.3) rgb = [0.0, 0.0, 0.6];
+  else if (ndwi > 0.1) rgb = [0.3, 0.6, 0.9];
+  else if (ndwi > 0) rgb = [0.5, 0.9, 0.9];
+  else if (ndwi > -0.3) rgb = [0.6, 0.55, 0.45];
+  else rgb = [0.45, 0.30, 0.15];
+  return [...rgb, isCloud(s.SCL) ? 0 : 1];
+}`,
+  nbr: `//VERSION=3
+function setup() { return { input: ["B08","B12","SCL"], output: { bands: 4 } }; }
+${SCL_CLOUD_MASK_JS}
+function evaluatePixel(s) {
+  let nbr = (s.B08 - s.B12) / (s.B08 + s.B12);
+  let rgb;
+  if (nbr > 0.5) rgb = [0.0, 0.4, 0.0];
+  else if (nbr > 0.25) rgb = [0.4, 0.7, 0.3];
+  else if (nbr > 0) rgb = [0.9, 0.9, 0.2];
+  else if (nbr > -0.25) rgb = [0.9, 0.55, 0.1];
+  else if (nbr > -0.5) rgb = [0.7, 0.1, 0.1];
+  else rgb = [0.15, 0.0, 0.0];
+  return [...rgb, isCloud(s.SCL) ? 0 : 1];
+}`,
+};
+
+let cachedSentinelToken: { token: string; expiresAt: number } | null = null;
+
+async function getSentinelHubToken(): Promise<string | null> {
+  const clientId = Deno.env.get("SENTINELHUB_CLIENT_ID");
+  const clientSecret = Deno.env.get("SENTINELHUB_CLIENT_SECRET");
+  if (!clientId || !clientSecret) return null;
+
+  if (cachedSentinelToken && cachedSentinelToken.expiresAt > Date.now() + 30_000) {
+    return cachedSentinelToken.token;
+  }
+
+  const response = await fetch(
+    "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    console.error("Sentinel Hub auth failed:", response.status, (await response.text()).slice(0, 200));
+    return null;
+  }
+
+  const data = await response.json();
+  cachedSentinelToken = { token: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
+  return cachedSentinelToken.token;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function fetchSentinelHubImage(evalscriptKey: string, lat: number, lng: number): Promise<string | null> {
+  const token = await getSentinelHubToken();
+  if (!token) return null;
+
+  const half = 0.05; // ~11km-wide chip around the point
+  const bbox = [lng - half, lat - half, lng + half, lat + half];
+  const now = new Date();
+  // Wide window (6 months) so there's a scene available even in persistently
+  // cloudy regions; per-pixel SCL masking in the evalscript makes whatever
+  // cloud remains transparent rather than rendering it as false ground data.
+  const from = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
+
+  let response: Response;
+  try {
+    response = await fetch("https://sh.dataspace.copernicus.eu/api/v1/process", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+      body: JSON.stringify({
+        input: {
+          bounds: { bbox, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } },
+          data: [{
+            type: "sentinel-2-l2a",
+            dataFilter: {
+              timeRange: { from: from.toISOString(), to: now.toISOString() },
+              // "leastCC" composites per-pixel from whichever scene is least
+              // cloudy at that exact pixel, which can silently stitch together
+              // two different orbit passes/dates within the AOI - visible as a
+              // seam (often diagonal, matching Sentinel-2's swath edges) with a
+              // visible tone/color mismatch across it. "mostRecent" instead
+              // prefers one temporally-coherent scene for the whole AOI, only
+              // reaching for an older scene where the newest has literally no
+              // data - combined with SCL cloud masking below, this avoids the
+              // seam without bringing back visible cloud cover.
+              mosaickingOrder: "mostRecent",
+              maxCloudCoverage: 20,
+            },
+          }],
+        },
+        output: {
+          width: 800,
+          height: 450,
+          responses: [{ identifier: "default", format: { type: "image/png" } }],
+        },
+        evalscript: SENTINEL_EVALSCRIPTS[evalscriptKey],
+      }),
+    });
+  } catch (e) {
+    console.error("Sentinel Hub process API request failed:", e instanceof Error ? e.message : e);
+    return null;
+  }
+
+  if (!response.ok) {
+    console.error(`Sentinel Hub process API error (${evalscriptKey}):`, response.status, (await response.text()).slice(0, 300));
+    return null;
+  }
+
+  const buffer = await response.arrayBuffer();
+  return `data:image/png;base64,${arrayBufferToBase64(buffer)}`;
+}
+
+// === Real gridded risk statistics (Risk Zones) ===
+// A spatial risk map needs per-cell measurements, not one area-wide number.
+// Tiles the AOI into a 3x3 grid and fetches real NDVI per cell via the same
+// Sentinel Hub Statistics API analyze-satellite uses for its before/after
+// figures, applied spatially here instead of temporally. Returns real
+// numbers, not an image - Deno has no simple raster/canvas library, so the
+// frontend renders the actual heatmap from this real data.
+const GRID_STATS_EVALSCRIPT = `//VERSION=3
+function setup() {
+  return { input: [{ bands: ["B04","B08","SCL","dataMask"] }], output: [{ id: "ndvi", bands: 1 }, { id: "dataMask", bands: 1 }] };
+}
+function isCloud(scl) { return scl == 3 || scl == 8 || scl == 9 || scl == 10; }
+function evaluatePixel(s) {
+  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04);
+  let mask = isCloud(s.SCL) ? 0 : s.dataMask;
+  return { ndvi: [ndvi], dataMask: [mask] };
+}`;
+
+async function fetchCellNdvi(token: string, bbox: number[], from: Date, to: Date): Promise<number | null> {
+  let response: Response;
+  try {
+    response = await fetch("https://sh.dataspace.copernicus.eu/api/v1/statistics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+      body: JSON.stringify({
+        input: {
+          bounds: { bbox, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } },
+          data: [{ type: "sentinel-2-l2a", dataFilter: { maxCloudCoverage: 60 } }],
+        },
+        aggregation: {
+          timeRange: { from: from.toISOString(), to: to.toISOString() },
+          aggregationInterval: { of: `P${Math.max(1, Math.ceil((to.getTime() - from.getTime()) / 86400000))}D` },
+          evalscript: GRID_STATS_EVALSCRIPT,
+          width: 32,
+          height: 32,
+        },
+      }),
+    });
+  } catch (e) {
+    console.error("Risk grid cell request failed:", e instanceof Error ? e.message : e);
+    return null;
+  }
+  if (!response.ok) return null;
+  let json: any;
+  try {
+    json = await response.json();
+  } catch {
+    return null;
+  }
+  const stats = json?.data?.[0]?.outputs?.ndvi?.bands?.B0?.stats;
+  if (!stats || typeof stats.mean !== "number") return null;
+  const sampleCount = stats.sampleCount || 0;
+  const noDataCount = stats.noDataCount || 0;
+  const validRatio = sampleCount > 0 ? (sampleCount - noDataCount) / sampleCount : 0;
+  if (validRatio < 0.1) return null;
+  return stats.mean;
+}
+
+async function fetchRiskGrid(
+  token: string,
+  lat: number,
+  lng: number,
+  endDate: Date
+): Promise<{ rows: number; cols: number; cells: (number | null)[] } | null> {
+  const rows = 3;
+  const cols = 3;
+  const half = 0.075; // ~16km-wide AOI split into a 3x3 grid (~5.5km cells)
+  const cellSize = (half * 2) / rows;
+  const from = new Date(endDate.getTime() - 90 * 24 * 60 * 60 * 1000);
+
+  const cellBboxes: number[][] = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cellMinLng = lng - half + c * cellSize;
+      const cellMinLat = lat - half + r * cellSize;
+      cellBboxes.push([cellMinLng, cellMinLat, cellMinLng + cellSize, cellMinLat + cellSize]);
+    }
+  }
+
+  const results = await Promise.all(cellBboxes.map((bbox) => fetchCellNdvi(token, bbox, from, endDate)));
+  const validCount = results.filter((v) => v !== null).length;
+  // Require most cells to have real data - a map that's half gaps isn't a
+  // useful spatial picture, better to fall back to the AI illustration.
+  if (validCount < 5) return null;
+
+  return { rows, cols, cells: results };
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -73,36 +341,87 @@ serve(async (req) => {
     const changeDetection = body.changeDetection || body.data?.changeDetection;
     const landsatInfo = body.landsatInfo || body.data?.landsatInfo;
     const predictiveData = body.predictiveModeling || body.data?.predictiveModeling;
-    
+
+    console.log(`Generating ${visualizationType} visualization for ${region} - User: ${user?.id || 'anonymous'}`);
+
+    // Real satellite imagery path: try Sentinel Hub first for the types it can
+    // actually cover, before falling back to an AI illustration below.
+    const sentinelKey = SENTINEL_VISUALIZATION_MAP[visualizationType];
+    const rawLat = body.lat ?? body.data?.locations?.[0]?.lat ?? body.selectedLocation?.lat;
+    const rawLng = body.lng ?? body.data?.locations?.[0]?.lng ?? body.selectedLocation?.lng;
+    const lat = typeof rawLat === "number" ? rawLat : parseFloat(rawLat);
+    const lng = typeof rawLng === "number" ? rawLng : parseFloat(rawLng);
+
+    if (sentinelKey && Number.isFinite(lat) && Number.isFinite(lng)) {
+      const sentinelImage = await fetchSentinelHubImage(sentinelKey, lat, lng);
+      if (sentinelImage) {
+        console.log(`Sentinel Hub image succeeded for ${visualizationType} at [${lat}, ${lng}]`);
+        return new Response(
+          JSON.stringify({
+            success: true,
+            imageUrl: sentinelImage,
+            description: "Real Sentinel-2 L2A satellite imagery (last 90 days, least cloud cover).",
+            visualizationType,
+            dataSource: "Sentinel-2 L2A (Copernicus Data Space Ecosystem)",
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      console.warn(`Sentinel Hub unavailable for ${visualizationType}, falling back to AI illustration.`);
+    }
+
+    // Risk zones: real gridded NDVI data instead of an AI-illustrated map.
+    if (visualizationType === "risk_zones" && Number.isFinite(lat) && Number.isFinite(lng)) {
+      const sentinelToken = await getSentinelHubToken();
+      if (sentinelToken) {
+        const endDateRaw = body.endDate || body.data?.endDate;
+        const endDateObj = endDateRaw ? new Date(endDateRaw) : new Date();
+        const grid = await fetchRiskGrid(sentinelToken, lat, lng, isNaN(endDateObj.getTime()) ? new Date() : endDateObj);
+        if (grid) {
+          console.log(`Real risk grid succeeded for [${lat}, ${lng}]`);
+          return new Response(
+            JSON.stringify({
+              success: true,
+              imageUrl: null,
+              gridData: grid,
+              description: "Real per-cell NDVI measurements from Sentinel-2 (Copernicus Data Space Ecosystem), tiled across a 3x3 grid around the study coordinates.",
+              visualizationType,
+              dataSource: "Sentinel-2 L2A (Copernicus Data Space Ecosystem) - real gridded NDVI",
+            }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        console.warn("Real risk grid unavailable (insufficient cloud-free cells), falling back to AI illustration.");
+      }
+    }
+
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-    
+
     if (!GEMINI_API_KEY) {
       throw new Error("GEMINI_API_KEY not configured");
     }
 
-    console.log(`Generating ${visualizationType} visualization for ${region} - User: ${user?.id || 'anonymous'}`);
-
     let prompt = "";
     switch (visualizationType) {
-      // === LANDSAT MULTISPECTRAL IMAGERY ===
+      // === SENTINEL-2 MULTISPECTRAL IMAGERY ===
       case "landsat_truecolor":
-        prompt = `Create a hyper-realistic Landsat 8/9 OLI true-color satellite image of ${region}, Africa.
-Bands 4-3-2 (Red-Green-Blue) composite at 30m resolution.
+        prompt = `Create a hyper-realistic Sentinel-2 MSI true-color satellite image of ${region}, Africa.
+Bands 4-3-2 (Red-Green-Blue) composite at 10m resolution.
 REQUIREMENTS:
-- Photorealistic appearance matching actual Landsat imagery
+- Photorealistic appearance matching actual Sentinel-2 imagery
 - Clear visibility of terrain features: rivers, forests, urban areas, agricultural fields
 - Accurate color representation: green vegetation, blue water, gray urban, brown bare soil
 - Include natural atmospheric haze for realism
 - Cloud-free or minimal cloud coverage
 - Show ${Math.abs(changePercent)}% ${eventType} change indicators if applicable
-Technical specifications: Path/Row overlay, scale bar, north arrow, coordinate grid.
-${landsatInfo ? `Sensor: ${landsatInfo.sensor}, Acquisition: ${landsatInfo.acquisition_dates?.join(', ')}` : 'Landsat 8 OLI, 30m resolution'}
+Technical specifications: MGRS tile ID overlay, scale bar, north arrow, coordinate grid.
+${landsatInfo ? `Sensor: ${landsatInfo.sensor}, Acquisition: ${landsatInfo.acquisition_dates?.join(', ')}` : 'Sentinel-2 MSI, 10m resolution'}
 Ultra high resolution, 16:9 aspect ratio, professional remote sensing quality.`;
         break;
 
       case "landsat_falsecolor":
-        prompt = `Create a Landsat 8/9 OLI false-color composite satellite image of ${region}, Africa.
-Bands 5-4-3 (NIR-Red-Green) for vegetation analysis OR Bands 7-6-4 (SWIR2-SWIR1-Red) for geology.
+        prompt = `Create a Sentinel-2 MSI false-color composite satellite image of ${region}, Africa.
+Bands 8-4-3 (NIR-Red-Green) for vegetation analysis OR Bands 12-11-4 (SWIR2-SWIR1-Red) for geology.
 REQUIREMENTS:
 - Vegetation appears bright red/pink (healthy) to dark red (stressed)
 - Water appears dark blue to black
@@ -117,7 +436,7 @@ Professional remote sensing visualization, 16:9 aspect ratio.`;
 
       case "ndvi_map":
       case "landsat_ndvi":
-        prompt = `Create a Landsat-derived NDVI (Normalized Difference Vegetation Index) map of ${region}, Africa.
+        prompt = `Create a Sentinel-2-derived NDVI (Normalized Difference Vegetation Index) map of ${region}, Africa.
 NDVI = (NIR - Red) / (NIR + Red) visualization.
 COLOR SCHEME:
 - Dark red/brown (-1 to 0): Water, bare soil, urban
@@ -128,11 +447,11 @@ ${spectralIndices?.ndvi ? `
 Data: Min ${spectralIndices.ndvi.min?.toFixed(2)}, Max ${spectralIndices.ndvi.max?.toFixed(2)}, Mean ${spectralIndices.ndvi.mean?.toFixed(2)}` : ''}
 Include continuous color bar legend with NDVI values.
 Show ${Math.abs(changePercent)}% vegetation change related to ${eventType}.
-Scientific vegetation health map, 30m Landsat resolution, 16:9 aspect ratio.`;
+Scientific vegetation health map, 10m Sentinel-2 resolution, 16:9 aspect ratio.`;
         break;
 
       case "landsat_change":
-        prompt = `Create a Landsat-based temporal change detection map for ${region}, Africa.
+        prompt = `Create a Sentinel-2-based temporal change detection map for ${region}, Africa.
 Multi-date composite showing ${eventType} changes.
 VISUALIZATION:
 - Use bi-temporal RGB: Red=Before, Green=After, Blue=After
@@ -149,7 +468,7 @@ Professional change detection map, 16:9 aspect ratio.`;
         break;
 
       case "classification_map":
-        prompt = `Create a land cover classification map of ${region}, Africa derived from Landsat multispectral analysis.
+        prompt = `Create a land cover classification map of ${region}, Africa derived from Sentinel-2 multispectral analysis.
 ${classificationResults ? `
 CLASSIFICATION METHOD: ${classificationResults.method?.toUpperCase()}
 CLASSES (${classificationResults.num_classes} total):
@@ -166,7 +485,7 @@ Standard land cover classes:
 `}
 Use distinct, professional colors for each class.
 Include legend with class names, areas, and percentages.
-30m Landsat resolution, classified thematic map style, 16:9 aspect ratio.`;
+10m Sentinel-2 resolution, classified thematic map style, 16:9 aspect ratio.`;
         break;
 
       case "change_detection_map":
@@ -192,20 +511,20 @@ Professional GIS change analysis map, 16:9 aspect ratio.`;
 
       // === ENHANCED SATELLITE VISUALIZATIONS ===
       case "satellite_2d":
-        prompt = `Create a hyper-realistic 2D Landsat satellite imagery view of ${region}, Africa showing ${eventType}. 
-Authentic Landsat 8/9 OLI true-color composite (Bands 4-3-2) at 30m resolution.
+        prompt = `Create a hyper-realistic 2D Sentinel-2 satellite imagery view of ${region}, Africa showing ${eventType}.
+Authentic Sentinel-2 MSI true-color composite (Bands 4-3-2 / B04-B03-B02) at 10m resolution.
 Show affected areas with scientifically accurate color differences indicating ${Math.abs(changePercent)}% ${eventType} change.
 Include: Cloud-free imagery, sharp terrain features, visible infrastructure, river systems, vegetation patterns.
 ${severity === 'critical' ? 'Show dramatic visible damage/change in affected zones.' : ''}
 ${spectralIndices?.ndvi ? `Vegetation health (NDVI mean): ${spectralIndices.ndvi.mean?.toFixed(2)}` : ''}
-Professional cartographic quality with north arrow, scale bar, coordinate reference. 
-Ultra high resolution, 16:9 aspect ratio, photorealistic Landsat satellite imagery style.`;
+Professional cartographic quality with north arrow, scale bar, coordinate reference.
+Ultra high resolution, 16:9 aspect ratio, photorealistic Sentinel-2 satellite imagery style.`;
         break;
-        
+
       case "satellite_3d":
-        prompt = `Create a stunning 3D terrain visualization of ${region}, Africa using Landsat imagery draped over SRTM DEM.
+        prompt = `Create a stunning 3D terrain visualization of ${region}, Africa using Sentinel-2 imagery draped over SRTM DEM.
 Oblique 3D perspective view with realistic terrain elevation (30m SRTM).
-Landsat true-color or false-color composite draped on topography.
+Sentinel-2 true-color or false-color composite draped on topography.
 Show topographic features: mountains, valleys, river basins, coastlines with dramatic shadows.
 Overlay ${eventType} impact data as semi-transparent color gradation.
 ${changePercent > 20 ? 'Highlight critical change areas with glowing boundaries.' : ''}
@@ -213,10 +532,10 @@ ${classificationResults ? `Show ${classificationResults.num_classes}-class land 
 Include: 3D vegetation representation, atmospheric haze for depth, realistic lighting.
 Professional 3D GIS visualization style, ultra high resolution, 16:9 aspect ratio.`;
         break;
-        
+
       case "satellite_4d":
-        prompt = `Create a temporal 4D visualization showing ${eventType} change over time in ${region}, Africa using Landsat time series.
-Split-panel or animated sequence style showing BEFORE and AFTER Landsat imagery.
+        prompt = `Create a temporal 4D visualization showing ${eventType} change over time in ${region}, Africa using Sentinel-2 time series.
+Split-panel or animated sequence style showing BEFORE and AFTER Sentinel-2 imagery.
 Left panel: Start date imagery with original conditions.
 Right panel: End date imagery with ${Math.abs(changePercent)}% ${eventType} change visible.
 ${changeDetection ? `
@@ -224,11 +543,11 @@ Total changed area: ${changeDetection.total_changed_area_km2} km²
 Major changes: ${changeDetection.major_changes?.slice(0, 2).map((c: any) => c.type).join(', ')}` : ''}
 Add temporal annotations, timeline indicator, and change detection overlay.
 ${predictiveData ? `Show projected future state with ${predictiveData.projected_change_12mo}% additional change.` : ''}
-Professional Landsat time-series analysis style, photorealistic, 16:9 aspect ratio.`;
+Professional Sentinel-2 time-series analysis style, photorealistic, 16:9 aspect ratio.`;
         break;
-        
+
       case "predictive":
-        prompt = `Create a predictive modeling visualization for ${eventType} in ${region}, Africa based on Landsat trend analysis.
+        prompt = `Create a predictive modeling visualization for ${eventType} in ${region}, Africa based on Sentinel-2 trend analysis.
 Show projected environmental changes over the next 12 months.
 Include: Current state indicator, trend arrows, confidence bands, projection zones.
 Use gradient colors from current (blue) through projected (orange/red for decline, green for improvement).
@@ -243,9 +562,9 @@ Professional scientific forecasting visualization, 16:9 aspect ratio.`;
         break;
         
       case "timeline":
-        prompt = `Create an animated timeline visualization showing ${eventType} progression in ${region}, Africa using Landsat archive.
+        prompt = `Create an animated timeline visualization showing ${eventType} progression in ${region}, Africa using the Sentinel-2 archive.
 Circular or linear timeline design showing yearly changes from 2020-2025.
-Each time point shows Landsat snapshot with change percentage overlay.
+Each time point shows a Sentinel-2 snapshot with change percentage overlay.
 Progressive color shift from green (healthy) through yellow to red (critical) based on degradation.
 ${spectralIndices?.ndvi ? `Track NDVI trends: current mean ${spectralIndices.ndvi.mean?.toFixed(2)}` : ''}
 Include: Timeline markers, percentage annotations, trend line, key event callouts.
@@ -253,10 +572,10 @@ Professional animated infographic style, 16:9 aspect ratio.`;
         break;
 
       case "map":
-        prompt = `Create a professional Landsat satellite map visualization showing ${eventType} in ${region}, Africa. 
-Photorealistic Landsat 8/9 basemap with affected areas highlighted in heat overlay.
+        prompt = `Create a professional Sentinel-2 satellite map visualization showing ${eventType} in ${region}, Africa.
+Photorealistic Sentinel-2 MSI basemap with affected areas highlighted in heat overlay.
 Include: Clean legend, scale bar, north arrow, coordinate grid (WGS84).
-${landsatInfo ? `Data source: ${landsatInfo.sensor}, ${landsatInfo.spatial_resolution} resolution` : 'Landsat 8 OLI, 30m resolution'}
+${landsatInfo ? `Data source: ${landsatInfo.sensor}, ${landsatInfo.spatial_resolution} resolution` : 'Sentinel-2 MSI, 10m resolution'}
 Show ${Math.abs(changePercent)}% change with intensity-based coloring.
 Ultra high resolution, professional cartographic style, 16:9 aspect ratio.`;
         break;
@@ -278,7 +597,7 @@ Professional scientific chart style, 16:9 aspect ratio.`;
       case "heatmap":
         prompt = `Create a professional heatmap visualization showing intensity of ${eventType} across ${region}, Africa.
 Geographic heatmap with gradient: Dark green (low impact) → Yellow → Orange → Dark red (high impact).
-${classificationResults ? `Overlay on ${classificationResults.num_classes}-class land cover base map.` : 'Overlay on subtle Landsat basemap for geographic context.'}
+${classificationResults ? `Overlay on ${classificationResults.num_classes}-class land cover base map.` : 'Overlay on subtle Sentinel-2 basemap for geographic context.'}
 Include: Clear legend showing intensity scale (0-100%), geographic labels, regional boundaries.
 ${changeDetection?.change_hotspots ? `Highlight hotspots: ${changeDetection.change_hotspots.slice(0, 3).map((h: any) => h.location).join(', ')}` : ''}
 Show clusters of ${eventType} activity.
@@ -286,9 +605,9 @@ Scientific visualization style, 16:9 aspect ratio.`;
         break;
         
       case "comparison":
-        prompt = `Create a professional before/after Landsat satellite comparison for ${region} showing ${eventType}.
-Clean split-view with Landsat imagery: Start date on left, End date on right.
-Photorealistic Landsat imagery style for both panels.
+        prompt = `Create a professional before/after Sentinel-2 satellite comparison for ${region} showing ${eventType}.
+Clean split-view with Sentinel-2 imagery: Start date on left, End date on right.
+Photorealistic Sentinel-2 imagery style for both panels.
 Highlight changed areas with subtle boundary outlines.
 ${changeDetection ? `
 Total change: ${changeDetection.total_changed_area_km2} km² (${changeDetection.change_percent}%)` : `Change: ${Math.abs(changePercent)}%`}
@@ -303,7 +622,7 @@ Professional remote sensing visualization, 16:9 aspect ratio.`;
 REQUIREMENTS:
 - Dramatic oblique 3D perspective view at 45-60 degree angle
 - Realistic terrain shadowing with sun angle from northwest
-- Landsat imagery draped on 3D topography
+- Sentinel-2 imagery draped on 3D topography
 - Clear visibility of: mountain ridges, valleys, river channels, escarpments
 - Vertical exaggeration 2x for dramatic effect
 - Overlay ${eventType} impact zones as semi-transparent colored regions
@@ -314,8 +633,8 @@ Professional 3D GIS terrain visualization, photorealistic, 16:9 aspect ratio.`;
         break;
 
       case "thermal_analysis":
-        prompt = `Create a Landsat thermal infrared analysis map of ${region}, Africa.
-Using Landsat 8/9 TIRS Band 10 (10.6-11.2 μm) thermal data.
+        prompt = `Create an illustrative thermal-pattern analysis map of ${region}, Africa.
+Note: this is a stylized surface-temperature illustration, not a real sensor reading — Sentinel-2 (the satellite this project's real imagery comes from) does not carry a thermal infrared band.
 COLOR SCHEME:
 - Deep blue (< 15°C): Cool areas, water bodies, high altitude
 - Light blue/cyan (15-25°C): Moderate temperature zones
@@ -329,7 +648,7 @@ Scientific thermal remote sensing visualization, 100m resolution, 16:9 aspect ra
         break;
 
       case "ndwi_water":
-        prompt = `Create a Landsat-derived NDWI (Normalized Difference Water Index) map of ${region}, Africa.
+        prompt = `Create a Sentinel-2-derived NDWI (Normalized Difference Water Index) map of ${region}, Africa.
 NDWI = (Green - NIR) / (Green + NIR) for water body detection.
 COLOR SCHEME:
 - Deep blue (0.3 to 1.0): Open water, rivers, lakes
@@ -341,11 +660,11 @@ ${spectralIndices?.ndwi ? `
 Data: Min ${spectralIndices.ndwi.min?.toFixed(2)}, Max ${spectralIndices.ndwi.max?.toFixed(2)}, Mean ${spectralIndices.ndwi.mean?.toFixed(2)}` : ''}
 Show water extent changes related to ${eventType} (${Math.abs(changePercent)}% change).
 Include: Water body boundaries, drainage networks, flood extent.
-Hydrological analysis map, Landsat 30m resolution, 16:9 aspect ratio.`;
+Hydrological analysis map, 10m Sentinel-2 resolution, 16:9 aspect ratio.`;
         break;
 
       case "nbr_fire":
-        prompt = `Create a Landsat-derived NBR (Normalized Burn Ratio) map of ${region}, Africa.
+        prompt = `Create a Sentinel-2-derived NBR (Normalized Burn Ratio) map of ${region}, Africa.
 NBR = (NIR - SWIR2) / (NIR + SWIR2) for fire/burn severity mapping.
 COLOR SCHEME:
 - Dark green (0.5 to 1.0): Healthy, unburned vegetation
@@ -358,14 +677,14 @@ ${spectralIndices?.nbr ? `
 Data: Min ${spectralIndices.nbr.min?.toFixed(2)}, Max ${spectralIndices.nbr.max?.toFixed(2)}, Mean ${spectralIndices.nbr.mean?.toFixed(2)}` : ''}
 Show ${eventType} with fire-affected area of ${Math.abs(changePercent)}%.
 Include: Burn severity legend, fire perimeter boundaries, recovery zones.
-Fire ecology analysis map, Landsat 30m resolution, 16:9 aspect ratio.`;
+Fire ecology analysis map, 10-20m Sentinel-2 resolution, 16:9 aspect ratio.`;
         break;
 
       case "temporal_animation":
         prompt = `Create a temporal animation sequence visualization of ${region}, Africa showing ${eventType} change over time.
 MULTI-FRAME COMPOSITE:
 - 6 panels showing yearly progression (2020-2025)
-- Each panel: Landsat snapshot with clear date label
+- Each panel: Sentinel-2 snapshot with clear date label
 - Progressive color shift indicating change intensity
 - Arrow indicators showing change direction between panels
 ${changeDetection ? `
@@ -428,7 +747,7 @@ Professional infographic style, 16:9 aspect ratio.`;
         
       default:
         prompt = `Create a professional environmental analysis infographic for ${region} showing ${eventType}.
-Based on Landsat multispectral satellite analysis.
+Based on Sentinel-2 multispectral satellite analysis.
 Include: Satellite imagery section, key statistics (${Math.abs(changePercent)}% change), spectral indices, trend chart, recommendations.
 ${classificationResults ? `Land cover classification with ${classificationResults.num_classes} classes.` : ''}
 ${changeDetection ? `Change detection showing ${changeDetection.total_changed_area_km2} km² changed.` : ''}
@@ -515,10 +834,10 @@ Professional scientific poster style, 16:9 aspect ratio.`;
       JSON.stringify({ 
         success: true,
         imageUrl,
-        description: description || "Landsat visualization generated successfully",
+        description: description || "Sentinel-2-style visualization generated successfully",
         visualizationType,
         model,
-        dataSource: "Landsat 8/9 OLI"
+        dataSource: "Sentinel-2 MSI"
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );

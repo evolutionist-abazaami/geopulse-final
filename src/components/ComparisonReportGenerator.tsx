@@ -500,7 +500,6 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
 
       const sources = [
         "• Sentinel-2 Multi-Spectral Imagery",
-        "• Landsat 8/9 OLI-TIRS Data",
         "• MODIS Terra/Aqua Products",
         "• GeoPulse AI Engine v2.0"
       ];

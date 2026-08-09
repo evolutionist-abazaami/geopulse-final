@@ -44,9 +44,9 @@ serve(async (req) => {
       });
     }
 
-    const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
-    if (!GEMINI_API_KEY) {
-      throw new Error('GEMINI_API_KEY is not configured');
+    const GROQ_API_KEY = Deno.env.get('GROQ_API_KEY');
+    if (!GROQ_API_KEY) {
+      throw new Error('GROQ_API_KEY is not configured');
     }
 
     const systemPrompt = `You are GeoPulse AI Assistant, an expert in geospatial analysis, environmental monitoring, and satellite imagery interpretation for Africa.
@@ -75,26 +75,29 @@ Current GeoPulse features:
 - Analytics: Visualize trends and patterns in your analysis history
 - Dashboard: View and export your analysis history`;
 
-    // Convert OpenAI-style messages to Gemini contents format
+    // Convert to OpenAI-style messages for Groq's chat completions API
     const recentMessages = messages.slice(-20);
-    const geminiContents = recentMessages.map((m: any) => ({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }],
-    }));
+    const groqMessages = [
+      { role: 'system', content: systemPrompt },
+      ...recentMessages.map((m: any) => ({ role: m.role, content: m.content })),
+    ];
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
-    const response = await fetch(geminiUrl, {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+      },
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents: geminiContents,
+        model: 'llama-3.3-70b-versatile',
+        messages: groqMessages,
+        stream: true,
       }),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('Gemini API error:', response.status, errorText);
+      console.error('Groq API error:', response.status, errorText);
       if (response.status === 429) {
         return new Response(JSON.stringify({ error: 'Rate limit exceeded. Please try again later.' }), {
           status: 429,
@@ -107,48 +110,9 @@ Current GeoPulse features:
       });
     }
 
-    // Transform Gemini SSE → OpenAI-compatible SSE so frontend parser works unchanged
-    const stream = new ReadableStream({
-      async start(controller) {
-        const reader = response.body!.getReader();
-        const decoder = new TextDecoder();
-        const encoder = new TextEncoder();
-        let buffer = '';
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let nl: number;
-            while ((nl = buffer.indexOf('\n')) !== -1) {
-              let line = buffer.slice(0, nl);
-              buffer = buffer.slice(nl + 1);
-              if (line.endsWith('\r')) line = line.slice(0, -1);
-              if (!line.startsWith('data: ')) continue;
-              const jsonStr = line.slice(6).trim();
-              if (!jsonStr) continue;
-              try {
-                const parsed = JSON.parse(jsonStr);
-                const text = parsed?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).filter(Boolean).join('') || '';
-                if (text) {
-                  const openAIChunk = { choices: [{ delta: { content: text } }] };
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(openAIChunk)}\n\n`));
-                }
-              } catch {
-                // ignore partial
-              }
-            }
-          }
-          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-        } catch (e) {
-          console.error('Stream transform error:', e);
-        } finally {
-          controller.close();
-        }
-      },
-    });
-
-    return new Response(stream, {
+    // Groq's stream is already OpenAI-format SSE (data: {"choices":[{"delta":{"content":...}}]})
+    // so it can be piped straight through to the frontend parser unchanged.
+    return new Response(response.body, {
       headers: { ...corsHeaders, 'Content-Type': 'text/event-stream' },
     });
 

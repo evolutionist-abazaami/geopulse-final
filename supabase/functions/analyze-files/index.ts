@@ -116,13 +116,13 @@ serve(async (req) => {
     const files = validateFiles(body.files);
     const reportType = validateReportType(body.reportType);
     
-    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-    
-    if (!GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY not configured");
+    const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY");
+
+    if (!GROQ_API_KEY) {
+      throw new Error("GROQ_API_KEY not configured");
     }
 
-    console.log(`Analyzing ${files.length} files with report type: ${reportType} for user ${user.id}`);
+    console.log(`Analyzing ${files.length} files with report type: ${reportType} for user ${user?.id || 'anonymous'}`);
 
     // Prepare file descriptions for AI
     const fileDescriptions = files.map((f) => ({
@@ -166,10 +166,11 @@ Return your analysis as JSON with this structure:
   "severity": "low|medium|high|critical"
 }`;
 
-    // Build Gemini contents
-    const userParts: any[] = [];
+    // Build OpenAI-style message content for Groq
+    const userContent: any[] = [];
     if (imageFiles.length > 0) {
-      userParts.push({
+      userContent.push({
+        type: "text",
         text: `Analyze these environmental/geospatial files for environmental changes and patterns:
 
 Files being analyzed:
@@ -178,9 +179,9 @@ ${fileDescriptions.map((f) => `- ${f.name} (${f.type}, ${f.size})`).join('\n')}
 Please provide a comprehensive ${isSimple ? 'simple, easy-to-understand' : 'professional technical'} analysis.`
       });
 
-      // Add images as inline_data (limit to first 3)
+      // Add images as image_url data URIs (limit to first 3 - matches Groq's per-request image cap)
       for (const img of imageFiles.slice(0, 3)) {
-        // img.data may be a data URL like "data:image/png;base64,XXXX"
+        // img.data may already be a data URL like "data:image/png;base64,XXXX"
         let mimeType = img.type;
         let base64Data = img.data;
         const dataUrlMatch = img.data.match(/^data:([^;]+);base64,(.+)$/);
@@ -188,13 +189,15 @@ Please provide a comprehensive ${isSimple ? 'simple, easy-to-understand' : 'prof
           mimeType = dataUrlMatch[1];
           base64Data = dataUrlMatch[2];
         }
-        userParts.push({
-          inline_data: { mime_type: mimeType, data: base64Data }
+        userContent.push({
+          type: "image_url",
+          image_url: { url: `data:${mimeType};base64,${base64Data}` },
         });
       }
     } else {
       const sampleData = dataFiles.length > 0 ? dataFiles[0].data.substring(0, 500) : '';
-      userParts.push({
+      userContent.push({
+        type: "text",
         text: `Analyze these environmental/geospatial data files:
 
 Files being analyzed:
@@ -206,28 +209,58 @@ Please provide a comprehensive ${isSimple ? 'simple, easy-to-understand' : 'prof
       });
     }
 
-    // Call Google Gemini API with model fallback chain for resilience to overload
-    const requestBody = JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents: [{ role: "user", parts: userParts }],
-      generationConfig: {
-        maxOutputTokens: 3000,
-        responseMimeType: "application/json",
-      },
-    });
+    // Call Groq's chat completions API with a model fallback chain for resilience to overload.
+    // Vision-capable models are required when images are attached; text-only
+    // requests can use the faster/cheaper general-purpose chain.
+    const requestParams = {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
+      ],
+      max_tokens: 3000,
+      response_format: { type: "json_object" },
+    };
 
-    const modelChain = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite"];
+    const modelChain = imageFiles.length > 0
+      ? ["meta-llama/llama-4-scout-17b-16e-instruct", "meta-llama/llama-4-maverick-17b-128e-instruct"]
+      : ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"];
     let aiResponse: Response | null = null;
     const attemptsPerModel = 2;
+    // Bounds worst-case latency - 4 models x 2 attempts against a degraded/
+    // rate-limited key can otherwise compound to 40-90s of real network
+    // round-trips, long enough that a waiting user assumes the app is broken.
+    const retryDeadline = Date.now() + 18000;
 
     outer: for (const model of modelChain) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+      if (Date.now() > retryDeadline) {
+        console.warn("Groq retry time budget exceeded, stopping early.");
+        break outer;
+      }
       for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
-        aiResponse = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: requestBody,
-        });
+        if (Date.now() > retryDeadline) break outer;
+        // Each attempt also gets its own timeout - the overall deadline only
+        // gates whether a NEW attempt starts, so a single slow in-flight
+        // request could otherwise still run long past it.
+        const perRequestTimeoutMs = Math.min(8000, Math.max(2000, retryDeadline - Date.now()));
+        const requestController = new AbortController();
+        const requestTimeoutId = setTimeout(() => requestController.abort(), perRequestTimeoutMs);
+        try {
+          aiResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${GROQ_API_KEY}`,
+            },
+            body: JSON.stringify({ model, ...requestParams }),
+            signal: requestController.signal,
+          });
+        } catch (e) {
+          console.error(`AI request to ${model} timed out or failed (attempt ${attempt}):`, e instanceof Error ? e.message : e);
+          aiResponse = null;
+          continue;
+        } finally {
+          clearTimeout(requestTimeoutId);
+        }
         if (aiResponse.ok) {
           console.log(`AI success on model ${model}`);
           break outer;
@@ -236,7 +269,7 @@ Please provide a comprehensive ${isSimple ? 'simple, easy-to-understand' : 'prof
         console.error(`AI API error on ${model} (attempt ${attempt}):`, aiResponse.status, errText.slice(0, 200));
         const isRetryable = aiResponse.status === 503 || aiResponse.status === 429 || aiResponse.status === 500;
         if (!isRetryable) break outer;
-        if (attempt < attemptsPerModel) {
+        if (attempt < attemptsPerModel && Date.now() < retryDeadline) {
           await new Promise((r) => setTimeout(r, 800 * attempt + Math.random() * 400));
         }
       }
@@ -246,7 +279,7 @@ Please provide a comprehensive ${isSimple ? 'simple, easy-to-understand' : 'prof
       const status = aiResponse?.status || 500;
       if (status === 503) {
         return new Response(
-          JSON.stringify({ error: "Google Gemini is temporarily overloaded. Please try again in a minute." }),
+          JSON.stringify({ error: "Groq is temporarily overloaded. Please try again in a minute." }),
           { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
@@ -260,7 +293,7 @@ Please provide a comprehensive ${isSimple ? 'simple, easy-to-understand' : 'prof
     }
 
     const aiData = await aiResponse.json();
-    let analysis = aiData.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
+    let analysis = aiData.choices?.[0]?.message?.content || '';
 
     // Strip markdown code blocks if present
     analysis = analysis.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
@@ -288,6 +321,17 @@ Please provide a comprehensive ${isSimple ? 'simple, easy-to-understand' : 'prof
       filesAnalyzed: fileDescriptions,
       reportType,
       timestamp: new Date().toISOString(),
+      // Computed here rather than trusting the model's own self-reported
+      // "dataSources" - images are genuinely seen by the model's vision input,
+      // but non-image files are only sampled as 500 chars of text and the
+      // model is explicitly instructed to generalize from typical patterns,
+      // not to have actually read/parsed the file's real content.
+      dataProvenance: {
+        analysisMethod: imageFiles.length > 0 ? "ai_vision_analysis" : "ai_pattern_estimation",
+        disclaimer: imageFiles.length > 0
+          ? "Image files in this batch were directly viewed by the AI model. Any non-image files included were not read in detail - see below."
+          : "No image was uploaded, so the AI did not read this file's actual content in detail - it generated a plausible analysis based on typical patterns for this file type and a short text sample only. Treat these findings as illustrative, not a real analysis of your data.",
+      },
     };
 
     // Store in database if authenticated user
