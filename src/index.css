@@ -95,3 +95,28 @@ All colors MUST be HSL.
     @apply bg-background text-foreground;
   }
 }
+
+/* --- v2 shell utilities --- */
+
+/* Glassmorphism overlay - used for map floating elements */
+.glass {
+  background: rgba(22, 27, 37, 0.82);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* Thin custom scrollbar for sidebar and panels */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #26304a transparent;
+}
+.scrollbar-thin::-webkit-scrollbar { width: 4px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: #26304a; border-radius: 4px; }
+
+/* Skeleton shimmer gradient */
+.skeleton {
+  background: linear-gradient(90deg, #1e2535 0%, #26304a 50%, #1e2535 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}

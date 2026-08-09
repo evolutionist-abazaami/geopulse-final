@@ -43,6 +43,7 @@ interface MapLibreMapProps {
   activeHeatmapLayer?: HeatmapLayerType;
   showFullscreenControl?: boolean;
   showGeolocateControl?: boolean;
+  onMapReady?: (map: maplibregl.Map) => void;
 }
 
 const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
@@ -58,6 +59,7 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
   activeHeatmapLayer = "none",
   showFullscreenControl = false,
   showGeolocateControl = false,
+  onMapReady,
 }, ref) => {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<maplibregl.Map | null>(null);
@@ -206,6 +208,7 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
 
     map.on("load", () => {
       console.log("MapLibre map loaded successfully");
+      onMapReady?.(map);
       setMapLoaded(true);
     });
 

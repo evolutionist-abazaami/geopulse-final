@@ -1,59 +1,88 @@
+import { useEffect, useState } from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import Navigation from "./components/Navigation";
-import AIAssistant from "./components/AIAssistant";
+import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { Loader2 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { AppShell } from "@/layouts/AppShell";
 import DemoRecorder from "./components/DemoRecorder";
 import Home from "./pages/Home";
-import GeoWitness from "./pages/GeoWitness";
-import GeoSearch from "./pages/GeoSearch";
-import Dashboard from "./pages/Dashboard";
-import Analytics from "./pages/Analytics";
+import MapView from "./pages/MapView";
+import ReportsPage from "./pages/ReportsPage";
+import SettingsPage from "./pages/SettingsPage";
+import EarlyWarningPage from "./pages/EarlyWarningPage";
 import Auth from "./pages/Auth";
 import ResetPassword from "./pages/ResetPassword";
-import EarlyWarning from "./pages/EarlyWarning";
 import SharedReport from "./pages/SharedReport";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
 
+/**
+ * `/` shows the marketing landing page (no shell chrome) for signed-out
+ * visitors, and the map shell for signed-in ones - the shell's "map always
+ * visible" mandate applies to the authenticated workspace, not the public
+ * landing page.
+ */
+function RootRoute() {
+  const [status, setStatus] = useState<"loading" | "signed-out" | "signed-in">("loading");
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setStatus(session ? "signed-in" : "signed-out");
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setStatus(session ? "signed-in" : "signed-out");
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  if (status === "loading") {
+    return (
+      <div className="h-screen flex items-center justify-center bg-background">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  if (status === "signed-out") return <Home />;
+
+  return (
+    <AppShell>
+      <MapView />
+    </AppShell>
+  );
+}
+
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <Toaster />
-      <Sonner />
+      <Sonner position="bottom-right" />
       <BrowserRouter>
         <Routes>
-          {/* Public shared report route - no navigation */}
+          {/* Public routes - no shell */}
           <Route path="/shared/:shareId" element={<SharedReport />} />
-          
-          {/* Main app routes with navigation */}
-          <Route
-            path="*"
-            element={
-              <div className="min-h-screen bg-background">
-                <Navigation />
-                <div className="pt-[73px]">
-                  <Routes>
-                    <Route path="/" element={<Home />} />
-                    <Route path="/geowitness" element={<GeoWitness />} />
-                    <Route path="/geosearch" element={<GeoSearch />} />
-                    <Route path="/dashboard" element={<Dashboard />} />
-                    <Route path="/analytics" element={<Analytics />} />
-                    <Route path="/early-warning" element={<EarlyWarning />} />
-                    <Route path="/auth" element={<Auth />} />
-                    <Route path="/reset-password" element={<ResetPassword />} />
-                    <Route path="*" element={<NotFound />} />
-                  </Routes>
-                </div>
-                <AIAssistant />
-                <DemoRecorder />
-              </div>
-            }
-          />
+          <Route path="/auth" element={<Auth />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
+
+          {/* Map-centric shell */}
+          <Route path="/" element={<RootRoute />} />
+          <Route path="/reports" element={<AppShell><ReportsPage /></AppShell>} />
+          <Route path="/settings" element={<AppShell><SettingsPage /></AppShell>} />
+          <Route path="/early-warning" element={<AppShell><EarlyWarningPage /></AppShell>} />
+
+          {/* Retired routes - redirect so bookmarks don't 404 */}
+          <Route path="/dashboard" element={<Navigate to="/" replace />} />
+          <Route path="/analytics" element={<Navigate to="/" replace />} />
+          <Route path="/geowitness" element={<Navigate to="/" replace />} />
+          <Route path="/geosearch" element={<Navigate to="/" replace />} />
+
+          <Route path="*" element={<NotFound />} />
         </Routes>
+        <DemoRecorder />
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>
