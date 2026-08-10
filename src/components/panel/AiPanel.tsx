@@ -1,7 +1,54 @@
 import { useEffect, useRef } from "react";
+import type { ReactNode } from "react";
 import { ArrowUp, Loader2 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import { useAiAssistant, quickQuestions } from "@/hooks/useAiAssistant";
+
+const markdownComponents = {
+  p: ({ children }: { children?: ReactNode }) => <p className="mb-2 last:mb-0">{children}</p>,
+  strong: ({ children }: { children?: ReactNode }) => (
+    <strong className="font-semibold">{children}</strong>
+  ),
+  em: ({ children }: { children?: ReactNode }) => <em className="italic">{children}</em>,
+  a: ({ href, children }: { href?: string; children?: ReactNode }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-blue-600 dark:text-brand underline underline-offset-2 hover:no-underline"
+    >
+      {children}
+    </a>
+  ),
+  ul: ({ children }: { children?: ReactNode }) => (
+    <ul className="mb-2 last:mb-0 list-disc pl-4 space-y-0.5">{children}</ul>
+  ),
+  ol: ({ children }: { children?: ReactNode }) => (
+    <ol className="mb-2 last:mb-0 list-decimal pl-4 space-y-0.5">{children}</ol>
+  ),
+  li: ({ children }: { children?: ReactNode }) => <li>{children}</li>,
+  code: ({ children }: { children?: ReactNode }) => (
+    <code className="rounded bg-black/10 dark:bg-white/10 px-1 py-0.5 font-mono text-[12px]">
+      {children}
+    </code>
+  ),
+  pre: ({ children }: { children?: ReactNode }) => (
+    <pre className="mb-2 last:mb-0 overflow-x-auto rounded-md bg-black/10 dark:bg-white/10 p-2 font-mono text-[12px]">
+      {children}
+    </pre>
+  ),
+  h1: ({ children }: { children?: ReactNode }) => (
+    <h1 className="mb-1 mt-2 first:mt-0 text-sm font-semibold">{children}</h1>
+  ),
+  h2: ({ children }: { children?: ReactNode }) => (
+    <h2 className="mb-1 mt-2 first:mt-0 text-sm font-semibold">{children}</h2>
+  ),
+  h3: ({ children }: { children?: ReactNode }) => (
+    <h3 className="mb-1 mt-2 first:mt-0 text-[13px] font-semibold">{children}</h3>
+  ),
+};
 
 export function AiPanel() {
   const { messages, input, setInput, isLoading, sendMessage } = useAiAssistant();
@@ -32,7 +79,17 @@ export function AiPanel() {
                   : "bg-blue-50 dark:bg-brand-dim border border-blue-200 dark:border-brand-border text-gray-900 dark:text-v2-primary rounded-tr-sm self-end ml-auto"
               )}
             >
-              {msg.content || <Loader2 className="h-4 w-4 animate-spin" />}
+              {msg.content ? (
+                msg.role === "assistant" ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                    {msg.content}
+                  </ReactMarkdown>
+                ) : (
+                  msg.content
+                )
+              ) : (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              )}
             </div>
           ))}
         </div>
