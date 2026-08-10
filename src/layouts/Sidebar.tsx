@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
-  Map as MapIcon, Satellite, Shield, FileText, Settings,
+  Map as MapIcon, Satellite, Shield, FileText,
   ChevronLeft, ChevronRight, Clock, TreePine, Droplets, Flame, Sun, Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -24,6 +24,16 @@ const eventTypeStyles: Record<string, { bg: string; icon: string; Icon: typeof T
 
 function styleFor(row: AnalysisHistoryRow) {
   return eventTypeStyles[row.event_type || ""] || eventTypeStyles[row.type === "geosearch" ? "geosearch" : "deforestation"];
+}
+
+// Like a chat history list, the title should read as what was asked, not
+// just where. GeoSearch has a real free-text query; GeoWitness doesn't, so
+// its region name (already effectively "what was analyzed") stays the title.
+function titleFor(row: AnalysisHistoryRow) {
+  if (row.type === "geosearch" && typeof row.result_payload?.query === "string" && row.result_payload.query.trim()) {
+    return row.result_payload.query as string;
+  }
+  return row.region_name;
 }
 
 function timeAgo(iso: string) {
@@ -80,7 +90,6 @@ export function Sidebar() {
     { label: "GeoWitness", icon: Satellite, onClick: () => { navigate("/"); rightPanel.open({ type: "geowitness" }); mapCtx.setSelectionMode(true); }, active: rightPanel.mode?.type === "geowitness" },
     { label: "Early Warning", icon: Shield, onClick: () => navigate("/early-warning"), active: location.pathname === "/early-warning", badgeCount: alertCount },
     { label: "Reports", icon: FileText, onClick: () => navigate("/reports"), active: location.pathname === "/reports" },
-    { label: "Settings", icon: Settings, onClick: () => navigate("/settings"), active: location.pathname === "/settings" },
   ];
 
   const openHistoryItem = (row: AnalysisHistoryRow) => {
@@ -182,9 +191,11 @@ export function Sidebar() {
                             <Icon className={cn("w-3.5 h-3.5", icon)} />
                           </div>
                           <div className="flex-1 min-w-0">
-                            <p className="text-[12px] text-gray-900 dark:text-v2-primary truncate">{row.region_name}</p>
-                            <p className="text-[11px] text-gray-400 dark:text-v2-muted">
-                              {row.type === "geowitness" ? (row.event_type || "analysis").replace(/_/g, " ") : "search"} · {timeAgo(row.created_at)}
+                            <p className="text-[12px] text-gray-900 dark:text-v2-primary truncate">{titleFor(row)}</p>
+                            <p className="text-[11px] text-gray-400 dark:text-v2-muted truncate">
+                              {row.type === "geowitness"
+                                ? `${(row.event_type || "analysis").replace(/_/g, " ")} · ${timeAgo(row.created_at)}`
+                                : `${row.region_name} · ${timeAgo(row.created_at)}`}
                             </p>
                           </div>
                         </button>

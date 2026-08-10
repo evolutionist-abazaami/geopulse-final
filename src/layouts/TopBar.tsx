@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, X, Loader2, Bell, MessageCircle, Sun, Moon, User, LogOut } from "lucide-react";
+import { Search, X, Loader2, Bell, MessageCircle, Sun, Moon, User, Settings, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import type { User as SupabaseUser } from "@supabase/supabase-js";
@@ -48,6 +48,7 @@ function DropdownItem({ icon: Icon, label, onClick, className }: { icon: typeof 
 }
 
 function UserAvatar() {
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [user, setUser] = useState<SupabaseUser | null>(null);
   const { theme, setTheme } = useTheme();
@@ -101,6 +102,10 @@ function UserAvatar() {
                   <Moon className="w-3.5 h-3.5" /> Dark
                 </button>
               </div>
+            </div>
+
+            <div className="p-1 border-b border-gray-100 dark:border-border-subtle">
+              <DropdownItem icon={Settings} label="Settings" onClick={() => { setOpen(false); navigate("/settings"); }} />
             </div>
 
             <div className="p-1">

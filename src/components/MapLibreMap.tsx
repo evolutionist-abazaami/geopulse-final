@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
+import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
@@ -21,13 +21,38 @@ interface MapPolygon {
   fillOpacity?: number;
 }
 
-interface HeatmapPoint {
-  lat: number;
-  lng: number;
-  intensity: number;
-}
-
 export type HeatmapLayerType = "vegetation" | "temperature" | "rainfall" | "none";
+
+// Real NASA GIBS (Global Imagery Browse Services) products, served as
+// public, CORS-open XYZ raster tiles - no API key, no proxy. "default" as
+// the time segment resolves to the most recent available imagery for each
+// product server-side, so this never needs a hardcoded/refreshed date.
+// Replaces the old client-generated Math.random() heatmap.
+export const GIBS_LAYERS: Record<Exclude<HeatmapLayerType, "none">, { layer: string; tileMatrixSet: string; maxzoom: number; attribution: string }> = {
+  vegetation: {
+    layer: "MODIS_Terra_NDVI_8Day",
+    tileMatrixSet: "GoogleMapsCompatible_Level9",
+    maxzoom: 9,
+    attribution: "NASA EOSDIS GIBS — MODIS/Terra NDVI, 8-day composite",
+  },
+  temperature: {
+    layer: "MODIS_Terra_Land_Surface_Temp_Day",
+    tileMatrixSet: "GoogleMapsCompatible_Level7",
+    maxzoom: 7,
+    attribution: "NASA EOSDIS GIBS — MODIS/Terra Land Surface Temperature, daily",
+  },
+  rainfall: {
+    layer: "IMERG_Precipitation_Rate",
+    tileMatrixSet: "GoogleMapsCompatible_Level6",
+    maxzoom: 6,
+    attribution: "NASA EOSDIS GIBS — GPM IMERG precipitation rate, near real-time",
+  },
+};
+
+function gibsTileUrl(type: Exclude<HeatmapLayerType, "none">): string {
+  const { layer, tileMatrixSet } = GIBS_LAYERS[type];
+  return `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${layer}/default/default/${tileMatrixSet}/{z}/{y}/{x}.png`;
+}
 
 interface MapLibreMapProps {
   center: [number, number];
@@ -35,7 +60,6 @@ interface MapLibreMapProps {
   className?: string;
   markers?: MapMarker[];
   polygons?: MapPolygon[];
-  heatmapData?: HeatmapPoint[];
   onLocationSelect?: (location: { lat: number; lng: number; name: string }) => void;
   selectionMode?: boolean;
   selectedArea?: { lat: number; lng: number; radius?: number } | null;
@@ -72,63 +96,6 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
   const lastSnapshotRef = useRef<string | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
   const clickHandlerRef = useRef<((e: maplibregl.MapMouseEvent) => void) | null>(null);
-
-  // Generate simulated environmental data for Africa
-  const generateEnvironmentalData = useCallback((type: HeatmapLayerType): HeatmapPoint[] => {
-    if (type === "none") return [];
-    
-    const africaPoints: HeatmapPoint[] = [];
-    
-    // Generate data points across Africa
-    const regions = [
-      // West Africa - high vegetation
-      { lat: 6.5, lng: -1.5, baseIntensity: { vegetation: 0.85, temperature: 0.6, rainfall: 0.75 } },
-      { lat: 7.5, lng: 4.0, baseIntensity: { vegetation: 0.75, temperature: 0.65, rainfall: 0.7 } },
-      { lat: 10.0, lng: -8.0, baseIntensity: { vegetation: 0.6, temperature: 0.7, rainfall: 0.55 } },
-      { lat: 5.5, lng: -5.0, baseIntensity: { vegetation: 0.8, temperature: 0.55, rainfall: 0.8 } },
-      // Central Africa - rainforest
-      { lat: 0.5, lng: 18.0, baseIntensity: { vegetation: 0.95, temperature: 0.55, rainfall: 0.9 } },
-      { lat: -4.0, lng: 15.0, baseIntensity: { vegetation: 0.9, temperature: 0.5, rainfall: 0.85 } },
-      { lat: 2.0, lng: 12.0, baseIntensity: { vegetation: 0.88, temperature: 0.52, rainfall: 0.82 } },
-      // East Africa
-      { lat: -1.3, lng: 36.8, baseIntensity: { vegetation: 0.5, temperature: 0.65, rainfall: 0.45 } },
-      { lat: 9.0, lng: 38.7, baseIntensity: { vegetation: 0.35, temperature: 0.75, rainfall: 0.3 } },
-      { lat: -6.0, lng: 35.0, baseIntensity: { vegetation: 0.55, temperature: 0.6, rainfall: 0.5 } },
-      // Southern Africa
-      { lat: -26.0, lng: 28.0, baseIntensity: { vegetation: 0.45, temperature: 0.55, rainfall: 0.4 } },
-      { lat: -19.0, lng: 25.0, baseIntensity: { vegetation: 0.3, temperature: 0.8, rainfall: 0.2 } },
-      { lat: -22.0, lng: 17.0, baseIntensity: { vegetation: 0.15, temperature: 0.85, rainfall: 0.1 } },
-      // North Africa - Sahara
-      { lat: 25.0, lng: 10.0, baseIntensity: { vegetation: 0.05, temperature: 0.95, rainfall: 0.05 } },
-      { lat: 28.0, lng: 3.0, baseIntensity: { vegetation: 0.08, temperature: 0.9, rainfall: 0.08 } },
-      { lat: 22.0, lng: 25.0, baseIntensity: { vegetation: 0.03, temperature: 0.92, rainfall: 0.03 } },
-      { lat: 30.0, lng: 0.0, baseIntensity: { vegetation: 0.1, temperature: 0.88, rainfall: 0.12 } },
-    ];
-
-    regions.forEach(region => {
-      // Add main point
-      africaPoints.push({
-        lat: region.lat,
-        lng: region.lng,
-        intensity: region.baseIntensity[type],
-      });
-      
-      // Add surrounding points with variation for density
-      for (let i = 0; i < 8; i++) {
-        const latOffset = (Math.random() - 0.5) * 6;
-        const lngOffset = (Math.random() - 0.5) * 6;
-        const intensityVariation = (Math.random() - 0.5) * 0.3;
-        
-        africaPoints.push({
-          lat: region.lat + latOffset,
-          lng: region.lng + lngOffset,
-          intensity: Math.max(0, Math.min(1, region.baseIntensity[type] + intensityVariation)),
-        });
-      }
-    });
-
-    return africaPoints;
-  }, []);
 
   // Reverse geocode to get location name
   const reverseGeocode = async (lat: number, lng: number): Promise<string> => {
@@ -391,12 +358,12 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
     };
   }, [selectionMode, onLocationSelect]);
 
-  // Update heatmap layer
+  // Update heatmap layer - real NASA GIBS satellite raster tiles, not
+  // generated data. See GIBS_LAYERS/gibsTileUrl above.
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || !mapLoaded) return;
 
-    // Remove existing heatmap layer
     if (map.getLayer("heatmap-layer")) {
       map.removeLayer("heatmap-layer");
     }
@@ -406,58 +373,25 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
 
     if (activeHeatmapLayer === "none") return;
 
-    const environmentalData = generateEnvironmentalData(activeHeatmapLayer);
-    
-    // Color schemes for different layers
-    const colorSchemes: Record<string, string[]> = {
-      vegetation: ["#f7fcb9", "#addd8e", "#31a354", "#006837"],
-      temperature: ["#ffffb2", "#fecc5c", "#fd8d3c", "#e31a1c"],
-      rainfall: ["#f1eef6", "#bdc9e1", "#74a9cf", "#0570b0"],
-    };
+    const { maxzoom } = GIBS_LAYERS[activeHeatmapLayer];
 
-    const colors = colorSchemes[activeHeatmapLayer] || colorSchemes.vegetation;
-
-    // Add heatmap source and layer
     map.addSource("heatmap-source", {
-      type: "geojson",
-      data: {
-        type: "FeatureCollection",
-        features: environmentalData.map(point => ({
-          type: "Feature" as const,
-          properties: { intensity: point.intensity },
-          geometry: {
-            type: "Point" as const,
-            coordinates: [point.lng, point.lat],
-          },
-        })),
-      },
+      type: "raster",
+      tiles: [gibsTileUrl(activeHeatmapLayer)],
+      tileSize: 256,
+      maxzoom,
+      attribution: GIBS_LAYERS[activeHeatmapLayer].attribution,
     });
 
     map.addLayer({
       id: "heatmap-layer",
-      type: "heatmap",
+      type: "raster",
       source: "heatmap-source",
       paint: {
-        "heatmap-weight": ["get", "intensity"],
-        "heatmap-intensity": 1.2,
-        "heatmap-color": [
-          "interpolate",
-          ["linear"],
-          ["heatmap-density"],
-          0, "rgba(0,0,0,0)",
-          0.1, colors[0],
-          0.3, colors[1],
-          0.5, colors[2],
-          0.7, colors[3],
-          1, colors[3],
-        ],
-        "heatmap-radius": 40,
-        "heatmap-opacity": 0.75,
+        "raster-opacity": 0.7,
       },
     });
-    
-    console.log(`Heatmap layer "${activeHeatmapLayer}" added with ${environmentalData.length} points`);
-  }, [activeHeatmapLayer, mapLoaded, generateEnvironmentalData]);
+  }, [activeHeatmapLayer, mapLoaded]);
 
   // Update markers
   useEffect(() => {

@@ -6,8 +6,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Layers, Mountain, Thermometer, CloudRain, TreePine, X } from "lucide-react";
-import { HeatmapLayerType } from "./MapLibreMap";
+import { Layers, Mountain, Thermometer, CloudRain, TreePine, Satellite, X } from "lucide-react";
+import { HeatmapLayerType, GIBS_LAYERS } from "./MapLibreMap";
 
 interface MapLayerControlsProps {
   is3DEnabled: boolean;
@@ -73,23 +73,13 @@ const MapLayerControls = ({
         </DropdownMenu>
       </div>
 
-      {/* Legend for active layer */}
+      {/* Source attribution for the active layer - real satellite imagery,
+          so its own baked-in color scale is shown rather than a guessed one */}
       {activeHeatmapLayer !== "none" && (
         <div className="mt-2 pt-2 border-t border-border/50">
-          <div className="text-xs text-muted-foreground mb-1">{activeLayer?.label} Legend</div>
-          <div className="flex items-center gap-1">
-            <span className="text-xs">Low</span>
-            <div 
-              className="flex-1 h-2 rounded-full"
-              style={{
-                background: activeHeatmapLayer === "vegetation" 
-                  ? "linear-gradient(to right, #f7fcb9, #addd8e, #31a354, #006837)"
-                  : activeHeatmapLayer === "temperature"
-                  ? "linear-gradient(to right, #ffffb2, #fecc5c, #fd8d3c, #e31a1c)"
-                  : "linear-gradient(to right, #f1eef6, #bdc9e1, #74a9cf, #0570b0)",
-              }}
-            />
-            <span className="text-xs">High</span>
+          <div className="flex items-start gap-1.5">
+            <Satellite className="h-3 w-3 text-muted-foreground mt-0.5 flex-shrink-0" />
+            <p className="text-[11px] text-muted-foreground leading-snug">{GIBS_LAYERS[activeHeatmapLayer].attribution}</p>
           </div>
         </div>
       )}

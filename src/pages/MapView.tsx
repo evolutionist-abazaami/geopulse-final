@@ -3,8 +3,8 @@ import MapLibreMap, { type MapLibreMapHandle } from "@/components/MapLibreMap";
 import { useMapContext } from "@/contexts/MapContext";
 import { MapToolbar } from "@/components/map-overlays/MapToolbar";
 import { AlertMarkers } from "@/components/map-overlays/AlertMarkers";
+import { MonitoredRegionMarkers } from "@/components/map-overlays/MonitoredRegionMarkers";
 import { MapLegend } from "@/components/map-overlays/MapLegend";
-import { MapHUD } from "@/components/map-overlays/MapHUD";
 
 export default function MapView() {
   const mapCtx = useMapContext();
@@ -39,8 +39,8 @@ export default function MapView() {
 
       <MapToolbar />
       <AlertMarkers />
+      <MonitoredRegionMarkers />
       <MapLegend />
-      <MapHUD />
     </div>
   );
 }

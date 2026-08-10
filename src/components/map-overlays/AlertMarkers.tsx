@@ -67,7 +67,14 @@ export function AlertMarkers() {
 
       const color = SEVERITY_COLOR[alert.severity] || SEVERITY_COLOR.low;
       const el = document.createElement("div");
-      el.style.position = "relative";
+      // Deliberately not setting position here: MapLibre's own .maplibregl-marker
+      // stylesheet rule already sets position: absolute, which shrink-wraps this
+      // element to its content (the dot). Overriding it to "relative" via inline
+      // style (which wins on specificity) turns this into a normal block box that
+      // stretches to the full width of the marker container - and since the ring
+      // below is `position: absolute; inset: -4px`, it then stretches to match,
+      // rendering as a translucent band across the whole map instead of a small
+      // pulsing ring. This was the exact cause of the "red band" bug report.
       el.style.cursor = "pointer";
 
       const dot = document.createElement("div");

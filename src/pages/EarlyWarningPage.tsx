@@ -1,21 +1,18 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
-import { Card } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   AlertTriangle, Bell, BellRing, MapPin, Thermometer, Droplets,
   Wind, CloudRain, Loader2, Plus, Trash2, CheckCircle, RefreshCw,
-  TrendingUp, Shield, Eye, Info, Zap, ChevronDown,
+  TrendingUp, Shield, Eye, Info, Zap, ChevronDown, Flame,
 } from "lucide-react";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 import { TrendChart } from "@/components/charts/TrendChart";
 
 type HazardAlert = {
@@ -61,14 +58,30 @@ type WeatherObservation = {
 };
 
 const HAZARD_TYPES = [
-  { value: "flood", label: "Flood", icon: Droplets, color: "text-blue-500" },
-  { value: "drought", label: "Drought", icon: Thermometer, color: "text-amber-500" },
-  { value: "fire", label: "Wildfire", icon: AlertTriangle, color: "text-red-500" },
-  { value: "storm", label: "Storm", icon: Wind, color: "text-purple-500" },
-  { value: "heatwave", label: "Heatwave", icon: Thermometer, color: "text-orange-500" },
-  { value: "pollution", label: "Pollution", icon: AlertTriangle, color: "text-emerald-500" },
-  { value: "heavy_metal", label: "Heavy Metal Contamination", icon: AlertTriangle, color: "text-rose-500" },
+  { value: "flood", label: "Flood" },
+  { value: "drought", label: "Drought" },
+  { value: "fire", label: "Wildfire" },
+  { value: "storm", label: "Storm" },
+  { value: "heatwave", label: "Heatwave" },
+  { value: "pollution", label: "Pollution" },
+  { value: "heavy_metal", label: "Heavy Metal Contamination" },
 ];
+
+// Same shape as Sidebar's eventTypeStyles, so hazard chips read consistently
+// with the analysis-history icons elsewhere in the app.
+const HAZARD_STYLES: Record<string, { bg: string; text: string; Icon: typeof Droplets }> = {
+  flood: { bg: "bg-event-flood/15", text: "text-event-flood", Icon: Droplets },
+  drought: { bg: "bg-warning-dim", text: "text-warning", Icon: Thermometer },
+  fire: { bg: "bg-event-wildfire/15", text: "text-event-wildfire", Icon: Flame },
+  storm: { bg: "bg-event-search/15", text: "text-event-search", Icon: Wind },
+  heatwave: { bg: "bg-event-wildfire/15", text: "text-event-wildfire", Icon: Thermometer },
+  pollution: { bg: "bg-stable-dim", text: "text-stable", Icon: AlertTriangle },
+  heavy_metal: { bg: "bg-critical-dim", text: "text-critical", Icon: AlertTriangle },
+};
+
+function hazardStyle(type: string) {
+  return HAZARD_STYLES[type] || HAZARD_STYLES.flood;
+}
 
 const METRICS = [
   { value: "temperature_c", label: "Temperature (°C)" },
@@ -85,12 +98,19 @@ const OPERATORS = [
   { value: "<=", label: "Less or equal (≤)" },
 ];
 
-const SEVERITY_COLORS: Record<string, string> = {
-  low: "bg-green-500/10 text-green-500 border-green-500/20",
-  moderate: "bg-amber-500/10 text-amber-500 border-amber-500/20",
-  high: "bg-orange-500/10 text-orange-500 border-orange-500/20",
-  critical: "bg-destructive/10 text-destructive border-destructive/20",
+// 4 hazard-alert severities mapped onto the app's 3 semantic tokens (low is
+// the only unambiguous "fine" state; moderate is cautionary; high/critical
+// both read as alarming, so they share the strongest token).
+const SEVERITY_STYLES: Record<string, { bg: string; text: string; border: string }> = {
+  low: { bg: "bg-stable-dim", text: "text-stable", border: "border-l-stable" },
+  moderate: { bg: "bg-warning-dim", text: "text-warning", border: "border-l-warning" },
+  high: { bg: "bg-critical-dim", text: "text-critical", border: "border-l-critical" },
+  critical: { bg: "bg-critical-dim", text: "text-critical", border: "border-l-critical" },
 };
+
+function severityStyle(sev: string) {
+  return SEVERITY_STYLES[sev] || SEVERITY_STYLES.moderate;
+}
 
 const DEFAULT_LOCATIONS = [
   { name: "Accra, Ghana", lat: 5.6037, lng: -0.1870 },
@@ -101,12 +121,13 @@ const DEFAULT_LOCATIONS = [
   { name: "Dar es Salaam, Tanzania", lat: -6.7924, lng: 39.2083 },
 ];
 
+type Tab = "alerts" | "thresholds" | "weather" | "trends";
+
 /**
- * Restored to match v1's EarlyWarning.tsx structure (Alerts + Thresholds +
- * Weather Data + Trends all together on this one page) - the v2 shell
- * initially split Alerts into the right panel and Thresholds into Settings,
- * but that was reverted per feedback: this page owns hazard monitoring
- * end-to-end, same as before.
+ * Alerts + Thresholds + Weather Data + Trends all together on this one page
+ * - this page owns hazard monitoring end-to-end. Restyled to match the v2
+ * shell design language (Sidebar/TopBar/RightPanel/ReportsPage) instead of
+ * the older generic shadcn Card/Badge/Tabs look.
  */
 export default function EarlyWarningPage() {
   const navigate = useNavigate();
@@ -117,6 +138,7 @@ export default function EarlyWarningPage() {
   const [observations, setObservations] = useState<WeatherObservation[]>([]);
   const [isIngesting, setIsIngesting] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [activeTab, setActiveTab] = useState<Tab>("alerts");
 
   const [newThreshold, setNewThreshold] = useState({
     region_name: "", lat: "", lng: "", hazard_type: "flood", metric: "rainfall_mm", operator: ">", threshold_value: "",
@@ -269,280 +291,364 @@ export default function EarlyWarningPage() {
   const activeAlerts = alerts.filter((a) => !a.is_resolved);
   const resolvedAlerts = alerts.filter((a) => a.is_resolved);
 
+  const TABS: { id: Tab; label: string; badge?: number }[] = [
+    { id: "alerts", label: "Alerts", badge: unreadCount },
+    { id: "thresholds", label: "Thresholds" },
+    { id: "weather", label: "Weather" },
+    { id: "trends", label: "Trends" },
+  ];
+
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center bg-gray-50 dark:bg-surface-base">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <Loader2 className="h-8 w-8 animate-spin text-brand" />
       </div>
     );
   }
 
   return (
-    <div className="h-full overflow-y-auto scrollbar-thin bg-gray-50 dark:bg-surface-base p-4 md:p-8">
-      <div className="max-w-7xl mx-auto space-y-6">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+    <div className="h-full overflow-y-auto scrollbar-thin bg-gray-50 dark:bg-surface-base p-6 md:p-8">
+      <div className="max-w-6xl mx-auto">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between mb-6">
           <div>
-            <h1 className="text-2xl md:text-4xl font-bold bg-gradient-ocean bg-clip-text text-transparent flex items-center gap-3">
-              <Shield className="h-8 w-8 text-primary" />
-              Early Warning System
+            <h1 className="text-[22px] font-semibold text-gray-900 dark:text-v2-primary flex items-center gap-2.5">
+              <Shield className="w-5 h-5 text-brand" />
+              Early Warning
             </h1>
-            <p className="text-muted-foreground mt-1">Automated environmental hazard monitoring and alerts for Africa</p>
+            <p className="text-[14px] text-gray-500 dark:text-v2-muted mt-1">Automated environmental hazard monitoring and alerts for Africa</p>
           </div>
           <div className="flex gap-2 flex-wrap">
-            <Button variant="outline" size="sm" onClick={handleIngestWeather} disabled={isIngesting}>
-              {isIngesting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-2" />}
+            <button
+              onClick={handleIngestWeather}
+              disabled={isIngesting}
+              className="flex items-center gap-1.5 px-3.5 py-2 text-[13px] font-medium text-gray-600 dark:text-v2-secondary bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-default rounded-md hover:border-gray-300 dark:hover:border-border-strong hover:text-gray-900 dark:hover:text-v2-primary disabled:opacity-50 transition-all duration-fast"
+            >
+              {isIngesting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
               Ingest Weather Now
-            </Button>
-            <Button size="sm" onClick={handleEvaluateHazards} disabled={isEvaluating} className="bg-gradient-ocean hover:opacity-90">
-              {isEvaluating ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <AlertTriangle className="h-4 w-4 mr-2" />}
+            </button>
+            <button
+              onClick={handleEvaluateHazards}
+              disabled={isEvaluating}
+              className="flex items-center gap-1.5 px-3.5 py-2 text-[13px] font-medium text-white bg-brand rounded-md hover:bg-blue-500 disabled:opacity-50 transition-all duration-fast"
+            >
+              {isEvaluating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <AlertTriangle className="h-3.5 w-3.5" />}
               Check Hazards Now
-            </Button>
+            </button>
           </div>
         </div>
 
-        <Collapsible>
-          <Card className="p-4 border-primary/20 bg-primary/5">
-            <CollapsibleTrigger className="flex items-center justify-between w-full">
+        <Collapsible className="mb-6">
+          <div className="rounded-xl border border-brand-border bg-brand-dim/30 p-4">
+            <CollapsibleTrigger className="flex items-center justify-between w-full group">
               <div className="flex items-center gap-2">
-                <Info className="h-4 w-4 text-primary" />
-                <span className="text-sm font-medium">How Early Warning detection works (and why it's useful)</span>
+                <Info className="h-4 w-4 text-brand" />
+                <span className="text-[13px] font-medium text-gray-900 dark:text-v2-primary">How Early Warning detection works (and why it's useful)</span>
               </div>
-              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+              <ChevronDown className="h-4 w-4 text-gray-400 dark:text-v2-muted transition-transform duration-fast group-data-[state=open]:rotate-180" />
             </CollapsibleTrigger>
-            <CollapsibleContent className="mt-3 space-y-3 text-sm text-muted-foreground">
-              <div className="flex items-start gap-2">
-                <div className="h-5 w-5 rounded-full bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary mt-0.5 flex-shrink-0">1</div>
-                <p><strong className="text-foreground">Real weather data is collected automatically.</strong> Every 30 minutes, current temperature, rainfall, soil moisture, wind speed, and humidity are fetched from the Open-Meteo API for each monitored location - no AI involved in this step, these are real measurements.</p>
+            <CollapsibleContent className="mt-3 space-y-3 text-[13px] text-gray-600 dark:text-v2-secondary">
+              <div className="flex items-start gap-2.5">
+                <div className="h-5 w-5 rounded-full bg-brand-dim flex items-center justify-center text-[10px] font-bold text-brand mt-0.5 flex-shrink-0">1</div>
+                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Real weather data is collected automatically.</strong> Every 30 minutes, current temperature, rainfall, soil moisture, wind speed, and humidity are fetched from the Open-Meteo API for each monitored location - no AI involved in this step, these are real measurements.</p>
               </div>
-              <div className="flex items-start gap-2">
-                <div className="h-5 w-5 rounded-full bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary mt-0.5 flex-shrink-0">2</div>
-                <p><strong className="text-foreground">Your thresholds are checked automatically.</strong> Every 15 minutes, each active threshold you've configured below (e.g. "temperature above 38°C in Accra") is compared against the latest real reading for that region using simple numeric comparison - not AI judgment.</p>
+              <div className="flex items-start gap-2.5">
+                <div className="h-5 w-5 rounded-full bg-brand-dim flex items-center justify-center text-[10px] font-bold text-brand mt-0.5 flex-shrink-0">2</div>
+                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Your thresholds are checked automatically.</strong> Every 15 minutes, each active threshold you've configured below (e.g. "temperature above 38°C in Accra") is compared against the latest real reading for that region using simple numeric comparison - not AI judgment.</p>
               </div>
-              <div className="flex items-start gap-2">
-                <div className="h-5 w-5 rounded-full bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary mt-0.5 flex-shrink-0">3</div>
-                <p><strong className="text-foreground">An alert is created when a threshold is exceeded.</strong> The AI assistant adds a short plain-language risk assessment alongside the real reading, but the alert itself is triggered by the real number crossing your real threshold - the AI narrates, it doesn't decide.</p>
+              <div className="flex items-start gap-2.5">
+                <div className="h-5 w-5 rounded-full bg-brand-dim flex items-center justify-center text-[10px] font-bold text-brand mt-0.5 flex-shrink-0">3</div>
+                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">An alert is created when a threshold is exceeded.</strong> The AI assistant adds a short plain-language risk assessment alongside the real reading, but the alert itself is triggered by the real number crossing your real threshold - the AI narrates, it doesn't decide.</p>
               </div>
-              <div className="pt-2 border-t border-border/50 flex items-start gap-2">
-                <Zap className="h-4 w-4 text-primary mt-0.5 flex-shrink-0" />
-                <p><strong className="text-foreground">Why this matters:</strong> because ingestion and evaluation now run on a schedule in the background, you don't have to keep this page open or click anything to catch an emerging condition - alerts accumulate here even while you're away.</p>
+              <div className="pt-2 border-t border-brand-border/50 flex items-start gap-2.5">
+                <Zap className="h-4 w-4 text-brand mt-0.5 flex-shrink-0" />
+                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Why this matters:</strong> because ingestion and evaluation now run on a schedule in the background, you don't have to keep this page open or click anything to catch an emerging condition - alerts accumulate here even while you're away.</p>
               </div>
             </CollapsibleContent>
-          </Card>
+          </div>
         </Collapsible>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <Card className="p-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+          <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-4">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-destructive/10"><BellRing className="h-5 w-5 text-destructive" /></div>
-              <div><p className="text-xs text-muted-foreground">Unread Alerts</p><p className="text-xl font-bold">{unreadCount}</p></div>
+              <div className="w-9 h-9 rounded-lg bg-critical-dim flex items-center justify-center flex-shrink-0"><BellRing className="h-[18px] w-[18px] text-critical" /></div>
+              <div className="min-w-0"><p className="text-[11px] text-gray-400 dark:text-v2-muted truncate">Unread Alerts</p><p className="text-[20px] font-semibold text-gray-900 dark:text-v2-primary">{unreadCount}</p></div>
             </div>
-          </Card>
-          <Card className="p-4">
+          </div>
+          <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-4">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-amber-500/10"><AlertTriangle className="h-5 w-5 text-amber-500" /></div>
-              <div><p className="text-xs text-muted-foreground">Active Alerts</p><p className="text-xl font-bold">{activeAlerts.length}</p></div>
+              <div className="w-9 h-9 rounded-lg bg-warning-dim flex items-center justify-center flex-shrink-0"><AlertTriangle className="h-[18px] w-[18px] text-warning" /></div>
+              <div className="min-w-0"><p className="text-[11px] text-gray-400 dark:text-v2-muted truncate">Active Alerts</p><p className="text-[20px] font-semibold text-gray-900 dark:text-v2-primary">{activeAlerts.length}</p></div>
             </div>
-          </Card>
-          <Card className="p-4">
+          </div>
+          <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-4">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-primary/10"><TrendingUp className="h-5 w-5 text-primary" /></div>
-              <div><p className="text-xs text-muted-foreground">Thresholds</p><p className="text-xl font-bold">{thresholds.length}</p></div>
+              <div className="w-9 h-9 rounded-lg bg-brand-dim flex items-center justify-center flex-shrink-0"><TrendingUp className="h-[18px] w-[18px] text-brand" /></div>
+              <div className="min-w-0"><p className="text-[11px] text-gray-400 dark:text-v2-muted truncate">Thresholds</p><p className="text-[20px] font-semibold text-gray-900 dark:text-v2-primary">{thresholds.length}</p></div>
             </div>
-          </Card>
-          <Card className="p-4">
+          </div>
+          <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-4">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-secondary/10"><CloudRain className="h-5 w-5 text-secondary" /></div>
-              <div><p className="text-xs text-muted-foreground">Observations</p><p className="text-xl font-bold">{observations.length}</p></div>
+              <div className="w-9 h-9 rounded-lg bg-stable-dim flex items-center justify-center flex-shrink-0"><CloudRain className="h-[18px] w-[18px] text-stable" /></div>
+              <div className="min-w-0"><p className="text-[11px] text-gray-400 dark:text-v2-muted truncate">Observations</p><p className="text-[20px] font-semibold text-gray-900 dark:text-v2-primary">{observations.length}</p></div>
             </div>
-          </Card>
+          </div>
         </div>
 
-        <Tabs defaultValue="alerts" className="space-y-4">
-          <TabsList className="grid w-full grid-cols-4">
-            <TabsTrigger value="alerts" className="relative">
-              Alerts
-              {unreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-destructive text-destructive-foreground text-[10px] flex items-center justify-center">{unreadCount}</span>
+        <div className="flex border-b border-gray-200 dark:border-border-subtle mb-5">
+          {TABS.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={cn(
+                "relative text-[13px] py-2.5 px-4 border-b-2 transition-all duration-fast",
+                activeTab === tab.id
+                  ? "text-brand border-brand font-medium"
+                  : "text-gray-400 dark:text-v2-muted border-transparent hover:text-gray-600 dark:hover:text-v2-secondary"
               )}
-            </TabsTrigger>
-            <TabsTrigger value="thresholds">Thresholds</TabsTrigger>
-            <TabsTrigger value="weather">Weather Data</TabsTrigger>
-            <TabsTrigger value="trends">Trends</TabsTrigger>
-          </TabsList>
+            >
+              {tab.label}
+              {!!tab.badge && (
+                <span className="ml-1.5 inline-flex items-center justify-center min-w-[16px] h-4 px-1 text-[10px] font-medium bg-critical text-white rounded-full">
+                  {tab.badge}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
 
-          <TabsContent value="alerts" className="space-y-4">
+        {activeTab === "alerts" && (
+          <div className="space-y-3">
             {activeAlerts.length === 0 && resolvedAlerts.length === 0 ? (
-              <Card className="p-8 text-center">
-                <Bell className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-                <p className="text-muted-foreground">No alerts yet. Set up monitoring thresholds and run evaluations.</p>
-              </Card>
+              <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-10 text-center">
+                <Bell className="h-10 w-10 mx-auto text-gray-300 dark:text-v2-disabled mb-3" />
+                <p className="text-[13px] text-gray-400 dark:text-v2-muted">No alerts yet. Set up monitoring thresholds and run evaluations.</p>
+              </div>
             ) : (
-              <div className="space-y-3">
+              <>
                 {activeAlerts.length > 0 && (
                   <>
-                    <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Active Alerts</h3>
-                    {activeAlerts.map((alert) => (
-                      <Card key={alert.id} className={`p-4 border-l-4 ${!alert.is_read ? "border-l-destructive bg-destructive/5" : "border-l-border"}`}>
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1 space-y-2">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <Badge variant="outline" className={SEVERITY_COLORS[alert.severity]}>{alert.severity}</Badge>
-                              <Badge variant="outline" className="capitalize">{alert.hazard_type}</Badge>
-                              <span className="text-xs text-muted-foreground">{new Date(alert.created_at).toLocaleString()}</span>
-                            </div>
-                            <h4 className="font-semibold text-sm">{alert.title}</h4>
-                            {alert.description && <p className="text-xs text-muted-foreground">{alert.description}</p>}
-                            {alert.ai_analysis?.assessment && (
-                              <div className="mt-2 p-3 rounded-lg bg-muted/50 border border-border">
-                                <p className="text-xs font-medium text-primary mb-1">AI Risk Assessment</p>
-                                <p className="text-xs text-muted-foreground">{alert.ai_analysis.assessment}</p>
+                    <p className="text-[11px] text-gray-400 dark:text-v2-muted uppercase tracking-[0.08em]">Active alerts</p>
+                    {activeAlerts.map((alert) => {
+                      const sev = severityStyle(alert.severity);
+                      const { bg, text, Icon } = hazardStyle(alert.hazard_type);
+                      return (
+                        <div
+                          key={alert.id}
+                          className={cn(
+                            "bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-4 border-l-4",
+                            !alert.is_read ? sev.border : "border-l-transparent"
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex items-start gap-3 flex-1 min-w-0">
+                              <div className={cn("w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0 mt-0.5", bg)}>
+                                <Icon className={cn("w-4 h-4", text)} />
                               </div>
-                            )}
-                          </div>
-                          <div className="flex flex-col gap-1">
-                            {!alert.is_read && (
-                              <Button variant="ghost" size="icon" onClick={() => handleMarkRead(alert.id)} title="Mark as read"><Eye className="h-4 w-4" /></Button>
-                            )}
-                            <Button variant="ghost" size="icon" onClick={() => handleResolveAlert(alert.id)} title="Resolve"><CheckCircle className="h-4 w-4 text-secondary" /></Button>
+                              <div className="flex-1 min-w-0 space-y-1.5">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className={cn("text-[11px] font-medium px-2 py-0.5 rounded-full capitalize", sev.bg, sev.text)}>{alert.severity}</span>
+                                  <span className="text-[11px] font-medium px-2 py-0.5 rounded-full capitalize bg-gray-100 dark:bg-surface-3 text-gray-600 dark:text-v2-secondary">{alert.hazard_type}</span>
+                                  <span className="text-[11px] text-gray-400 dark:text-v2-muted">{new Date(alert.created_at).toLocaleString()}</span>
+                                </div>
+                                <h4 className="font-medium text-[13px] text-gray-900 dark:text-v2-primary">{alert.title}</h4>
+                                {alert.description && <p className="text-[12px] text-gray-500 dark:text-v2-muted">{alert.description}</p>}
+                                {alert.ai_analysis?.assessment && (
+                                  <div className="mt-1.5 p-2.5 rounded-md bg-brand-dim/30 border border-brand-border">
+                                    <p className="text-[11px] font-medium text-brand mb-1">AI Risk Assessment</p>
+                                    <p className="text-[12px] text-gray-600 dark:text-v2-secondary">{alert.ai_analysis.assessment}</p>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                            <div className="flex flex-col gap-1 flex-shrink-0">
+                              {!alert.is_read && (
+                                <button
+                                  onClick={() => handleMarkRead(alert.id)}
+                                  title="Mark as read"
+                                  className="w-7 h-7 flex items-center justify-center rounded-md text-gray-400 dark:text-v2-muted hover:bg-gray-100 dark:hover:bg-surface-3 hover:text-gray-900 dark:hover:text-v2-primary transition-all duration-fast"
+                                >
+                                  <Eye className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleResolveAlert(alert.id)}
+                                title="Resolve"
+                                className="w-7 h-7 flex items-center justify-center rounded-md text-gray-400 dark:text-v2-muted hover:bg-stable-dim hover:text-stable transition-all duration-fast"
+                              >
+                                <CheckCircle className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
                           </div>
                         </div>
-                      </Card>
-                    ))}
+                      );
+                    })}
                   </>
                 )}
                 {resolvedAlerts.length > 0 && (
                   <>
-                    <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mt-6">Resolved</h3>
+                    <p className="text-[11px] text-gray-400 dark:text-v2-muted uppercase tracking-[0.08em] mt-5">Resolved</p>
                     {resolvedAlerts.slice(0, 10).map((alert) => (
-                      <Card key={alert.id} className="p-3 opacity-60">
+                      <div key={alert.id} className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-lg p-3 opacity-60">
                         <div className="flex items-center gap-2">
-                          <CheckCircle className="h-4 w-4 text-secondary" />
-                          <span className="text-sm">{alert.title}</span>
-                          <Badge variant="outline" className="capitalize text-xs">{alert.severity}</Badge>
-                          <span className="text-xs text-muted-foreground ml-auto">{new Date(alert.created_at).toLocaleDateString()}</span>
+                          <CheckCircle className="h-3.5 w-3.5 text-stable flex-shrink-0" />
+                          <span className="text-[13px] text-gray-700 dark:text-v2-secondary truncate">{alert.title}</span>
+                          <span className="text-[11px] font-medium px-2 py-0.5 rounded-full capitalize bg-gray-100 dark:bg-surface-3 text-gray-500 dark:text-v2-muted flex-shrink-0">{alert.severity}</span>
+                          <span className="text-[11px] text-gray-400 dark:text-v2-muted ml-auto flex-shrink-0">{new Date(alert.created_at).toLocaleDateString()}</span>
                         </div>
-                      </Card>
+                      </div>
                     ))}
                   </>
                 )}
-              </div>
+              </>
             )}
-          </TabsContent>
+          </div>
+        )}
 
-          <TabsContent value="thresholds" className="space-y-4">
-            <Card className="p-4 space-y-4">
-              <h3 className="font-semibold flex items-center gap-2"><Plus className="h-4 w-4" /> Add Monitoring Threshold</h3>
+        {activeTab === "thresholds" && (
+          <div className="space-y-4">
+            <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-4 space-y-4">
+              <h3 className="text-[13px] font-medium text-gray-900 dark:text-v2-primary flex items-center gap-2"><Plus className="h-4 w-4 text-brand" /> Add Monitoring Threshold</h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div className="space-y-1">
-                  <Label className="text-xs">Region</Label>
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-gray-400 dark:text-v2-muted uppercase tracking-[0.06em]">Region</Label>
                   <Select value={newThreshold.region_name} onValueChange={(v) => setNewThreshold((p) => ({ ...p, region_name: v }))}>
                     <SelectTrigger><SelectValue placeholder="Select region" /></SelectTrigger>
                     <SelectContent>{DEFAULT_LOCATIONS.map((l) => <SelectItem key={l.name} value={l.name}>{l.name}</SelectItem>)}</SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Hazard Type</Label>
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-gray-400 dark:text-v2-muted uppercase tracking-[0.06em]">Hazard Type</Label>
                   <Select value={newThreshold.hazard_type} onValueChange={(v) => setNewThreshold((p) => ({ ...p, hazard_type: v }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>{HAZARD_TYPES.map((h) => <SelectItem key={h.value} value={h.value}>{h.label}</SelectItem>)}</SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Metric</Label>
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-gray-400 dark:text-v2-muted uppercase tracking-[0.06em]">Metric</Label>
                   <Select value={newThreshold.metric} onValueChange={(v) => setNewThreshold((p) => ({ ...p, metric: v }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>{METRICS.map((m) => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}</SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Condition</Label>
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-gray-400 dark:text-v2-muted uppercase tracking-[0.06em]">Condition</Label>
                   <Select value={newThreshold.operator} onValueChange={(v) => setNewThreshold((p) => ({ ...p, operator: v }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>{OPERATORS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Threshold Value</Label>
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-gray-400 dark:text-v2-muted uppercase tracking-[0.06em]">Threshold Value</Label>
                   <Input type="number" placeholder="e.g. 50" value={newThreshold.threshold_value} onChange={(e) => setNewThreshold((p) => ({ ...p, threshold_value: e.target.value }))} />
                 </div>
                 <div className="flex items-end">
-                  <Button onClick={handleAddThreshold} className="w-full bg-gradient-ocean hover:opacity-90"><Plus className="h-4 w-4 mr-2" /> Add Threshold</Button>
+                  <button
+                    onClick={handleAddThreshold}
+                    className="w-full flex items-center justify-center gap-1.5 px-3.5 py-2 text-[13px] font-medium text-white bg-brand rounded-md hover:bg-blue-500 transition-all duration-fast"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> Add Threshold
+                  </button>
                 </div>
               </div>
-            </Card>
+            </div>
 
             <div className="space-y-2">
               {thresholds.length === 0 ? (
-                <Card className="p-8 text-center">
-                  <TrendingUp className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-                  <p className="text-muted-foreground">No monitoring thresholds set. Create one above to start monitoring.</p>
-                </Card>
+                <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-10 text-center">
+                  <TrendingUp className="h-10 w-10 mx-auto text-gray-300 dark:text-v2-disabled mb-3" />
+                  <p className="text-[13px] text-gray-400 dark:text-v2-muted">No monitoring thresholds set. Create one above to start monitoring.</p>
+                </div>
               ) : (
-                thresholds.map((t) => (
-                  <Card key={t.id} className="p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <MapPin className="h-3 w-3 text-muted-foreground" />
-                          <span className="text-sm font-medium">{t.region_name}</span>
-                          <Badge variant="outline" className="capitalize text-xs">{t.hazard_type}</Badge>
+                thresholds.map((t) => {
+                  const { bg, text, Icon } = hazardStyle(t.hazard_type);
+                  return (
+                    <div key={t.id} className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-lg p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3 flex-1 min-w-0">
+                          <div className={cn("w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0", bg)}>
+                            <Icon className={cn("w-4 h-4", text)} />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <MapPin className="h-3 w-3 text-gray-400 dark:text-v2-muted flex-shrink-0" />
+                              <span className="text-[13px] font-medium text-gray-900 dark:text-v2-primary truncate">{t.region_name}</span>
+                              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full capitalize bg-gray-100 dark:bg-surface-3 text-gray-600 dark:text-v2-secondary">{t.hazard_type}</span>
+                            </div>
+                            <p className="text-[12px] text-gray-400 dark:text-v2-muted mt-1">{METRICS.find((m) => m.value === t.metric)?.label} {t.operator} {t.threshold_value}</p>
+                          </div>
                         </div>
-                        <p className="text-xs text-muted-foreground mt-1">{METRICS.find((m) => m.value === t.metric)?.label} {t.operator} {t.threshold_value}</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Switch checked={t.is_active} onCheckedChange={(v) => handleToggleThreshold(t.id, v)} />
-                        <Button variant="ghost" size="icon" onClick={() => handleDeleteThreshold(t.id)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          <Switch checked={t.is_active} onCheckedChange={(v) => handleToggleThreshold(t.id, v)} />
+                          <button
+                            onClick={() => handleDeleteThreshold(t.id)}
+                            className="w-7 h-7 flex items-center justify-center rounded-md text-gray-400 dark:text-v2-muted hover:bg-critical-dim hover:text-critical transition-all duration-fast"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </Card>
-                ))
+                  );
+                })
               )}
             </div>
-          </TabsContent>
+          </div>
+        )}
 
-          <TabsContent value="weather" className="space-y-4">
+        {activeTab === "weather" && (
+          <div>
             {observations.length === 0 ? (
-              <Card className="p-8 text-center">
-                <CloudRain className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-                <p className="text-muted-foreground">No weather data yet. Click "Ingest Weather" to fetch real-time data.</p>
-              </Card>
+              <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-10 text-center">
+                <CloudRain className="h-10 w-10 mx-auto text-gray-300 dark:text-v2-disabled mb-3" />
+                <p className="text-[13px] text-gray-400 dark:text-v2-muted">No weather data yet. Click "Ingest Weather Now" to fetch real-time data.</p>
+              </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                 {Array.from(new Set(observations.map((o) => o.region_name))).map((region) => {
                   const latest = observations.find((o) => o.region_name === region)!;
                   return (
-                    <Card key={region} className="p-4 space-y-3">
-                      <div className="flex items-center gap-2"><MapPin className="h-4 w-4 text-primary" /><h4 className="font-semibold text-sm">{region}</h4></div>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div className="flex items-center gap-1.5"><Thermometer className="h-3 w-3 text-orange-500" /><span className="text-muted-foreground">Temp:</span><span className="font-medium">{latest.temperature_c?.toFixed(1) ?? "—"}°C</span></div>
-                        <div className="flex items-center gap-1.5"><CloudRain className="h-3 w-3 text-blue-500" /><span className="text-muted-foreground">Rain:</span><span className="font-medium">{latest.rainfall_mm?.toFixed(1) ?? "—"} mm</span></div>
-                        <div className="flex items-center gap-1.5"><Droplets className="h-3 w-3 text-cyan-500" /><span className="text-muted-foreground">Soil:</span><span className="font-medium">{latest.soil_moisture?.toFixed(2) ?? "—"}</span></div>
-                        <div className="flex items-center gap-1.5"><Wind className="h-3 w-3 text-purple-500" /><span className="text-muted-foreground">Wind:</span><span className="font-medium">{latest.wind_speed_kmh?.toFixed(1) ?? "—"} km/h</span></div>
+                    <div key={region} className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-4 space-y-3">
+                      <div className="flex items-center gap-2"><MapPin className="h-4 w-4 text-brand" /><h4 className="font-medium text-[13px] text-gray-900 dark:text-v2-primary">{region}</h4></div>
+                      <div className="grid grid-cols-2 gap-2 text-[12px]">
+                        <div className="flex items-center gap-1.5"><Thermometer className="h-3.5 w-3.5 text-event-wildfire flex-shrink-0" /><span className="text-gray-400 dark:text-v2-muted">Temp:</span><span className="font-medium text-gray-900 dark:text-v2-primary">{latest.temperature_c?.toFixed(1) ?? "—"}°C</span></div>
+                        <div className="flex items-center gap-1.5"><CloudRain className="h-3.5 w-3.5 text-event-flood flex-shrink-0" /><span className="text-gray-400 dark:text-v2-muted">Rain:</span><span className="font-medium text-gray-900 dark:text-v2-primary">{latest.rainfall_mm?.toFixed(1) ?? "—"} mm</span></div>
+                        <div className="flex items-center gap-1.5"><Droplets className="h-3.5 w-3.5 text-brand flex-shrink-0" /><span className="text-gray-400 dark:text-v2-muted">Soil:</span><span className="font-medium text-gray-900 dark:text-v2-primary">{latest.soil_moisture?.toFixed(2) ?? "—"}</span></div>
+                        <div className="flex items-center gap-1.5"><Wind className="h-3.5 w-3.5 text-event-search flex-shrink-0" /><span className="text-gray-400 dark:text-v2-muted">Wind:</span><span className="font-medium text-gray-900 dark:text-v2-primary">{latest.wind_speed_kmh?.toFixed(1) ?? "—"} km/h</span></div>
                       </div>
-                      <p className="text-[10px] text-muted-foreground">Updated: {new Date(latest.observation_date).toLocaleString()}</p>
-                    </Card>
+                      <p className="text-[10px] text-gray-400 dark:text-v2-muted">Updated: {new Date(latest.observation_date).toLocaleString()}</p>
+                    </div>
                   );
                 })}
               </div>
             )}
-          </TabsContent>
+          </div>
+        )}
 
-          <TabsContent value="trends" className="space-y-4">
+        {activeTab === "trends" && (
+          <div>
             {observations.length === 0 ? (
-              <Card className="p-8 text-center">
-                <TrendingUp className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-                <p className="text-muted-foreground">No data to chart. Ingest weather data first.</p>
-              </Card>
+              <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-10 text-center">
+                <TrendingUp className="h-10 w-10 mx-auto text-gray-300 dark:text-v2-disabled mb-3" />
+                <p className="text-[13px] text-gray-400 dark:text-v2-muted">No data to chart. Ingest weather data first.</p>
+              </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <TrendChart data={getTrendData("temperature_c")} title="Temperature Trend (°C)" color="hsl(25 95% 53%)" />
-                <TrendChart data={getTrendData("rainfall_mm")} title="Rainfall Trend (mm)" color="hsl(210 100% 50%)" />
-                <TrendChart data={getTrendData("soil_moisture")} title="Soil Moisture Trend" color="hsl(180 70% 45%)" />
-                <TrendChart data={getTrendData("wind_speed_kmh")} title="Wind Speed Trend (km/h)" color="hsl(270 70% 55%)" />
+                <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-4">
+                  <TrendChart data={getTrendData("temperature_c")} title="Temperature Trend (°C)" color="hsl(25 95% 53%)" />
+                </div>
+                <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-4">
+                  <TrendChart data={getTrendData("rainfall_mm")} title="Rainfall Trend (mm)" color="hsl(210 100% 50%)" />
+                </div>
+                <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-4">
+                  <TrendChart data={getTrendData("soil_moisture")} title="Soil Moisture Trend" color="hsl(180 70% 45%)" />
+                </div>
+                <div className="bg-white dark:bg-surface-1 border border-gray-200 dark:border-border-subtle rounded-xl p-4">
+                  <TrendChart data={getTrendData("wind_speed_kmh")} title="Wind Speed Trend (km/h)" color="hsl(270 70% 55%)" />
+                </div>
               </div>
             )}
-          </TabsContent>
-        </Tabs>
+          </div>
+        )}
       </div>
     </div>
   );
