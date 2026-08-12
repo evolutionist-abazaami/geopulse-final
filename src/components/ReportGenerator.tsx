@@ -1922,7 +1922,18 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         <Label className="text-sm font-medium mb-2 block">Report Format</Label>
         <Select value={reportType} onValueChange={(v) => setReportType(v as "professional" | "simple")}>
           <SelectTrigger className="bg-card">
-            <SelectValue />
+            <SelectValue>
+              <span className="flex items-center gap-2">
+                {reportType === "professional" ? (
+                  <BarChart3 className="h-4 w-4 text-primary" />
+                ) : (
+                  <FileText className="h-4 w-4 text-muted-foreground" />
+                )}
+                <span className="font-medium">
+                  {reportType === "professional" ? "Professional Report" : "Summary Report"}
+                </span>
+              </span>
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="professional">
@@ -2226,18 +2237,18 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           Preview Report
         </Button>
         <Button
-          className="flex-1 h-12 text-base font-medium"
+          className="flex-1"
           onClick={generatePDFReport}
           disabled={isGenerating || !analysisData}
         >
           {isGenerating ? (
             <>
-              <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               Generating...
             </>
           ) : (
             <>
-              <Download className="h-5 w-5 mr-2" />
+              <Download className="h-4 w-4 mr-2" />
               Download Report
             </>
           )}

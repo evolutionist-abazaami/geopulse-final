@@ -349,15 +349,15 @@ export default function EarlyWarningPage() {
             <CollapsibleContent className="mt-3 space-y-3 text-[13px] text-gray-600 dark:text-v2-secondary">
               <div className="flex items-start gap-2.5">
                 <div className="h-5 w-5 rounded-full bg-brand-dim flex items-center justify-center text-[10px] font-bold text-brand mt-0.5 flex-shrink-0">1</div>
-                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Real weather data is collected automatically.</strong> Every 30 minutes, current temperature, rainfall, soil moisture, wind speed, and humidity are fetched from the Open-Meteo API for each monitored location - no AI involved in this step, these are real measurements.</p>
+                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Real weather data is collected automatically.</strong> Every 30 minutes, current temperature, rainfall, soil moisture, wind speed, and humidity are fetched from the Open-Meteo API for each monitored location.</p>
               </div>
               <div className="flex items-start gap-2.5">
                 <div className="h-5 w-5 rounded-full bg-brand-dim flex items-center justify-center text-[10px] font-bold text-brand mt-0.5 flex-shrink-0">2</div>
-                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Your thresholds are checked automatically.</strong> Every 15 minutes, each active threshold you've configured below (e.g. "temperature above 38°C in Accra") is compared against the latest real reading for that region using simple numeric comparison - not AI judgment.</p>
+                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Your thresholds are checked automatically.</strong> Every 15 minutes, each active threshold you've configured below (e.g. "temperature above 38°C in Accra") is compared against the latest real reading for that region.</p>
               </div>
               <div className="flex items-start gap-2.5">
                 <div className="h-5 w-5 rounded-full bg-brand-dim flex items-center justify-center text-[10px] font-bold text-brand mt-0.5 flex-shrink-0">3</div>
-                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">An alert is created when a threshold is exceeded.</strong> The AI assistant adds a short plain-language risk assessment alongside the real reading, but the alert itself is triggered by the real number crossing your real threshold - the AI narrates, it doesn't decide.</p>
+                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">An alert is created when a threshold is exceeded.</strong> The AI assistant adds a short plain-language risk assessment alongside the real reading that crossed your threshold.</p>
               </div>
               <div className="pt-2 border-t border-brand-border/50 flex items-start gap-2.5">
                 <Zap className="h-4 w-4 text-brand mt-0.5 flex-shrink-0" />
