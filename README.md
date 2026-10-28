@@ -1,7 +1,7 @@
 # GeoPulse
 
 GeoPulse is a geospatial environmental monitoring application. It combines
-Sentinel-2 satellite measurements, weather observations, geocoding, and
+satellite measurements, weather observations, geocoding, and
 model-generated explanations while keeping measurement provenance explicit.
 
 ## Data flow and provenance
@@ -11,10 +11,21 @@ model-generated explanations while keeping measurement provenance explicit.
   model-provided coordinates are retained only with an unverified
   `ai_estimate` label. Search confidence is model-generated, not a measurement.
 - **Satellite measurements:** `analyze-satellite` requests Sentinel-2 MSI L2A
-  statistics from the Copernicus Data Space Sentinel Hub API. The AOI is
+  statistics for studies starting on or after June 23, 2015. Older study
+  periods use the date-appropriate Landsat Collection 2 Level-2 collection
+  (TM, ETM+, or OLI-TIRS) through Google Earth Engine. Historical Landsat
+  statistics require an Earth Engine-enabled Google Cloud project and a
+  service account; Sentinel-2 continues to use the Copernicus Data Space
+  credentials. The earliest supported Landsat Level-2 date is August 1982.
+  The selected sensor is reported with the results; cross-mission comparisons
+  are identified rather than presented as same-sensor measurements. The AOI is
   approximately 11 km across (±0.05° around the selected point), aggregated on
-  a 128×128 statistics grid. Scenes are limited to 60% cloud coverage and
-  Sentinel-2 SCL classes 3, 8, 9, and 10 are masked.
+  a 128×128 statistics grid. Sentinel-2 scenes are limited to 60% cloud
+  coverage; Landsat cloud and quality flags are masked at the pixel level.
+  Sentinel-2 SCL classes 3, 8, 9, and 10 are masked; Landsat Collection 2
+  fill, dilated cloud, cirrus, cloud, shadow, and snow QA flags are masked.
+  Landsat surface-reflectance scale and offset are applied before computing
+  spectral indices.
 - **Measured versus generated output:** NDVI, NDWI, NBR, valid-pixel ratio,
   change, and supported trend calculations come from satellite statistics.
   When those measurements are unavailable, numeric satellite fields are null.
@@ -62,6 +73,8 @@ environment. Never commit `.env` files or secret values.
 | `GROQ_API_KEY` | Generated analysis, assistant, search, and hazard narratives |
 | `SENTINELHUB_CLIENT_ID` | Sentinel Hub client credentials for measured imagery/statistics |
 | `SENTINELHUB_CLIENT_SECRET` | Sentinel Hub client credentials for measured imagery/statistics |
+| `EARTH_ENGINE_PROJECT_ID` | Google Cloud project registered for Earth Engine |
+| `EARTH_ENGINE_SERVICE_ACCOUNT_JSON` | Service-account key JSON for server-side Earth Engine requests |
 | `GEMINI_API_KEY` | Gemini-generated visualization fallback |
 | `CRON_SHARED_SECRET` | Shared authorization value for scheduled Edge Function calls |
 

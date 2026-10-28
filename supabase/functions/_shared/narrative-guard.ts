@@ -73,13 +73,14 @@ export function buildDeterministicSummary(
     areaKm2: number;
     nearZeroBaseline: boolean;
   } | null,
+  sensor = "Sentinel-2 MSI L2A",
 ): string {
   if (!measurements) {
-    return `No measured Sentinel-2 values are available for ${region} from ${startDate} to ${endDate}.`;
+    return `No measured ${sensor} values are available for ${region} from ${startDate} to ${endDate}.`;
   }
 
   const change = measurements.nearZeroBaseline
     ? `${measurements.changePercent.toFixed(1)} percentage points`
     : `${measurements.changePercent.toFixed(1)}%`;
-  return `Measured Sentinel-2 NDVI in ${region} changed from ${measurements.ndviBefore.toFixed(3)} to ${measurements.ndviAfter.toFixed(3)} between ${startDate} and ${endDate} (change: ${change}). The analysis covers ${measurements.areaKm2.toFixed(2)} km2 with ${(measurements.validPixelRatio * 100).toFixed(1)}% valid-pixel coverage.`;
+  return `Measured ${sensor} NDVI in ${region} changed from ${measurements.ndviBefore.toFixed(3)} to ${measurements.ndviAfter.toFixed(3)} between ${startDate} and ${endDate} (change: ${change}). The analysis covers ${measurements.areaKm2.toFixed(2)} km2 with ${(measurements.validPixelRatio * 100).toFixed(1)}% valid-pixel coverage.`;
 }

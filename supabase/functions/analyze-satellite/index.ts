@@ -11,6 +11,7 @@ import {
   SECOND_INTERIOR_SAMPLE_MIN_GAP_DAYS,
   SENTINEL_2_BAND_RESOLUTIONS_METERS,
   SENTINEL_2_SENSOR,
+  SENTINEL_2_START_DATE,
   STATISTICS_GRID_SIZE,
 } from "../_shared/analysis-constants.ts";
 import type { FallbackReason } from "../_shared/analysis-constants.ts";
@@ -27,6 +28,12 @@ import type {
   SpectralBandStats,
 } from "../_shared/satellite-analysis.ts";
 import { fetchSpectralStatistics } from "../_shared/sentinel-statistics.ts";
+import {
+  fetchLandsatStatistics,
+  getLandsatSourceForDate,
+  hasEarthEngineCredentials,
+} from "../_shared/earth-engine-statistics.ts";
+import type { LandsatStatsSource } from "../_shared/earth-engine-statistics.ts";
 import type { SpectralStatsResult } from "../_shared/sentinel-statistics.ts";
 import { groqChatCompletion } from "../_shared/groq-client.ts";
 import {
@@ -147,7 +154,12 @@ function cleanTextArray(value: unknown): string[] {
     .filter((s) => s.trim().length > 0);
 }
 
-function getAnalysisSensorInfo(lat: number | null, lng: number | null) {
+function getAnalysisSensorInfo(
+  lat: number | null,
+  lng: number | null,
+  sources: (LandsatStatsSource | null | undefined)[] = [],
+  historicalAnalysis = false,
+) {
   const widthMeters = lat === null
     ? null
     : 2 * AOI_HALF_WIDTH_DEGREES * 111_320 * Math.cos((lat * Math.PI) / 180);
@@ -156,15 +168,50 @@ function getAnalysisSensorInfo(lat: number | null, lng: number | null) {
     ? null
     : { x: widthMeters / STATISTICS_GRID_SIZE, y: heightMeters / STATISTICS_GRID_SIZE };
 
+  const resolvedSources = sources.filter(
+    (source): source is LandsatStatsSource => source !== null && source !== undefined,
+  );
+  const sensorNames = [...new Set(sources.map((source) =>
+    source === null ? null : source?.sensor ?? SENTINEL_2_SENSOR
+  ).filter((name): name is string => name !== null))];
+  const sensor = sensorNames.length
+    ? sensorNames.join(" / ")
+    : historicalAnalysis ? "Landsat Collection 2 Level-2 (TM/ETM+/OLI-TIRS)" : SENTINEL_2_SENSOR;
+  const bandResolutions = resolvedSources.length
+    ? Object.assign({}, ...resolvedSources.map((source) => source.nativeBandResolutionsMeters))
+    : historicalAnalysis
+      ? { SR_B2: 30, SR_B3: 30, SR_B4: 30, SR_B5: 30, SR_B6: 30, SR_B7: 30 }
+      : SENTINEL_2_BAND_RESOLUTIONS_METERS;
   return {
-    sensor: SENTINEL_2_SENSOR,
+    sensor,
     statistics_grid: `${STATISTICS_GRID_SIZE}x${STATISTICS_GRID_SIZE}`,
     metres_per_cell: metresPerCell,
-    native_band_resolutions_m: SENTINEL_2_BAND_RESOLUTIONS_METERS,
+    native_band_resolutions_m: bandResolutions,
     aoi_half_width_degrees: AOI_HALF_WIDTH_DEGREES,
     center: lat !== null && lng !== null ? { lat, lng } : null,
-    processing_level: "Level-2A",
+    processing_level: resolvedSources.length || historicalAnalysis ? "Collection 2 Level-2" : "Level-2A",
   };
+}
+
+function getMeasurementUnavailableMessage(
+  reason: FallbackReason | null,
+  historicalAnalysis: boolean,
+): string {
+  if (reason === "NO_CREDENTIALS") {
+    return historicalAnalysis
+      ? "Landsat measurements require an Earth Engine-enabled Google Cloud project and service account."
+      : "Sentinel-2 measurement credentials are not configured.";
+  }
+  if (reason === "NO_DATA_FOR_DATE_RANGE") {
+    return "No supported Landsat Level-2 source covers the selected periods; this implementation supports data from August 1982 onward.";
+  }
+  if (reason === "INSUFFICIENT_VALID_PIXELS") {
+    return "The selected periods did not contain enough valid, cloud-free satellite pixels.";
+  }
+  if (reason === "NO_COORDINATES") {
+    return "A location with valid coordinates is required for measured satellite analysis.";
+  }
+  return `No measured ${historicalAnalysis ? "Landsat" : "Sentinel-2"} pixel values are available from the satellite provider.`;
 }
 
 function buildFallbackAnalysis(params: {
@@ -176,6 +223,7 @@ function buildFallbackAnalysis(params: {
   fallbackReason: FallbackReason;
   providerStatus: number;
   providerMessage: string;
+  historicalAnalysis?: boolean;
 }) {
   const {
     eventTypes,
@@ -186,6 +234,7 @@ function buildFallbackAnalysis(params: {
     fallbackReason,
     providerStatus,
     providerMessage,
+    historicalAnalysis = false,
   } = params;
 
   const result = {
@@ -208,7 +257,7 @@ function buildFallbackAnalysis(params: {
     dataSources: [],
     cloudCoverage: null,
     dataQuality: null,
-    sensorInfo: getAnalysisSensorInfo(coordinates?.lat ?? null, coordinates?.lng ?? null),
+    sensorInfo: getAnalysisSensorInfo(coordinates?.lat ?? null, coordinates?.lng ?? null, [], historicalAnalysis),
     spectralIndices: null,
     classificationResults: null,
     classificationType: null,
@@ -226,20 +275,23 @@ function buildFallbackAnalysis(params: {
     providerMessage,
     dataProvenance: {
       analysisMethod: "model_only" as const,
-      disclaimer: "No measured Sentinel-2 values are available for this result.",
+      disclaimer: `${getMeasurementUnavailableMessage(fallbackReason, historicalAnalysis)} No measured values are reported.`,
       realDataSourcesUsed: [],
     },
   };
-  return attachFieldProvenance(result, "model_only", startDate, endDate, false);
+  return attachFieldProvenance(
+    result,
+    "model_only",
+    startDate,
+    endDate,
+    false,
+    historicalAnalysis ? "Landsat Collection 2 Level-2" : SENTINEL_2_SENSOR,
+  );
 }
 
-// === Real spectral statistics via Sentinel Hub (Copernicus Data Space) ===
-// The imagery panels (generate-visualization) already fetch real Sentinel-2
-// pixels for the pictures; this does the same for the *numbers* - NDVI/NDWI/
-// NBR means and a real before/after change figure - instead of asking the AI
-// to estimate them. Same credentials, a different Sentinel Hub API
-// (Statistics instead of Process) that aggregates real pixel values over an
-// area/time range rather than rendering an image.
+// === Real spectral statistics via Sentinel Hub ===
+// Sentinel-2 uses Copernicus Data Space; historical Landsat statistics use
+// the registered Earth Engine project and its server-side service account.
 let cachedSentinelToken: { token: string; expiresAt: number } | null = null;
 
 async function getSentinelHubToken(): Promise<string | null> {
@@ -384,7 +436,8 @@ serve(async (req) => {
     console.log(`Analyzing ${eventTypeLabels} in ${region} from ${startDate} to ${endDate}`);
     console.log("Model-written classification, change detection, and multi-event analysis are disabled.");
 
-    // Real spectral statistics from Sentinel-2 pixels, when coordinates are
+    // Historical studies use Landsat Collection 2; newer studies use Sentinel-2.
+    // Real spectral statistics from satellite pixels, when coordinates are
     // available: split the study period into a "before" and "after" window
     // (capped so "after" never reaches into the future, since satellite data
     // obviously doesn't exist yet for dates ahead of today) and fetch real
@@ -396,44 +449,79 @@ serve(async (req) => {
     let realPredictiveModeling: { trend_direction: "improving" | "stable" | "declining"; projected_change_6mo: number; projected_change_12mo: number; confidence: number | null; methodology: string } | null = null;
     let realSceneCount: number | null = null;
     let realWindowLengthDays: number | null = null;
+    const historicalAnalysis = new Date(startDate) < SENTINEL_2_START_DATE;
+    let statsSources: (LandsatStatsSource | null | undefined)[] = [];
+    let analysisSensorName = historicalAnalysis
+      ? "Landsat Collection 2 Level-2 (TM/ETM+/OLI-TIRS)"
+      : SENTINEL_2_SENSOR;
     let fallbackReason: FallbackReason | null = coordinates ? "NO_CREDENTIALS" : "NO_COORDINATES";
     if (coordinates) {
-      const hasSentinelCredentials = Boolean(
-        Deno.env.get("SENTINELHUB_CLIENT_ID") && Deno.env.get("SENTINELHUB_CLIENT_SECRET"),
-      );
-      const sentinelToken = await getSentinelHubToken();
-      if (sentinelToken) {
+      const hasStatisticsCredentials = historicalAnalysis
+        ? hasEarthEngineCredentials()
+        : Boolean(
+          Deno.env.get("SENTINELHUB_CLIENT_ID")
+          && Deno.env.get("SENTINELHUB_CLIENT_SECRET"),
+        );
+      const satelliteToken = historicalAnalysis ? null : await getSentinelHubToken();
+      const canFetchStatistics = historicalAnalysis ? hasStatisticsCredentials : Boolean(satelliteToken);
+      const fetchStatsForWindow = (
+        from: Date,
+        to: Date,
+        source: LandsatStatsSource | null | undefined,
+      ) => historicalAnalysis
+        ? source
+          ? fetchLandsatStatistics(coordinates.lat, coordinates.lng, from, to, source)
+          : Promise.resolve(null)
+        : satelliteToken
+          ? fetchSpectralStatistics(satelliteToken, coordinates.lat, coordinates.lng, from, to)
+          : Promise.resolve(null);
+      if (canFetchStatistics) {
         fallbackReason = "SENTINEL_API_ERROR";
         const windows = createAnalysisWindows(startDate, endDate);
         if (windows) {
           const { studyStart, studyEnd, beforeTo, afterFrom } = windows;
           realWindowLengthDays = windows.windowLengthDays;
-          // Wide enough that Sentinel-2's ~5-day revisit cycle has a real chance of
+          const sourceForWindow = (from: Date, to: Date) => historicalAnalysis
+            ? getLandsatSourceForDate(new Date((from.getTime() + to.getTime()) / 2))
+            : undefined;
+          const beforeSource = sourceForWindow(studyStart, beforeTo);
+          const afterSource = sourceForWindow(afterFrom, studyEnd);
+          statsSources = [beforeSource, afterSource];
+          analysisSensorName = [...new Set(statsSources
+            .filter((source): source is LandsatStatsSource | undefined => source !== null)
+            .map((source) => source?.sensor ?? SENTINEL_2_SENSOR))].join(" / ")
+            || "Landsat Collection 2 Level-2 (TM/ETM+/OLI-TIRS)";
+          // Wide enough that the selected sensor's revisit cycle has a real chance of
           // landing a cloud-free-enough scene even over persistently cloudy regions
           // (much of West Africa), without the before/after windows overlapping.
 
-          const [beforeStats, afterStats] = await Promise.all([
-            fetchSpectralStatistics(sentinelToken, coordinates.lat, coordinates.lng, studyStart, beforeTo),
-            fetchSpectralStatistics(sentinelToken, coordinates.lat, coordinates.lng, afterFrom, studyEnd),
-          ]);
+          if (beforeSource === null || afterSource === null) {
+            fallbackReason = "NO_DATA_FOR_DATE_RANGE";
+          } else {
+            const [beforeStats, afterStats] = await Promise.all([
+              fetchStatsForWindow(studyStart, beforeTo, beforeSource),
+              fetchStatsForWindow(afterFrom, studyEnd, afterSource),
+            ]);
 
-          if (beforeStats?.ndvi && afterStats?.ndvi
+            if (beforeStats?.ndvi && afterStats?.ndvi
             && beforeStats.validPixelRatio > MIN_VALID_PIXEL_RATIO
             && afterStats.validPixelRatio > MIN_VALID_PIXEL_RATIO) {
             realStats = { before: beforeStats, after: afterStats };
-            const [beforeSceneCount, afterSceneCount] = await Promise.all([
-              fetchSentinelSceneCount(sentinelToken, coordinates.lat, coordinates.lng, studyStart, beforeTo),
-              fetchSentinelSceneCount(sentinelToken, coordinates.lat, coordinates.lng, afterFrom, studyEnd),
-            ]);
-            realSceneCount = beforeSceneCount !== null && afterSceneCount !== null
-              ? beforeSceneCount + afterSceneCount
-              : null;
+            if (!historicalAnalysis && satelliteToken) {
+              const [beforeSceneCount, afterSceneCount] = await Promise.all([
+                fetchSentinelSceneCount(satelliteToken, coordinates.lat, coordinates.lng, studyStart, beforeTo),
+                fetchSentinelSceneCount(satelliteToken, coordinates.lat, coordinates.lng, afterFrom, studyEnd),
+              ]);
+              realSceneCount = beforeSceneCount !== null && afterSceneCount !== null
+                ? beforeSceneCount + afterSceneCount
+                : null;
+            }
             // NDVI change expressed as % of the baseline value, matching how
             // "change_percent" is used everywhere else in this app - guard
             // against a near-zero baseline making this figure meaningless.
             realChangePercent = calculateChangePercent(beforeStats.ndvi.mean, afterStats.ndvi.mean);
             fallbackReason = null;
-            console.log(`Real Sentinel-2 stats: NDVI ${beforeStats.ndvi.mean.toFixed(3)} -> ${afterStats.ndvi.mean.toFixed(3)} (${realChangePercent.toFixed(1)}% change)`);
+            console.log(`Real ${analysisSensorName} stats: NDVI ${beforeStats.ndvi.mean.toFixed(3)} -> ${afterStats.ndvi.mean.toFixed(3)} (${realChangePercent.toFixed(1)}% change)`);
 
             // Real temporal breakdown: the "progress over time" chart used to
             // be entirely AI invention between our two real endpoints
@@ -469,8 +557,12 @@ serve(async (req) => {
                 );
                 return { from: new Date(center.getTime() - radius), to: new Date(center.getTime() + radius) };
               });
+              const interiorSources = interiorWindows.map((w) => sourceForWindow(w.from, w.to));
+              statsSources.push(...interiorSources);
               const interiorResults = await Promise.all(
-                interiorWindows.map((w) => fetchSpectralStatistics(sentinelToken, coordinates.lat, coordinates.lng, w.from, w.to))
+                interiorWindows.map((w, index) => interiorSources[index] === null
+                  ? Promise.resolve(null)
+                  : fetchStatsForWindow(w.from, w.to, interiorSources[index]))
               );
               interiorResults.forEach((stat, i) => {
                 if (stat?.ndvi && stat.validPixelRatio > MIN_VALID_PIXEL_RATIO) {
@@ -512,17 +604,18 @@ serve(async (req) => {
               projected_change_6mo: Math.round((slope * (lastMonths + 6) + intercept) * 10) / 10,
               projected_change_12mo: Math.round((slope * (lastMonths + 12) + intercept) * 10) / 10,
               confidence: r2 === null ? null : Math.round(r2 * 100),
-              methodology: `linear_regression over ${n} real Sentinel-2 measurements`,
+              methodology: `linear_regression over ${n} real ${analysisSensorName} measurements`,
             };
-          } else {
-            fallbackReason = beforeStats || afterStats
+            } else {
+              fallbackReason = beforeStats || afterStats
               ? "INSUFFICIENT_VALID_PIXELS"
               : "SENTINEL_API_ERROR";
-            console.warn("Sentinel Hub statistics unavailable or too cloud-obscured for real change detection; numerical fields will be unavailable.");
+              console.warn(`${analysisSensorName} statistics unavailable or too cloud-obscured for real change detection; numerical fields will be unavailable.`);
+            }
           }
         }
       } else {
-        fallbackReason = hasSentinelCredentials ? "SENTINEL_API_ERROR" : "NO_CREDENTIALS";
+        fallbackReason = hasStatisticsCredentials ? "SENTINEL_API_ERROR" : "NO_CREDENTIALS";
       }
     }
 
@@ -635,6 +728,7 @@ serve(async (req) => {
           fallbackReason: "PROVIDER_OVERLOAD",
           providerStatus: status,
           providerMessage: lastErrorText || "Groq is temporarily overloaded. Please try again in a minute.",
+          historicalAnalysis: new Date(startDate) < SENTINEL_2_START_DATE,
         });
 
         return new Response(
@@ -808,6 +902,11 @@ serve(async (req) => {
     }
 
     const analysisMethod: AnalysisMethod = usedRealStats ? "measured" : "model_only";
+    const statisticsProvider = historicalAnalysis ? "Google Earth Engine" : "Copernicus Data Space";
+    analysisSensorName = [...new Set(statsSources
+      .filter((source): source is LandsatStatsSource | undefined => source !== null)
+      .map((source) => source?.sensor ?? SENTINEL_2_SENSOR))].join(" / ")
+      || (historicalAnalysis ? "Landsat Collection 2 Level-2 (TM/ETM+/OLI-TIRS)" : SENTINEL_2_SENSOR);
     const numericFields = normalizeNumericFields(analysisMethod, {
       area: usedRealStats && realAreaKm2 !== null ? `${realAreaKm2} km²` : null,
       changePercent: finalChangePercent,
@@ -840,6 +939,7 @@ serve(async (req) => {
               nearZeroBaseline: Math.abs(realStats.before.ndvi!.mean) <= NEAR_ZERO_NDVI_BASELINE,
             }
             : null,
+          analysisSensorName,
         )
         : narrativeFields.summary,
       fullAnalysis: replaceNarrative
@@ -849,7 +949,7 @@ serve(async (req) => {
       recommendations: replaceNarrative ? [] : cleanTextArray(parsedAnalysis.recommendations),
       narrativeGuard,
       dataSources: usedRealStats
-        ? ["Sentinel-2 MSI L2A statistics (Copernicus Data Space)", `Groq-generated narrative (${successModel})`]
+        ? [`${analysisSensorName} statistics (${statisticsProvider})`, `Groq-generated narrative (${successModel})`]
         : [`Groq-generated narrative (${successModel}); no measured satellite values`],
       cloudCoverage: usedRealStats
         ? {
@@ -865,7 +965,7 @@ serve(async (req) => {
             windowLengthDays: realWindowLengthDays,
           }
         : null,
-      sensorInfo: getAnalysisSensorInfo(coordinates?.lat ?? null, coordinates?.lng ?? null),
+      sensorInfo: getAnalysisSensorInfo(coordinates?.lat ?? null, coordinates?.lng ?? null, statsSources, historicalAnalysis),
       classificationResults: null,
       classificationType,
       changeDetection: null,
@@ -876,14 +976,21 @@ serve(async (req) => {
       dataProvenance: {
         analysisMethod: usedRealStats ? "measured" as const : "model_only" as const,
         disclaimer: usedRealStats
-          ? `NDVI, NDWI, and NBR values, NDVI change, and valid-pixel coverage are measurements from Sentinel-2 MSI L2A pixels. Narrative text is generated by Groq and is not itself a measurement.`
-          : "No measured Sentinel-2 pixel values are available. Narrative text is generated by Groq and must not be interpreted as measured data.",
-        realDataSourcesUsed: usedRealStats ? ["Sentinel-2 MSI L2A statistics (Copernicus Data Space)"] : [],
+          ? `NDVI, NDWI, and NBR values, NDVI change, and valid-pixel coverage are measurements from ${analysisSensorName} pixels. Narrative text is generated by Groq and is not itself a measurement.`
+          : `${getMeasurementUnavailableMessage(fallbackReason, historicalAnalysis)} Narrative text is generated by Groq and must not be interpreted as measured data.`,
+        realDataSourcesUsed: usedRealStats ? [`${analysisSensorName} statistics (${statisticsProvider})`] : [],
       },
       coordinates,
       timestamp: new Date().toISOString(),
     };
-    const resultWithProvenance = attachFieldProvenance(result, result.analysisMethod, startDate, endDate);
+    const resultWithProvenance = attachFieldProvenance(
+      result,
+      result.analysisMethod,
+      startDate,
+      endDate,
+      true,
+      analysisSensorName,
+    );
 
     if (user) {
       await supabase.from("analysis_results").insert({

@@ -74,6 +74,7 @@ export function attachFieldProvenance<T extends Record<string, unknown>>(
   startDate: string,
   endDate: string,
   generatedNarrative = true,
+  sensorName = SENTINEL_2_SENSOR,
 ): T & { fieldProvenance: Record<string, FieldProvenance> } {
   const dateRange = `${startDate}/${endDate}`;
   const fieldProvenance: Record<string, FieldProvenance> = {};
@@ -91,15 +92,15 @@ export function attachFieldProvenance<T extends Record<string, unknown>>(
     } else if (field === "severity" && method === "measured" && value !== null) {
       origin = "measured";
       source = "NDVI change thresholds";
-      sensor = SENTINEL_2_SENSOR;
+      sensor = sensorName;
     } else if (generatedNarrative && MODEL_GENERATED_FIELDS.has(field) && value !== null) {
       origin = "model_generated";
       source = "Groq-generated narrative";
-      sensor = SENTINEL_2_SENSOR;
+      sensor = sensorName;
     } else if (method === "measured" && MEASURED_FIELDS.has(field) && value !== null) {
       origin = "measured";
-      source = "Sentinel Hub Statistics API";
-      sensor = SENTINEL_2_SENSOR;
+      source = "Satellite statistics API";
+      sensor = sensorName;
     }
 
     fieldProvenance[field] = { origin, source, sensor, method, dateRange };

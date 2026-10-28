@@ -1,4 +1,7 @@
 {
+  "imports": {
+    "@google/earthengine": "npm:@google/earthengine@1.7.50"
+  },
   "lint": {
     "include": ["supabase/functions"]
   },

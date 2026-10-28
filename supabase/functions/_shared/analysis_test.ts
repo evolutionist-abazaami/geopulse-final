@@ -9,6 +9,7 @@ import {
 import { checkNarrativeNumbers } from "./narrative-guard.ts";
 import { determineHazardSeverity } from "./hazard-severity.ts";
 import { groqChatCompletion } from "./groq-client.ts";
+import { getLandsatSourceForDate, parseLandsatStatistics } from "./earth-engine-statistics.ts";
 import { fetchSpectralStatistics } from "./sentinel-statistics.ts";
 
 Deno.test("every analysis result field has a provenance entry", () => {
@@ -140,6 +141,37 @@ Deno.test("Sentinel Hub statistics are parsed from a mocked API response", async
   assertEquals(requestedUrl, "https://sh.dataspace.copernicus.eu/api/v1/statistics");
   assertEquals(result?.ndvi?.mean, 0.5);
   assertEquals(result?.validPixelRatio, 0.9);
+});
+
+Deno.test("Landsat source selection follows each mission's historical coverage", () => {
+  assertEquals(getLandsatSourceForDate(new Date("1990-01-01"))?.type, "landsat-tm-l2");
+  assertEquals(getLandsatSourceForDate(new Date("2005-01-01"))?.type, "landsat-etm-l2");
+  assertEquals(getLandsatSourceForDate(new Date("2016-01-01"))?.type, "landsat-ot-l2");
+  assertEquals(getLandsatSourceForDate(new Date("1980-01-01")), null);
+  assertEquals(
+    getLandsatSourceForDate(new Date("1990-01-01"))?.collectionIds,
+    ["LANDSAT/LT04/C02/T1_L2", "LANDSAT/LT05/C02/T1_L2"],
+  );
+});
+
+Deno.test("Earth Engine Landsat statistics parse reductions and reject empty periods", () => {
+  const result = parseLandsatStatistics({
+    ndviMean: 0.4,
+    ndviMin: 0.1,
+    ndviMax: 0.7,
+    ndwiMean: 0.2,
+    ndwiMin: -0.1,
+    ndwiMax: 0.4,
+    nbrMean: 0.3,
+    nbrMin: 0,
+    nbrMax: 0.6,
+    validCount: 80,
+    totalCount: 100,
+  });
+  assertEquals(result?.ndvi?.mean, 0.4);
+  assertEquals(result?.validPixelRatio, 0.8);
+  assertEquals(result?.sampleCount, 100);
+  assertEquals(parseLandsatStatistics({ totalCount: 0, validCount: 0 }), null);
 });
 
 Deno.test("Groq chat completion uses an injected mock fetch", async () => {

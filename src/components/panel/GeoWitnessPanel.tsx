@@ -92,6 +92,7 @@ const generateLocalSatelliteAnalysis = (
   failure?: { reason: string; status?: number; message: string },
 ) => {
   const mainEvent = eventTypesToAnalyze[0] || "environmental_change";
+  const historicalAnalysis = new Date(startDate) < new Date("2015-06-23");
   const result = {
     fallback: true,
     fallbackReason: failure?.reason ?? "SERVICE_UNAVAILABLE",
@@ -114,14 +115,18 @@ const generateLocalSatelliteAnalysis = (
     cloudCoverage: null,
     dataQuality: null,
     sensorInfo: {
-      sensor: "Sentinel-2 MSI L2A",
+      sensor: historicalAnalysis
+        ? "Landsat Collection 2 Level-2 (TM/ETM+/OLI-TIRS)"
+        : "Sentinel-2 MSI L2A",
       statistics_grid: "128x128",
       metres_per_cell: {
         x: 0.1 * 111_320 * Math.cos((coordinates.lat * Math.PI) / 180) / 128,
         y: 0.1 * 111_320 / 128,
       },
       center: coordinates,
-      native_band_resolutions_m: { B02: 10, B03: 10, B04: 10, B08: 10, B11: 20, B12: 20 },
+      ...(!historicalAnalysis && {
+        native_band_resolutions_m: { B02: 10, B03: 10, B04: 10, B08: 10, B11: 20, B12: 20 },
+      }),
     },
     spectralIndices: null,
     classificationResults: null,
@@ -425,9 +430,9 @@ export function GeoWitnessPanel() {
 
             <Button className="w-full bg-gradient-ocean hover:opacity-90" onClick={runAnalysis} disabled={isAnalyzing}>
               {isAnalyzing ? (
-                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Analyzing with Sentinel-2...</>
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Analyzing satellite imagery...</>
               ) : (
-                <><Satellite className="h-4 w-4 mr-2" />Run Sentinel-2 Analysis</>
+                <><Satellite className="h-4 w-4 mr-2" />Run Satellite Analysis</>
               )}
             </Button>
             {isAnalyzing && (
