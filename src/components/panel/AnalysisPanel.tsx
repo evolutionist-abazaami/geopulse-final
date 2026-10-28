@@ -26,8 +26,8 @@ export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
     const val = payload.changePercent ?? payload.change_percent;
     metrics.push({ label: "Change", formatted: `${Number(val).toFixed(1)}%`, sentiment: val > 25 ? "negative" : val > 10 ? "warning" : "positive" });
   }
-  if (typeof payload.analysisConfidence === "number" || typeof payload.confidenceLevel === "number") {
-    const val = payload.analysisConfidence ?? payload.confidenceLevel;
+  if (typeof payload.confidenceLevel === "number") {
+    const val = payload.confidenceLevel;
     metrics.push({ label: "Confidence", formatted: `${Math.round(val)}%`, sentiment: "neutral" });
   }
   if (payload.area) {

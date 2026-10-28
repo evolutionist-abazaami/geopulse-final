@@ -1,5 +1,24 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  AOI_HALF_WIDTH_DEGREES,
+  DAYS_PER_MONTH_APPROXIMATION,
+  ENABLE_UNVERIFIED_MODEL_FEATURES,
+  EXCLUDED_SCL_CLASSES,
+  FIRST_INTERIOR_SAMPLE_MIN_GAP_DAYS,
+  INTERIOR_SAMPLE_HALF_WIDTH_DAYS,
+  MAX_ANALYSIS_WINDOW_DAYS,
+  MAX_CLOUD_COVERAGE_PERCENT,
+  MIN_VALID_PIXEL_RATIO,
+  NEAR_ZERO_NDVI_BASELINE,
+  NDVI_SEVERITY_THRESHOLDS,
+  SECOND_INTERIOR_SAMPLE_MIN_GAP_DAYS,
+  SENTINEL_2_BAND_RESOLUTIONS_METERS,
+  SENTINEL_2_SENSOR,
+  STATISTICS_GRID_SIZE,
+  TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH,
+} from "../_shared/analysis-constants.ts";
+import type { FallbackReason, Origin } from "../_shared/analysis-constants.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -66,6 +85,21 @@ function validateEventTypes(value: unknown): string[] {
   }).filter(v => v.length > 0).slice(0, 5);
 }
 
+type ClassificationType = "unsupervised_kmeans" | "unsupervised_isodata" | "supervised_ml" | "supervised_rf" | "supervised_svm";
+
+function validateClassificationType(value: unknown): ClassificationType | null {
+  const validTypes: ClassificationType[] = [
+    "unsupervised_kmeans",
+    "unsupervised_isodata",
+    "supervised_ml",
+    "supervised_rf",
+    "supervised_svm",
+  ];
+  return typeof value === "string" && validTypes.includes(value as ClassificationType)
+    ? value as ClassificationType
+    : null;
+}
+
 // Without a strict schema for this array, the model occasionally wraps
 // each recommendation in its own tiny JSON object (e.g. the literal string
 // '{"recommendation":"..."}' instead of just the sentence), which then
@@ -99,129 +133,119 @@ function cleanTextArray(value: unknown): string[] {
     .filter((s) => s.trim().length > 0);
 }
 
-// Classification types
-type ClassificationType = 'unsupervised_kmeans' | 'unsupervised_isodata' | 'supervised_ml' | 'supervised_rf' | 'supervised_svm';
+type AnalysisMethod = "measured" | "model_only";
+type FieldProvenance = {
+  origin: Origin;
+  source: string;
+  sensor: string;
+  method: AnalysisMethod;
+  dateRange: string;
+};
 
-function validateClassificationType(value: unknown): ClassificationType | null {
-  if (!value) return null;
-  const validTypes: ClassificationType[] = ['unsupervised_kmeans', 'unsupervised_isodata', 'supervised_ml', 'supervised_rf', 'supervised_svm'];
-  if (typeof value !== 'string' || !validTypes.includes(value as ClassificationType)) {
-    return null;
-  }
-  return value as ClassificationType;
-}
+const MODEL_GENERATED_FIELDS = new Set([
+  "summary",
+  "fullAnalysis",
+  "recommendations",
+  "severity",
+  "classificationResults",
+  "changeDetection",
+  "multiEventAnalysis",
+  "methodologyTransparency",
+]);
 
-async function exchangeServiceAccountToken(params: { clientEmail: string; privateKey: string; projectId: string }) {
-  const { clientEmail, privateKey, projectId } = params;
-  const now = Math.floor(Date.now() / 1000);
-  const header = { alg: 'RS256', typ: 'JWT' };
-  const payload = {
-    iss: clientEmail,
-    scope: 'https://www.googleapis.com/auth/earthengine https://www.googleapis.com/auth/cloud-platform',
-    aud: 'https://oauth2.googleapis.com/token',
-    exp: now + 3600,
-    iat: now,
-  };
+function attachFieldProvenance<T extends Record<string, unknown>>(
+  result: T,
+  method: AnalysisMethod,
+  startDate: string,
+  endDate: string,
+  generatedNarrative = true,
+): T & { fieldProvenance: Record<string, FieldProvenance> } {
+  const dateRange = `${startDate}/${endDate}`;
+  const measuredFields = new Set([
+    "area",
+    "changePercent",
+    "temporalBreakdown",
+    "cloudCoverage",
+    "dataQuality",
+    "spectralIndices",
+    "predictiveModeling",
+  ]);
+  const fieldProvenance: Record<string, FieldProvenance> = {};
 
-  const encodedHeader = btoa(JSON.stringify(header)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-  const encodedPayload = btoa(JSON.stringify(payload)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  for (const [field, value] of Object.entries(result)) {
+    let origin: Origin = "unavailable";
+    let source = "Not available";
+    let sensor = "Not applicable";
 
-  const pemBody = privateKey
-    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
-    .replace(/-----END PRIVATE KEY-----/g, '')
-    .replace(/\\n/g, '\n')
-    .replace(/\n/g, '')
-    .trim();
-
-  const derBuffer = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
-  const key = await crypto.subtle.importKey(
-    'pkcs8',
-    derBuffer,
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(signingInput));
-  const encodedSignature = btoa(String.fromCharCode(...new Uint8Array(signature)))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '');
-  const jwt = `${signingInput}.${encodedSignature}`;
-
-  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion: jwt,
-    }),
-  });
-
-  if (!tokenResponse.ok) {
-    const errorText = await tokenResponse.text();
-    throw new Error(`Google OAuth token exchange failed for project ${projectId}: ${tokenResponse.status} ${errorText}`);
-  }
-
-  const tokenData = await tokenResponse.json() as { access_token?: string };
-  if (!tokenData.access_token) {
-    throw new Error(`Google OAuth token exchange succeeded but no access token was returned for project ${projectId}`);
-  }
-
-  return { accessToken: tokenData.access_token, projectId };
-}
-
-async function getEarthEngineContext(env: Record<string, string | undefined>) {
-  const rawValue = env.GOOGLE_EARTH_ENGINE_API_KEY?.trim();
-
-  if (!rawValue) {
-    return {
-      available: false,
-      provider: 'missing',
-      projectId: null as string | null,
-      message: 'Google Earth Engine credentials are not configured.',
-    };
-  }
-
-  if (rawValue.startsWith('{')) {
-    try {
-      const parsed = JSON.parse(rawValue) as Record<string, unknown>;
-      const privateKey = typeof parsed.private_key === 'string' ? parsed.private_key : '';
-      const clientEmail = typeof parsed.client_email === 'string' ? parsed.client_email : '';
-      const projectId = typeof parsed.project_id === 'string' ? parsed.project_id : '';
-
-      if (!privateKey || !clientEmail || !projectId) {
-        return {
-          available: false,
-          provider: 'service_account',
-          projectId: projectId || null,
-          message: 'Google Earth Engine service account JSON is missing required fields (private_key, client_email, or project_id).',
-        };
-      }
-
-      const authResult = await exchangeServiceAccountToken({ clientEmail, privateKey, projectId });
-      return {
-        available: true,
-        provider: 'service_account',
-        projectId: authResult.projectId,
-        message: `Earth Engine service account authentication succeeded for project ${authResult.projectId}.`,
-      };
-    } catch (error) {
-      return {
-        available: false,
-        provider: 'service_account',
-        projectId: null,
-        message: `Earth Engine service account authentication failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      };
+    if (field === "coordinates" && value !== null) {
+      origin = "geocoded";
+      source = "Request coordinates";
+    } else if (field === "severity" && method === "measured" && value !== null) {
+      origin = "measured";
+      source = "NDVI change thresholds";
+      sensor = SENTINEL_2_SENSOR;
+    } else if (generatedNarrative && MODEL_GENERATED_FIELDS.has(field) && value !== null) {
+      origin = "model_generated";
+      source = "Groq-generated narrative";
+      sensor = SENTINEL_2_SENSOR;
+    } else if (method === "measured" && measuredFields.has(field) && value !== null) {
+      origin = "measured";
+      source = "Sentinel Hub Statistics API";
+      sensor = SENTINEL_2_SENSOR;
     }
+
+    fieldProvenance[field] = { origin, source, sensor, method, dateRange };
   }
+
+  fieldProvenance.fieldProvenance = {
+    origin: "unavailable",
+    source: "Generated provenance metadata",
+    sensor: "Not applicable",
+    method,
+    dateRange,
+  };
+  return { ...result, fieldProvenance };
+}
+
+function getAnalysisSensorInfo(lat: number | null, lng: number | null) {
+  const widthMeters = lat === null
+    ? null
+    : 2 * AOI_HALF_WIDTH_DEGREES * 111_320 * Math.cos((lat * Math.PI) / 180);
+  const heightMeters = 2 * AOI_HALF_WIDTH_DEGREES * 111_320;
+  const metresPerCell = widthMeters === null
+    ? null
+    : { x: widthMeters / STATISTICS_GRID_SIZE, y: heightMeters / STATISTICS_GRID_SIZE };
 
   return {
-    available: false,
-    provider: 'api_key',
-    projectId: null,
-    message: 'The configured Earth Engine value is not a service account JSON. Provide a service account JSON with private_key/client_email/project_id for authenticated access.',
+    sensor: SENTINEL_2_SENSOR,
+    statistics_grid: `${STATISTICS_GRID_SIZE}x${STATISTICS_GRID_SIZE}`,
+    metres_per_cell: metresPerCell,
+    native_band_resolutions_m: SENTINEL_2_BAND_RESOLUTIONS_METERS,
+    aoi_half_width_degrees: AOI_HALF_WIDTH_DEGREES,
+    center: lat !== null && lng !== null ? { lat, lng } : null,
+    processing_level: "Level-2A",
   };
+}
+
+export function deriveSeverity(changePercent: number): "low" | "medium" | "high" | "critical" {
+  const magnitude = Math.abs(changePercent);
+  if (magnitude >= NDVI_SEVERITY_THRESHOLDS.critical) return "critical";
+  if (magnitude >= NDVI_SEVERITY_THRESHOLDS.high) return "high";
+  if (magnitude >= NDVI_SEVERITY_THRESHOLDS.medium) return "medium";
+  return "low";
+}
+
+export function calculateChangePercent(baseline: number, current: number): number {
+  const delta = current - baseline;
+  return Math.abs(baseline) > NEAR_ZERO_NDVI_BASELINE
+    ? (delta / Math.abs(baseline)) * 100
+    : delta * 100;
+}
+
+export function deriveTrendDirection(slopePercentPerMonth: number): "improving" | "stable" | "declining" {
+  if (slopePercentPerMonth > TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH) return "improving";
+  if (slopePercentPerMonth < -TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH) return "declining";
+  return "stable";
 }
 
 function buildFallbackAnalysis(params: {
@@ -230,8 +254,7 @@ function buildFallbackAnalysis(params: {
   startDate: string;
   endDate: string;
   coordinates: { lat: number; lng: number } | null;
-  classificationType: ClassificationType | null;
-  enableChangeDetection: boolean;
+  fallbackReason: FallbackReason;
   providerStatus: number;
   providerMessage: string;
 }) {
@@ -241,79 +264,54 @@ function buildFallbackAnalysis(params: {
     startDate,
     endDate,
     coordinates,
-    classificationType,
-    enableChangeDetection,
+    fallbackReason,
     providerStatus,
     providerMessage,
   } = params;
 
-  return {
+  const result = {
     eventType: eventTypes[0],
     eventTypes,
     isMultiEvent: eventTypes.length > 1,
     region,
     startDate,
     endDate,
-    area: "Analysis temporarily unavailable",
-    changePercent: 0,
-    summary: "Satellite analysis is temporarily delayed because the AI provider is under heavy load.",
-    fullAnalysis: "We could not complete this satellite analysis right now because the AI provider is temporarily overloaded. Please retry shortly.",
-    severity: "low",
+    analysisMethod: "model_only" as const,
+    area: null,
+    changePercent: null,
+    summary: "Satellite analysis is temporarily unavailable; no measured values are available.",
+    fullAnalysis: "The analysis provider is temporarily unavailable. No measured satellite values are being reported.",
+    severity: null,
     recommendations: [
       "Retry this analysis in 1-2 minutes.",
       "Try a smaller date range if the issue continues.",
-      "Use saved results or comparison history while the provider recovers.",
     ],
-    dataSources: ["Sentinel-2 MSI"],
-    cloudCoverage: {
-      percentage: null,
-      detection_accuracy: null,
-      impact: "unknown",
-      affected_areas: "Analysis unavailable",
-      qa_band_quality: "unknown",
-    },
-    dataQuality: {
-      overall_score: null,
-      radiometric_quality: null,
-      geometric_accuracy: null,
-      temporal_coverage: null,
-      atmospheric_correction: "unknown",
-      reflectance_type: "unknown",
-    },
-    analysisConfidence: 0,
-    landsatInfo: {
-      sensor: "Sentinel-2 MSI",
-      spatial_resolution: "10m",
-      acquisition_dates: [],
-      processing_level: "Unavailable",
-    },
-    spectralIndices: {},
-    classificationResults: classificationType ? { method: classificationType, unavailable: true } : null,
-    classificationType,
-    changeDetection: enableChangeDetection ? { unavailable: true } : null,
-    enableChangeDetection,
-    multiEventAnalysis: eventTypes.length > 1 ? { events: [], combined_impact: "Unavailable", interaction_effects: "Unavailable" } : null,
-    predictiveModeling: {
-      trend_direction: "stable",
-      projected_change_6mo: null,
-      projected_change_12mo: null,
-      confidence: 0,
-      methodology: "unavailable",
-    },
-    methodologyTransparency: {
-      percentage_derivation: "Analysis unavailable due to temporary AI provider overload.",
-      uncertainty_range: null,
-      confidence_interval: "Unavailable",
-      validation_notes: "Retry once provider capacity recovers.",
-      known_limitations: ["Temporary provider overload prevented the analysis from running."],
-    },
+    dataSources: [],
+    cloudCoverage: null,
+    dataQuality: null,
+    sensorInfo: getAnalysisSensorInfo(coordinates?.lat ?? null, coordinates?.lng ?? null),
+    spectralIndices: null,
+    classificationResults: null,
+    classificationType: null,
+    changeDetection: null,
+    enableChangeDetection: false,
+    multiEventAnalysis: null,
+    temporalBreakdown: null,
+    predictiveModeling: null,
+    methodologyTransparency: null,
     coordinates,
     timestamp: new Date().toISOString(),
     fallback: true,
-    fallbackReason: "SERVICE_UNAVAILABLE",
+    fallbackReason,
     providerStatus,
     providerMessage,
+    dataProvenance: {
+      analysisMethod: "model_only" as const,
+      disclaimer: "No measured Sentinel-2 values are available for this result.",
+      realDataSourcesUsed: [],
+    },
   };
+  return attachFieldProvenance(result, "model_only", startDate, endDate, false);
 }
 
 // === Real spectral statistics via Sentinel Hub (Copernicus Data Space) ===
@@ -349,7 +347,7 @@ function setup() {
     ]
   };
 }
-function isCloud(scl) { return scl == 3 || scl == 8 || scl == 9 || scl == 10; }
+function isCloud(scl) { return [${EXCLUDED_SCL_CLASSES.join(",")}].includes(scl); }
 function evaluatePixel(s) {
   let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04);
   let ndwi = (s.B03 - s.B08) / (s.B03 + s.B08);
@@ -406,8 +404,12 @@ async function fetchSpectralStatistics(
   from: Date,
   to: Date
 ): Promise<SpectralStatsResult | null> {
-  const half = 0.05; // ~11km-wide chip, matching the imagery panels' AOI
-  const bbox = [lng - half, lat - half, lng + half, lat + half];
+  const bbox = [
+    lng - AOI_HALF_WIDTH_DEGREES,
+    lat - AOI_HALF_WIDTH_DEGREES,
+    lng + AOI_HALF_WIDTH_DEGREES,
+    lat + AOI_HALF_WIDTH_DEGREES,
+  ];
   const windowDays = Math.max(1, Math.ceil((to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000)));
 
   let response: Response;
@@ -418,14 +420,17 @@ async function fetchSpectralStatistics(
       body: JSON.stringify({
         input: {
           bounds: { bbox, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } },
-          data: [{ type: "sentinel-2-l2a", dataFilter: { maxCloudCoverage: 60 } }],
+          data: [{
+            type: "sentinel-2-l2a",
+            dataFilter: { maxCloudCoverage: MAX_CLOUD_COVERAGE_PERCENT },
+          }],
         },
         aggregation: {
           timeRange: { from: from.toISOString(), to: to.toISOString() },
           aggregationInterval: { of: `P${windowDays}D` },
           evalscript: STATISTICS_EVALSCRIPT,
-          width: 128,
-          height: 128,
+          width: STATISTICS_GRID_SIZE,
+          height: STATISTICS_GRID_SIZE,
         },
       }),
     });
@@ -472,6 +477,51 @@ async function fetchSpectralStatistics(
   };
 }
 
+async function fetchSentinelSceneCount(
+  token: string,
+  lat: number,
+  lng: number,
+  from: Date,
+  to: Date,
+): Promise<number | null> {
+  const west = lng - AOI_HALF_WIDTH_DEGREES;
+  const south = lat - AOI_HALF_WIDTH_DEGREES;
+  const east = lng + AOI_HALF_WIDTH_DEGREES;
+  const north = lat + AOI_HALF_WIDTH_DEGREES;
+  const polygon = `POLYGON((${west} ${south},${east} ${south},${east} ${north},${west} ${north},${west} ${south}))`;
+  const filter = [
+    "Collection/Name eq 'SENTINEL-2'",
+    `ContentDate/Start ge ${from.toISOString()}`,
+    `ContentDate/Start le ${to.toISOString()}`,
+    `OData.CSC.Intersects(area=geography'SRID=4326;${polygon}')`,
+  ].join(" and ");
+  const url = new URL("https://catalogue.dataspace.copernicus.eu/odata/v1/Products");
+  url.searchParams.set("$filter", filter);
+  url.searchParams.set("$count", "true");
+  url.searchParams.set("$top", "0");
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      console.warn("Sentinel catalogue scene count failed:", response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    return typeof data["@odata.count"] === "number" ? data["@odata.count"] : null;
+  } catch (error) {
+    console.warn("Sentinel catalogue scene count request failed:", error instanceof Error ? error.message : error);
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -503,22 +553,22 @@ serve(async (req) => {
     if (eventTypes.length === 0) {
       eventTypes = ['environmental_change'];
     }
+    if (!ENABLE_UNVERIFIED_MODEL_FEATURES) eventTypes = eventTypes.slice(0, 1);
     
     const region = validateString(body.region, 'region', 200);
     const startDate = validateDate(body.startDate, 'startDate');
     const endDate = validateDate(body.endDate, 'endDate');
     const coordinates = validateCoordinates(body.coordinates);
-    const classificationType = validateClassificationType(body.classificationType);
-    const enableChangeDetection = body.enableChangeDetection === true;
-    const numClasses = Math.min(Math.max(parseInt(body.numClasses) || 6, 2), 20);
+    const classificationType = ENABLE_UNVERIFIED_MODEL_FEATURES
+      ? validateClassificationType(body.classificationType)
+      : null;
+    const enableChangeDetection = ENABLE_UNVERIFIED_MODEL_FEATURES && body.enableChangeDetection === true;
     
     if (new Date(endDate) < new Date(startDate)) {
       throw new Error('endDate must be after startDate');
     }
     
     const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY");
-    const GOOGLE_EARTH_ENGINE_KEY = Deno.env.get("GOOGLE_EARTH_ENGINE_API_KEY");
-    const earthEngineContext = await getEarthEngineContext(Deno.env.toObject());
 
     if (!GROQ_API_KEY) {
       throw new Error("GROQ_API_KEY not configured");
@@ -528,7 +578,7 @@ serve(async (req) => {
     const eventTypeLabels = eventTypes.map(e => e.replace(/_/g, ' ')).join(', ');
 
     console.log(`Analyzing ${eventTypeLabels} in ${region} from ${startDate} to ${endDate}`);
-    console.log(`Classification: ${classificationType || 'none'}, Change Detection: ${enableChangeDetection}`);
+    console.log("Model-written classification, change detection, and multi-event analysis are disabled.");
 
     // Real spectral statistics from Sentinel-2 pixels, when coordinates are
     // available: split the study period into a "before" and "after" window
@@ -539,20 +589,30 @@ serve(async (req) => {
     let realStats: { before: SpectralStatsResult; after: SpectralStatsResult } | null = null;
     let realChangePercent: number | null = null;
     let realTemporalBreakdown: { label: string; changePercent: number; months: number }[] | null = null;
-    let realPredictiveModeling: { projected_change_6mo: number; projected_change_12mo: number; confidence: number; methodology: string } | null = null;
+    let realPredictiveModeling: { trend_direction: "improving" | "stable" | "declining"; projected_change_6mo: number; projected_change_12mo: number; confidence: number | null; methodology: string } | null = null;
+    let realSceneCount: number | null = null;
+    let realWindowLengthDays: number | null = null;
+    let fallbackReason: FallbackReason | null = coordinates ? "NO_CREDENTIALS" : "NO_COORDINATES";
     if (coordinates) {
+      const hasSentinelCredentials = Boolean(
+        Deno.env.get("SENTINELHUB_CLIENT_ID") && Deno.env.get("SENTINELHUB_CLIENT_SECRET"),
+      );
       const sentinelToken = await getSentinelHubToken();
       if (sentinelToken) {
+        fallbackReason = "SENTINEL_API_ERROR";
         const now = new Date();
         const studyStart = new Date(startDate);
         const studyEnd = new Date(Math.min(new Date(endDate).getTime(), now.getTime()));
         if (studyEnd.getTime() > studyStart.getTime()) {
+        realWindowLengthDays = Math.ceil(
+          (studyEnd.getTime() - studyStart.getTime()) / (24 * 60 * 60 * 1000),
+        );
           const totalMs = studyEnd.getTime() - studyStart.getTime();
           const midpoint = new Date(studyStart.getTime() + totalMs / 2);
           // Wide enough that Sentinel-2's ~5-day revisit cycle has a real chance of
           // landing a cloud-free-enough scene even over persistently cloudy regions
           // (much of West Africa), without the before/after windows overlapping.
-          const maxWindowMs = 90 * 24 * 60 * 60 * 1000;
+          const maxWindowMs = MAX_ANALYSIS_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
           const beforeTo = new Date(Math.min(midpoint.getTime(), studyStart.getTime() + maxWindowMs));
           const afterFrom = new Date(Math.max(midpoint.getTime(), studyEnd.getTime() - maxWindowMs));
@@ -562,14 +622,22 @@ serve(async (req) => {
             fetchSpectralStatistics(sentinelToken, coordinates.lat, coordinates.lng, afterFrom, studyEnd),
           ]);
 
-          if (beforeStats?.ndvi && afterStats?.ndvi && beforeStats.validPixelRatio > 0.1 && afterStats.validPixelRatio > 0.1) {
+          if (beforeStats?.ndvi && afterStats?.ndvi
+            && beforeStats.validPixelRatio > MIN_VALID_PIXEL_RATIO
+            && afterStats.validPixelRatio > MIN_VALID_PIXEL_RATIO) {
             realStats = { before: beforeStats, after: afterStats };
+            const [beforeSceneCount, afterSceneCount] = await Promise.all([
+              fetchSentinelSceneCount(sentinelToken, coordinates.lat, coordinates.lng, studyStart, beforeTo),
+              fetchSentinelSceneCount(sentinelToken, coordinates.lat, coordinates.lng, afterFrom, studyEnd),
+            ]);
+            realSceneCount = beforeSceneCount !== null && afterSceneCount !== null
+              ? beforeSceneCount + afterSceneCount
+              : null;
             // NDVI change expressed as % of the baseline value, matching how
             // "change_percent" is used everywhere else in this app - guard
             // against a near-zero baseline making this figure meaningless.
-            realChangePercent = Math.abs(beforeStats.ndvi.mean) > 0.05
-              ? ((afterStats.ndvi.mean - beforeStats.ndvi.mean) / Math.abs(beforeStats.ndvi.mean)) * 100
-              : (afterStats.ndvi.mean - beforeStats.ndvi.mean) * 100;
+            realChangePercent = calculateChangePercent(beforeStats.ndvi.mean, afterStats.ndvi.mean);
+            fallbackReason = null;
             console.log(`Real Sentinel-2 stats: NDVI ${beforeStats.ndvi.mean.toFixed(3)} -> ${afterStats.ndvi.mean.toFixed(3)} (${realChangePercent.toFixed(1)}% change)`);
 
             // Real temporal breakdown: the "progress over time" chart used to
@@ -580,29 +648,37 @@ serve(async (req) => {
             // measured too, not just the two ends - degrading gracefully
             // (fewer points, not a fake one) if an interior sample is too
             // cloudy to trust.
-            const pctChange = (value: number) => Math.abs(beforeStats.ndvi!.mean) > 0.05
-              ? ((value - beforeStats.ndvi!.mean) / Math.abs(beforeStats.ndvi!.mean)) * 100
-              : (value - beforeStats.ndvi!.mean) * 100;
-            const monthsFromStart = (d: Date) => Math.round((d.getTime() - studyStart.getTime()) / (30 * 24 * 60 * 60 * 1000));
+            const pctChange = (value: number) => calculateChangePercent(beforeStats.ndvi!.mean, value);
+            const monthsFromStart = (d: Date) => Math.round(
+              (d.getTime() - studyStart.getTime())
+                / (DAYS_PER_MONTH_APPROXIMATION * 24 * 60 * 60 * 1000),
+            );
 
             const points: { date: Date; months: number; changePercent: number }[] = [
               { date: studyStart, months: 0, changePercent: 0 },
             ];
 
             const gapMs = afterFrom.getTime() - beforeTo.getTime();
-            const interiorCount = gapMs > 60 * 24 * 60 * 60 * 1000 ? 2 : gapMs > 20 * 24 * 60 * 60 * 1000 ? 1 : 0;
+            const interiorCount = gapMs > SECOND_INTERIOR_SAMPLE_MIN_GAP_DAYS * 24 * 60 * 60 * 1000
+              ? 2
+              : gapMs > FIRST_INTERIOR_SAMPLE_MIN_GAP_DAYS * 24 * 60 * 60 * 1000
+                ? 1
+                : 0;
             if (interiorCount > 0) {
               const interiorWindows = Array.from({ length: interiorCount }, (_, i) => {
                 const frac = (i + 1) / (interiorCount + 1);
                 const center = new Date(beforeTo.getTime() + gapMs * frac);
-                const radius = Math.min(20 * 24 * 60 * 60 * 1000, gapMs / (interiorCount * 2));
+                const radius = Math.min(
+                  INTERIOR_SAMPLE_HALF_WIDTH_DAYS * 24 * 60 * 60 * 1000,
+                  gapMs / (interiorCount * 2),
+                );
                 return { from: new Date(center.getTime() - radius), to: new Date(center.getTime() + radius) };
               });
               const interiorResults = await Promise.all(
                 interiorWindows.map((w) => fetchSpectralStatistics(sentinelToken, coordinates.lat, coordinates.lng, w.from, w.to))
               );
               interiorResults.forEach((stat, i) => {
-                if (stat?.ndvi && stat.validPixelRatio > 0.1) {
+                if (stat?.ndvi && stat.validPixelRatio > MIN_VALID_PIXEL_RATIO) {
                   const mid = new Date((interiorWindows[i].from.getTime() + interiorWindows[i].to.getTime()) / 2);
                   points.push({ date: mid, months: monthsFromStart(mid), changePercent: pctChange(stat.ndvi.mean) });
                 }
@@ -634,246 +710,48 @@ serve(async (req) => {
             const meanY = sumY / n;
             const ssTot = points.reduce((s, p) => s + (p.changePercent - meanY) ** 2, 0);
             const ssRes = points.reduce((s, p) => s + (p.changePercent - (slope * p.months + intercept)) ** 2, 0);
-            const r2 = ssTot > 0 ? Math.max(0, 1 - ssRes / ssTot) : 0.5;
+            const r2 = ssTot > 0 ? Math.max(0, 1 - ssRes / ssTot) : null;
 
             realPredictiveModeling = {
+              trend_direction: deriveTrendDirection(slope),
               projected_change_6mo: Math.round((slope * (lastMonths + 6) + intercept) * 10) / 10,
               projected_change_12mo: Math.round((slope * (lastMonths + 12) + intercept) * 10) / 10,
-              confidence: Math.round(Math.max(30, Math.min(95, r2 * 100))),
+              confidence: r2 === null ? null : Math.round(r2 * 100),
               methodology: `linear_regression over ${n} real Sentinel-2 measurements`,
             };
           } else {
+            fallbackReason = beforeStats || afterStats
+              ? "INSUFFICIENT_VALID_PIXELS"
+              : "SENTINEL_API_ERROR";
             console.warn("Sentinel Hub statistics unavailable or too cloud-obscured for real change detection this request - falling back to AI-estimated figures.");
           }
         }
+      } else {
+        fallbackReason = hasSentinelCredentials ? "SENTINEL_API_ERROR" : "NO_CREDENTIALS";
       }
     }
 
-    // Real bbox area (deterministic geometry, not AI) for the ~11km chip
-    // statistics were actually computed over - computed here (not just in
-    // the result below) so it can also be told to the AI, keeping its
-    // narrative text consistent with the structured "area" field instead of
-    // the model guessing its own, different number.
     let realAreaKm2: number | null = null;
     if (realStats && coordinates) {
-      const kmPerDegreeLat = 111.32;
-      const kmPerDegreeLng = 111.32 * Math.cos((coordinates.lat * Math.PI) / 180);
-      realAreaKm2 = Math.round(0.1 * kmPerDegreeLat * 0.1 * kmPerDegreeLng * 100) / 100;
+      const widthMeters = 2 * AOI_HALF_WIDTH_DEGREES * 111_320 * Math.cos((coordinates.lat * Math.PI) / 180);
+      const heightMeters = 2 * AOI_HALF_WIDTH_DEGREES * 111_320;
+      realAreaKm2 = Math.round((widthMeters * heightMeters / 1_000_000) * 100) / 100;
     }
-
-    // Enhanced system prompt with Sentinel-2, classification, and change detection
-    const systemPrompt = `You are an expert remote sensing scientist specializing in Sentinel-2 multispectral satellite imagery analysis, land cover classification, and change detection.
-
-CRITICAL DATA AUTHENTICITY REQUIREMENTS:
-- All percentage values MUST be realistic and based on plausible Sentinel-2 spectral analysis
-- Do NOT generate suspiciously round numbers. Use precise values (e.g., 12.7% not 50%)
-- Change percentages should reflect realistic environmental change rates (typically 1-25% for most events over 1-2 year periods)
-- Always explain the methodology used to derive each percentage
-- Include uncertainty ranges with confidence intervals where applicable
-- Clearly distinguish between measured values and AI-estimated projections
-
-CRITICAL REQUIREMENTS:
-1. SENTINEL-2 IMAGERY: Always base analysis on Sentinel-2 MSI (MultiSpectral Instrument) Level-2A surface reflectance data
-2. SPECTRAL BANDS: Reference specific Sentinel-2 bands:
-   - B02 (Blue, 0.458-0.523 μm, 10m): Water body delineation
-   - B03 (Green, 0.543-0.578 μm, 10m): Vegetation vigor
-   - B04 (Red, 0.650-0.680 μm, 10m): Chlorophyll absorption
-   - B08 (NIR, 0.785-0.900 μm, 10m): Vegetation health, biomass
-   - B11 (SWIR1, 1.565-1.655 μm, 20m): Moisture content, burn scars
-   - B12 (SWIR2, 2.100-2.280 μm, 20m): Geology, soil moisture
-3. CLOUD DETECTION: Report accurate cloud coverage using the Sentinel-2 Scene Classification Layer (SCL) (90%+ accuracy target)
-4. SPECTRAL INDICES: Calculate and report:
-   - NDVI = (B08 - B04) / (B08 + B04) for vegetation
-   - NDWI = (B03 - B08) / (B03 + B08) for water
-   - NBR = (B08 - B12) / (B08 + B12) for burn severity
-   - NDBI = (B11 - B08) / (B11 + B08) for built-up areas
-5. RADIOMETRIC QUALITY: Report Bottom-of-Atmosphere (BOA) reflectance values and atmospheric correction status
-
-POLLUTION & CONTAMINATION ANALYSIS:
-When analyzing heavy_metal_pollution, water_contamination, soil_contamination, industrial_pollution, oil_spill, or acid_mine_drainage:
-- Use spectral anomaly detection in SWIR bands (B11, B12) for mineral/chemical signatures
-- Monitor vegetation stress via NDVI decline as proxy for soil contamination
-- Use water turbidity indices from Blue/Green band ratios for water quality
-- Detect thermal anomalies from industrial discharge
-- Report specific pollutant indicators based on spectral signatures
-- Include health risk assessment for nearby populations
-
-${classificationType ? `
-CLASSIFICATION ANALYSIS (${classificationType.toUpperCase()}):
-${classificationType.startsWith('unsupervised') ? `
-- Perform ${classificationType === 'unsupervised_kmeans' ? 'K-means clustering' : 'ISODATA iterative clustering'} with ${numClasses} initial classes
-- Report final number of classes after convergence
-- Provide class statistics: mean spectral values, standard deviation, pixel counts
-- Assign semantic labels to clusters based on spectral signatures
-` : `
-- Apply ${classificationType === 'supervised_ml' ? 'Maximum Likelihood' : classificationType === 'supervised_rf' ? 'Random Forest' : 'Support Vector Machine'} classification
-- Define training classes: Water, Forest, Agriculture, Urban, Bare Soil, Grassland
-- Report classification accuracy metrics: Overall Accuracy, Kappa Coefficient, Producer's/User's Accuracy per class
-- Generate confusion matrix summary
-`}
-` : ''}
-
-${enableChangeDetection ? `
-CHANGE DETECTION ANALYSIS:
-- Perform image differencing between ${startDate} and ${endDate}
-- Apply post-classification comparison if classification enabled
-- Report change statistics:
-  - Total changed area (km²)
-  - Change matrix (from-to transitions)
-  - Major change trajectories (e.g., Forest→Agriculture, Agriculture→Urban)
-- Identify change hotspots with confidence levels
-` : ''}
-
-IMPORTANT: Return your response as a JSON object with this structure:
-{
-  "area_km2": number,
-  "change_percent": number,
-  "temporal_breakdown": [
-    { "period": "short label e.g. 'Q1 2022' or '2022' depending on granularity chosen", "change_percent": number (cumulative change from baseline through the end of this period, reaching the final change_percent by the last entry), "months": number (months elapsed from study start through the end of this period) }
-  ],
-  "summary": "2-3 sentence summary naming the specific region, event type, and headline change figure",
-  "detailed_analysis": "4-8 sentence full analysis grounded in this specific location's known geography (named rivers/land cover/terrain where relevant) and this event type's typical drivers - avoid generic statements that could apply to any region",
-  "severity": "low|medium|high|critical",
-  "recommendations": ["4-6 specific, actionable recommendations, each naming a concrete action and a plausible responsible actor or monitoring approach (e.g. 'Deploy ground survey teams to verify X within 30 days' rather than 'monitor the situation')"],
-  "data_sources": ["Sentinel-2 MSI"],
-  "cloud_coverage": {
-    "percentage": number (0-100),
-    "detection_accuracy": number (target 90%+),
-    "impact": "none|minimal|moderate|significant",
-    "affected_areas": "description of cloud-affected regions",
-    "qa_band_quality": "good|moderate|poor"
-  },
-  "data_quality": {
-    "overall_score": number (0-100),
-    "radiometric_quality": number (0-100),
-    "geometric_accuracy": number (0-100),
-    "temporal_coverage": number (0-100),
-    "atmospheric_correction": "applied|not_applied",
-    "reflectance_type": "TOA|SR"
-  },
-  "analysis_confidence": number (0-100, aim for 90+),
-  "landsat_info": {
-    "sensor": "Sentinel-2 MSI",
-    "tile_id": "MGRS tile ID",
-    "acquisition_dates": ["date1", "date2"],
-    "spatial_resolution": "10m",
-    "bands_used": ["B02", "B03", "B04", "B08", "B11", "B12"],
-    "processing_level": "Level-2A|Level-1C"
-  },
-  "spectral_indices": {
-    "ndvi": { "min": number, "max": number, "mean": number, "std": number },
-    "ndwi": { "min": number, "max": number, "mean": number },
-    "nbr": { "min": number, "max": number, "mean": number },
-    "ndbi": { "min": number, "max": number, "mean": number }
-  },
-  ${classificationType ? `"classification_results": {
-    "method": "${classificationType}",
-    "num_classes": number,
-    "classes": [
-      { "id": number, "name": "string", "area_km2": number, "area_percent": number, "spectral_signature": { "B2": number, "B3": number, "B4": number, "B5": number, "B6": number, "B7": number } }
-    ],
-    "accuracy_metrics": {
-      "overall_accuracy": number,
-      "kappa_coefficient": number,
-      "producer_accuracy": { "class_name": number },
-      "user_accuracy": { "class_name": number }
-    },
-    "convergence_iterations": number
-  },` : ''}
-  ${enableChangeDetection ? `"change_detection": {
-    "method": "image_differencing|post_classification",
-    "total_changed_area_km2": number,
-    "change_percent": number,
-    "change_matrix": [
-      { "from_class": "string", "to_class": "string", "area_km2": number, "percent": number }
-    ],
-    "major_changes": [
-      { "type": "description", "area_km2": number, "severity": "low|medium|high|critical" }
-    ],
-    "change_hotspots": [
-      { "location": "description", "confidence": number, "change_magnitude": number }
-    ],
-    "no_change_area_km2": number
-  },` : ''}
-  ${isMultiEvent ? `"multi_event_analysis": {
-    "events": [
-      {
-        "event_type": "event name",
-        "change_percent": number,
-        "severity": "low|medium|high|critical",
-        "key_findings": "findings for this event",
-        "spectral_indicator": "NDVI|NDWI|NBR|custom"
-      }
-    ],
-    "combined_impact": "overall combined impact assessment",
-    "interaction_effects": "how events interact or compound each other"
-  },` : ''}
-  "predictive_modeling": {
-    "trend_direction": "improving|stable|declining|critical",
-    "projected_change_6mo": number,
-    "projected_change_12mo": number,
-    "confidence": number,
-    "methodology": "linear_regression|time_series|machine_learning"
-  },
-  "methodology_transparency": {
-    "percentage_derivation": "explanation of how change_percent was calculated from spectral data",
-    "uncertainty_range": { "lower": number, "upper": number },
-    "confidence_interval": "95%",
-    "validation_notes": "how to validate against ground truth",
-    "known_limitations": ["limitation1", "limitation2"]
-  }
-}`;
-
-    const userPrompt = `Analyze Sentinel-2 multispectral satellite imagery for ${isMultiEvent ? 'MULTIPLE EVENTS: ' : ''}${eventTypeLabels} in ${region}, Africa.
-Time period: ${startDate} to ${endDate}
-Coordinates: ${coordinates ? JSON.stringify(coordinates) : "Not specified"}
-${realStats ? `
-REAL MEASURED DATA (from actual Sentinel-2 satellite pixels, not an estimate):
-- NDVI mean: ${realStats.before.ndvi!.mean.toFixed(3)} (start of period) -> ${realStats.after.ndvi!.mean.toFixed(3)} (end of period)
-- NDVI-derived change: ${realChangePercent!.toFixed(1)}%
-${realStats.before.ndwi && realStats.after.ndwi ? `- NDWI mean: ${realStats.before.ndwi.mean.toFixed(3)} -> ${realStats.after.ndwi.mean.toFixed(3)}` : ''}
-${realStats.before.nbr && realStats.after.nbr ? `- NBR mean: ${realStats.before.nbr.mean.toFixed(3)} -> ${realStats.after.nbr.mean.toFixed(3)}` : ''}
-- Valid (cloud-free) pixel coverage: ${(realStats.after.validPixelRatio * 100).toFixed(0)}%
-- Area analyzed: ${realAreaKm2} km² (the real bounding box these statistics were computed over)
-You MUST use change_percent = ${realChangePercent!.toFixed(1)} and area_km2 = ${realAreaKm2} exactly (these are measured, not estimated) and ground your summary/detailed_analysis/severity/recommendations in this real figure and these real index values - do not invent different numbers.
-` : ''}
-
-TEMPORAL BREAKDOWN REQUIRED:
-- Break the ${startDate} to ${endDate} study period into 3-6 realistic sub-periods (quarterly if the span is 2 years or less, yearly if longer).
-- For each sub-period, report the cumulative change_percent from baseline through the end of that period - values should progress toward (and the final entry should equal) the overall change_percent, with realistic non-linear variation rather than even/linear steps (real environmental change typically accelerates, plateaus, or has setbacks rather than a straight line).
-- Label each period clearly and chronologically (e.g. "Q1 2022", "Q2 2022", ... or "2022", "2023", ...).
-
-${classificationType ? `
-CLASSIFICATION REQUESTED: ${classificationType.toUpperCase()}
-- Number of classes: ${numClasses}
-- Provide full classification results with accuracy metrics
-` : ''}
-
-${enableChangeDetection ? `
-CHANGE DETECTION REQUESTED:
-- Compare imagery from start and end dates
-- Identify and quantify all land cover changes
-- Generate change matrix and hotspot analysis
-` : ''}
-
-${isMultiEvent ? `MULTI-EVENT REQUIREMENTS:
-- Analyze each event type using appropriate spectral indices
-- Identify any interaction effects between events
-- Provide combined impact assessment
-` : ''}
-
-SENTINEL-2 DATA REQUIREMENTS:
-- Use Sentinel-2 MSI multispectral bands
-- Report specific spectral indices (NDVI, NDWI, NBR, NDBI)
-- Target 90%+ cloud detection accuracy using the Scene Classification Layer (SCL)
-- Include radiometric and geometric quality metrics
-
-${earthEngineContext.available ? `Access imagery via Google Earth Engine using authenticated service account access for project ${earthEngineContext.projectId}.` : `Google Earth Engine is unavailable for this request: ${earthEngineContext.message}`}`;
 
     const requestParams = {
       messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
+        {
+          role: "system",
+          content: "Return JSON with summary, detailed_analysis, severity, and recommendations only. Never invent measurements or confidence scores. If supplied measured values are present, repeat only those exact values; otherwise avoid numbers and state that measurements are unavailable.",
+        },
+        {
+          role: "user",
+          content: `Write a concise narrative for ${eventTypeLabels} in ${region} from ${startDate} to ${endDate}. ${
+            realStats
+              ? `Measured NDVI changed from ${realStats.before.ndvi!.mean.toFixed(3)} to ${realStats.after.ndvi!.mean.toFixed(3)}; measured NDVI change is ${realChangePercent!.toFixed(1)}%.`
+              : "No measured satellite values are available; do not make numerical claims."
+          }`,
+        },
       ],
       temperature: 0.7,
       // 4000 was already marginal for this schema (classification_results
@@ -966,8 +844,7 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
           startDate,
           endDate,
           coordinates,
-          classificationType,
-          enableChangeDetection,
+          fallbackReason: "PROVIDER_OVERLOAD",
           providerStatus: status,
           providerMessage: lastErrorText || "Groq is temporarily overloaded. Please try again in a minute.",
         });
@@ -993,27 +870,17 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
     let analysis = aiData.choices?.[0]?.message?.content || '';
     analysis = analysis.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
 
-    let parsedAnalysis;
+    let parsedAnalysis: Record<string, any>;
+    let parseFailed = false;
     try {
       parsedAnalysis = JSON.parse(analysis);
     } catch (parseError) {
+      parseFailed = true;
       console.error("Failed to parse AI response as JSON:", parseError);
-      const areaMatch = analysis.match(/(\d+[,.\d]*)\s*km²/i);
-      const percentMatch = analysis.match(/(\d+\.?\d*)\s*%/);
-      
       parsedAnalysis = {
-        area_km2: areaMatch ? parseFloat(areaMatch[1].replace(/,/g, '')) : null,
-        change_percent: percentMatch ? parseFloat(percentMatch[1]) : null,
         summary: analysis.split('\n')[0],
         detailed_analysis: analysis,
-        severity: "medium",
         recommendations: [],
-        data_sources: ["Sentinel-2 MSI"],
-        cloud_coverage: { percentage: 5, detection_accuracy: 92, impact: "minimal", affected_areas: "None detected", qa_band_quality: "good" },
-        data_quality: { overall_score: 87, radiometric_quality: 90, geometric_accuracy: 88, temporal_coverage: 85, atmospheric_correction: "applied", reflectance_type: "SR" },
-        analysis_confidence: 87,
-        landsat_info: { sensor: "Sentinel-2 MSI", spatial_resolution: "10m", bands_used: ["B02", "B03", "B04", "B08", "B11", "B12"], processing_level: "Level-2A" },
-        spectral_indices: { ndvi: { min: 0.1, max: 0.8, mean: 0.45, std: 0.15 } },
       };
     }
 
@@ -1021,8 +888,8 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
     // this guarantees the "real" claim in dataProvenance is actually true
     // every time real stats succeeded, rather than merely "true if the AI
     // happened to follow the prompt's instruction to use them."
-    const usedRealStats = !!realStats;
-    const finalChangePercent = usedRealStats ? realChangePercent! : (parsedAnalysis.change_percent || 0);
+    const usedRealStats = !!realStats && !parseFailed;
+    const finalChangePercent = usedRealStats ? realChangePercent : null;
 
     const realSpectralIndices: Record<string, SpectralBandStats> = {};
     if (usedRealStats) {
@@ -1034,77 +901,56 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
     const result = {
       eventType: eventTypes[0],
       eventTypes,
-      isMultiEvent,
+      isMultiEvent: false,
       region,
       startDate,
       endDate,
-      area: realAreaKm2 !== null ? `${realAreaKm2} km²` : (parsedAnalysis.area_km2 ? `${parsedAnalysis.area_km2} km²` : "Analysis in progress"),
+      analysisMethod: usedRealStats ? "measured" as const : "model_only" as const,
+      area: usedRealStats && realAreaKm2 !== null ? `${realAreaKm2} km²` : null,
       changePercent: finalChangePercent,
-      temporalBreakdown: realTemporalBreakdown && realTemporalBreakdown.length > 0
-        ? realTemporalBreakdown
-        : (Array.isArray(parsedAnalysis.temporal_breakdown) && parsedAnalysis.temporal_breakdown.length > 0
-            ? parsedAnalysis.temporal_breakdown.map((p: any) => ({
-                label: String(p.period || "Period"),
-                changePercent: typeof p.change_percent === "number" ? p.change_percent : parseFloat(p.change_percent),
-                months: typeof p.months === "number" ? p.months : undefined,
-              }))
-            : null),
+      temporalBreakdown: usedRealStats && realTemporalBreakdown?.length ? realTemporalBreakdown : null,
       summary: parsedAnalysis.summary || parsedAnalysis.detailed_analysis?.split('\n')[0] || "Environmental analysis complete",
       fullAnalysis: parsedAnalysis.detailed_analysis || analysis,
-      severity: parsedAnalysis.severity || "medium",
+      severity: usedRealStats ? deriveSeverity(realChangePercent!) : (parsedAnalysis.severity || null),
       recommendations: cleanTextArray(parsedAnalysis.recommendations),
-      // Not taken from the model's own self-reported "data_sources" field -
-      // the model has no actual way to know what it "used". This is computed
-      // by this function based on what was actually fetched, not phrased.
       dataSources: usedRealStats
-        ? ["Sentinel-2 L2A (Copernicus Data Space Ecosystem) - real NDVI/NDWI/NBR statistics", `Groq AI (${successModel}, AI-generated narrative analysis)`]
-        : [`Groq AI (${successModel}, AI-estimated, not measured imagery)`],
-      // Enhanced quality metrics
+        ? ["Sentinel-2 MSI L2A statistics (Copernicus Data Space)", `Groq-generated narrative (${successModel})`]
+        : [`Groq-generated narrative (${successModel}); no measured satellite values`],
       cloudCoverage: usedRealStats
-        ? { percentage: Math.round((1 - realStats!.after.validPixelRatio) * 100), detection_accuracy: null, impact: realStats!.after.validPixelRatio > 0.7 ? "minimal" : "moderate", affected_areas: "Computed from real Sentinel-2 Scene Classification Layer masking", qa_band_quality: "measured" }
-        : (parsedAnalysis.cloud_coverage || { percentage: 5, detection_accuracy: 92, impact: "minimal" }),
-      dataQuality: parsedAnalysis.data_quality || { overall_score: 87 },
-      analysisConfidence: parsedAnalysis.analysis_confidence || 87,
-      // Sensor info (field name kept as landsatInfo for backward compatibility
-      // with existing stored analysis_results rows and frontend prop names -
-      // the actual sensor described is always Sentinel-2, never Landsat)
-      landsatInfo: parsedAnalysis.landsat_info || { sensor: "Sentinel-2 MSI", spatial_resolution: "10m" },
-      spectralIndices: { ...(parsedAnalysis.spectral_indices || {}), ...realSpectralIndices },
-      // Classification results
-      classificationResults: parsedAnalysis.classification_results || null,
+        ? {
+            validPixelRatio: realStats!.after.validPixelRatio,
+            maskedPixelRatio: 1 - realStats!.after.validPixelRatio,
+          }
+        : null,
+      dataQuality: usedRealStats
+        ? {
+            validPixelRatio: realStats!.after.validPixelRatio,
+            sceneCount: realSceneCount,
+            pixelSampleCount: realStats!.after.sampleCount,
+            windowLengthDays: realWindowLengthDays,
+          }
+        : null,
+      sensorInfo: getAnalysisSensorInfo(coordinates?.lat ?? null, coordinates?.lng ?? null),
+      spectralIndices: usedRealStats ? realSpectralIndices : null,
+      classificationResults: null,
       classificationType,
-      // Change detection results
-      changeDetection: parsedAnalysis.change_detection || null,
-      enableChangeDetection,
-      // Multi-event results
-      multiEventAnalysis: parsedAnalysis.multi_event_analysis || null,
-      // Predictive modeling - real regression numbers (when available) win
-      // for the quantitative fields; trend_direction stays the model's call
-      // since "improving vs declining" is a judgment about this specific
-      // event type, not something the regression slope alone can determine.
-      predictiveModeling: realPredictiveModeling
-        ? { ...(parsedAnalysis.predictive_modeling || {}), ...realPredictiveModeling }
-        : (parsedAnalysis.predictive_modeling || null),
-      // Methodology transparency
-      methodologyTransparency: parsedAnalysis.methodology_transparency || null,
-      // Computed by this function, not the model - guarantees an honest
-      // provenance statement regardless of how the AI phrases its own text.
+      changeDetection: null,
+      enableChangeDetection: false,
+      multiEventAnalysis: null,
+      predictiveModeling: usedRealStats ? realPredictiveModeling : null,
+      methodologyTransparency: null,
+      fallbackReason: usedRealStats ? null : fallbackReason,
       dataProvenance: {
-        analysisMethod: usedRealStats ? "real_sentinel_statistics" : "ai_estimated",
+        analysisMethod: usedRealStats ? "measured" as const : "model_only" as const,
         disclaimer: usedRealStats
-          ? `The change percentage and spectral index values (NDVI${realSpectralIndices.ndwi ? '/NDWI' : ''}${realSpectralIndices.nbr ? '/NBR' : ''}) above are real measurements computed from actual Sentinel-2 satellite pixels (Copernicus Data Space Ecosystem), comparing the start and end of the study period over an ~11km area around the given coordinates (${(realStats!.after.validPixelRatio * 100).toFixed(0)}% cloud-free pixel coverage). The narrative summary, severity assessment, recommendations, and any classification/change-matrix breakdown are still AI-generated (${successModel} via Groq) interpretation grounded in these real numbers, not independently measured themselves.`
-          : "Spectral index values, percentages, and classification statistics in this analysis are AI-generated plausible estimates based on the model's training knowledge of typical environmental patterns for this region/event type - they are not measurements derived from actual satellite pixel data. No real satellite imagery was fetched or processed for this specific analysis.",
-        earthEngine: {
-          configured: earthEngineContext.available,
-          note: earthEngineContext.available
-            ? "An Earth Engine service account is configured and authenticates successfully, but its access token is not currently used to fetch real pixel data for this analysis."
-            : earthEngineContext.message,
-        },
-        realDataSourcesUsed: usedRealStats ? ["Sentinel-2 L2A (Copernicus Data Space Ecosystem)"] : [],
+          ? `NDVI, NDWI, and NBR values, NDVI change, and valid-pixel coverage are measurements from Sentinel-2 MSI L2A pixels. Narrative text is generated by Groq and is not itself a measurement.`
+          : "No measured Sentinel-2 pixel values are available. Narrative text is generated by Groq and must not be interpreted as measured data.",
+        realDataSourcesUsed: usedRealStats ? ["Sentinel-2 MSI L2A statistics (Copernicus Data Space)"] : [],
       },
       coordinates,
       timestamp: new Date().toISOString(),
     };
+    const resultWithProvenance = attachFieldProvenance(result, result.analysisMethod, startDate, endDate);
 
     if (user) {
       await supabase.from("analysis_results").insert({
@@ -1113,24 +959,23 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
         region: region,
         start_date: startDate,
         end_date: endDate,
-        area_analyzed: result.area,
-        change_percent: result.changePercent,
-        summary: result.summary,
+        area_analyzed: resultWithProvenance.area,
+        change_percent: resultWithProvenance.changePercent,
+        summary: resultWithProvenance.summary,
         ai_analysis: { 
-          fullAnalysis: result.fullAnalysis,
-          severity: result.severity,
-          recommendations: result.recommendations,
-          dataSources: result.dataSources,
-          cloudCoverage: result.cloudCoverage,
-          dataQuality: result.dataQuality,
-          analysisConfidence: result.analysisConfidence,
-          landsatInfo: result.landsatInfo,
-          spectralIndices: result.spectralIndices,
-          classificationResults: result.classificationResults,
-          changeDetection: result.changeDetection,
-          multiEventAnalysis: result.multiEventAnalysis,
-          predictiveModeling: result.predictiveModeling,
-          isMultiEvent,
+          fullAnalysis: resultWithProvenance.fullAnalysis,
+          severity: resultWithProvenance.severity,
+          recommendations: resultWithProvenance.recommendations,
+          dataSources: resultWithProvenance.dataSources,
+          cloudCoverage: resultWithProvenance.cloudCoverage,
+          dataQuality: resultWithProvenance.dataQuality,
+          sensorInfo: resultWithProvenance.sensorInfo,
+          spectralIndices: resultWithProvenance.spectralIndices,
+          classificationResults: resultWithProvenance.classificationResults,
+          changeDetection: resultWithProvenance.changeDetection,
+          multiEventAnalysis: resultWithProvenance.multiEventAnalysis,
+          predictiveModeling: resultWithProvenance.predictiveModeling,
+          isMultiEvent: false,
           eventTypes,
         },
         coordinates: coordinates,
@@ -1138,7 +983,7 @@ ${earthEngineContext.available ? `Access imagery via Google Earth Engine using a
       console.log(`Analysis saved for user ${user.id}`);
     }
 
-    return new Response(JSON.stringify(result), {
+    return new Response(JSON.stringify(resultWithProvenance), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 

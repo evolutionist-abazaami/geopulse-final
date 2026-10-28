@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Leaf, Droplets, Flame, Building2, Info, ChevronDown } from "lucide-react";
+import { Leaf, Droplets, Flame, Info, ChevronDown } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface SpectralIndex {
@@ -17,7 +17,12 @@ interface SpectralIndicesDisplayProps {
     ndvi?: SpectralIndex;
     ndwi?: SpectralIndex;
     nbr?: SpectralIndex;
-    ndbi?: SpectralIndex;
+  } | null;
+  sensorInfo?: {
+    sensor?: string;
+    statistics_grid?: string;
+    metres_per_cell?: { x: number; y: number } | null;
+    native_band_resolutions_m?: Record<string, number>;
   } | null;
   landsatInfo?: {
     sensor?: string;
@@ -74,20 +79,6 @@ const indexConfig = {
     ],
     gradientColors: ['bg-gray-800', 'bg-red-600', 'bg-orange-400', 'bg-yellow-300', 'bg-green-500'],
   },
-  ndbi: {
-    label: 'NDBI',
-    fullName: 'Normalized Difference Built-up Index',
-    icon: Building2,
-    color: 'text-gray-600',
-    bgColor: 'bg-gray-50 dark:bg-gray-800/30',
-    formula: '(SWIR1 - NIR) / (SWIR1 + NIR)',
-    bands: [
-      { upTo: -0.1, meaning: 'Vegetation or water, not built-up', tone: 'low' as const },
-      { upTo: 0.1, meaning: 'Mixed land cover', tone: 'mid' as const },
-      { upTo: Infinity, meaning: 'Urban / built-up area', tone: 'high' as const },
-    ],
-    gradientColors: ['bg-green-600', 'bg-lime-400', 'bg-yellow-400', 'bg-gray-400', 'bg-gray-700'],
-  },
 };
 
 const toneBadgeClass: Record<"low" | "mid" | "high", string> = {
@@ -116,8 +107,9 @@ const normalizeValue = (value: any): number => {
   return Math.max(0, Math.min(100, normalized));
 };
 
-const SpectralIndicesDisplay = ({ spectralIndices, landsatInfo }: SpectralIndicesDisplayProps) => {
+const SpectralIndicesDisplay = ({ spectralIndices, sensorInfo: sensorInfoProp, landsatInfo }: SpectralIndicesDisplayProps) => {
   const [showTechnical, setShowTechnical] = useState(false);
+  const sensorInfo = sensorInfoProp ?? landsatInfo;
 
   if (!spectralIndices) return null;
 
@@ -128,9 +120,14 @@ const SpectralIndicesDisplay = ({ spectralIndices, landsatInfo }: SpectralIndice
     <Card className="p-4 space-y-4">
       <div className="flex items-center justify-between">
         <h4 className="font-semibold text-sm">What the imagery shows</h4>
-        {landsatInfo && (
+        {sensorInfo && (
           <Badge variant="outline" className="text-xs">
-            {landsatInfo.sensor} • {landsatInfo.spatial_resolution}
+            {sensorInfo.sensor}
+            {"statistics_grid" in sensorInfo && sensorInfo.statistics_grid
+              ? ` • ${sensorInfo.statistics_grid} statistics grid`
+              : "spatial_resolution" in sensorInfo && sensorInfo.spatial_resolution
+                ? ` • ${sensorInfo.spatial_resolution}`
+                : ""}
           </Badge>
         )}
       </div>
@@ -213,13 +210,13 @@ const SpectralIndicesDisplay = ({ spectralIndices, landsatInfo }: SpectralIndice
             );
           })}
 
-          {landsatInfo?.bands_used && (
+          {sensorInfo && "native_band_resolutions_m" in sensorInfo && sensorInfo.native_band_resolutions_m && (
             <div className="pt-2 border-t">
-              <p className="text-xs text-muted-foreground mb-1">Bands Used:</p>
+              <p className="text-xs text-muted-foreground mb-1">Native band resolution:</p>
               <div className="flex flex-wrap gap-1">
-                {landsatInfo.bands_used.map(band => (
+                {Object.entries(sensorInfo.native_band_resolutions_m).map(([band, resolution]) => (
                   <Badge key={band} variant="secondary" className="text-xs">
-                    {band}
+                    {band}: {resolution} m
                   </Badge>
                 ))}
               </div>

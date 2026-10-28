@@ -4,27 +4,23 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Cloud, CloudOff, CloudRain, CheckCircle2, AlertTriangle, Info } from "lucide-react";
 
 interface CloudCoverageDisplayProps {
-  cloudCoverage?: number; // 0-100 percentage
-  dataQuality?: number; // 0-100 quality score
-  analysisConfidence?: number; // 0-100 confidence
+  cloudCoverage?: number | null;
+  dataQuality?: number | null;
   sensorType?: string;
   acquisitionDate?: string;
 }
 
 const CloudCoverageDisplay = ({
-  cloudCoverage = 0,
-  dataQuality = 90,
-  analysisConfidence = 87,
-  sensorType = "Sentinel-2 MSI",
+  cloudCoverage = null,
+  dataQuality = null,
+  sensorType = "Sentinel-2 MSI L2A",
   acquisitionDate
 }: CloudCoverageDisplayProps) => {
   const normalizedCloudCoverage = typeof cloudCoverage === "number" ? cloudCoverage : null;
   const normalizedDataQuality = typeof dataQuality === "number" ? dataQuality : null;
-  const normalizedAnalysisConfidence = typeof analysisConfidence === "number" ? analysisConfidence : null;
 
-  const hasMetrics = normalizedCloudCoverage !== null && normalizedDataQuality !== null && normalizedAnalysisConfidence !== null;
+  const hasMetrics = normalizedCloudCoverage !== null && normalizedDataQuality !== null;
   const isUsable = normalizedCloudCoverage !== null && normalizedDataQuality !== null && normalizedCloudCoverage <= 20 && normalizedDataQuality >= 70;
-  const isAccurate = normalizedAnalysisConfidence !== null && normalizedAnalysisConfidence >= 90;
 
   const getCloudIcon = () => {
     if (normalizedCloudCoverage === null) return <Info className="h-4 w-4 text-muted-foreground" />;
@@ -103,12 +99,12 @@ const CloudCoverageDisplay = ({
             </TooltipContent>
           </Tooltip>
 
-          {/* Data Quality */}
+          {/* Valid Pixel Coverage */}
           <Tooltip>
             <TooltipTrigger asChild>
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-muted-foreground">Data Quality</span>
+                  <span className="text-muted-foreground">Valid Pixels</span>
                   <span className={`font-medium ${qualityStatus.color}`}>{normalizedDataQuality === null ? "Unavailable" : `${normalizedDataQuality}%`}</span>
                 </div>
                 <Progress 
@@ -122,41 +118,10 @@ const CloudCoverageDisplay = ({
             </TooltipTrigger>
             <TooltipContent>
               <p className="text-xs">
-                Overall data quality including radiometric and geometric accuracy.
+                Share of pixels with valid data after the Scene Classification Layer mask.
               </p>
             </TooltipContent>
           </Tooltip>
-        </div>
-
-        {/* Analysis Confidence */}
-        <div className="pt-2 border-t">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-xs text-muted-foreground">Analysis Confidence</span>
-            <div className="flex items-center gap-2">
-               {normalizedAnalysisConfidence !== null && isAccurate ? (
-                <Badge className="bg-emerald-500 text-[10px] px-1.5 py-0">
-                  ≥90% Accuracy
-                </Badge>
-              ) : (
-                <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-                   {normalizedAnalysisConfidence === null ? "Unavailable" : `${normalizedAnalysisConfidence}% Confidence`}
-                </Badge>
-              )}
-            </div>
-          </div>
-          <div className="relative">
-             <Progress value={normalizedAnalysisConfidence ?? 0} className="h-2" />
-            <div 
-              className="absolute top-0 h-2 w-0.5 bg-primary/50"
-              style={{ left: '90%' }}
-              title="90% threshold"
-            />
-          </div>
-          <div className="flex justify-between mt-1 text-[10px] text-muted-foreground">
-            <span>0%</span>
-            <span className="text-primary">90% threshold</span>
-            <span>100%</span>
-          </div>
         </div>
 
         {/* Sensor Info */}

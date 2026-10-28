@@ -1,15 +1,13 @@
 import { useEffect, useState } from "react";
 import {
   Play, GitCompare, Clock, FileType, Upload, Star, MousePointer, Loader2,
-  AlertTriangle, Layers, ChevronDown, Satellite,
+  AlertTriangle, ChevronDown, Satellite,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DatePicker } from "@/components/ui/date-picker";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -20,10 +18,9 @@ import SavedLocations from "@/components/SavedLocations";
 import ComparisonMode from "@/components/ComparisonMode";
 import TimeLapseAnimation from "@/components/TimeLapseAnimation";
 import GISExportButton from "@/components/GISExportButton";
-import MultiEventSelector from "@/components/MultiEventSelector";
 import ShapefileImport from "@/components/ShapefileImport";
 import CloudCoverageDisplay from "@/components/CloudCoverageDisplay";
-import ClassificationControls, { ClassificationType } from "@/components/ClassificationControls";
+import DataProvenancePanel from "@/components/DataProvenancePanel";
 import ClassificationResults from "@/components/ClassificationResults";
 import SpectralIndicesDisplay from "@/components/SpectralIndicesDisplay";
 import RealTimeRegionalStatus from "@/components/RealTimeRegionalStatus";
@@ -83,127 +80,75 @@ const eventTypes = [
   { value: "volcanic_activity", label: "Volcanic Activity", icon: "🌋" },
 ];
 
-const isFallbackAnalysis = (data: any) => Boolean(data?.fallback || data?.fallbackReason === "SERVICE_UNAVAILABLE");
+const isFallbackAnalysis = (data: any) => Boolean(data?.fallback);
 
-// Ported verbatim from the old GeoWitness.tsx page - offline fallback used
-// when the analyze-satellite edge function is unreachable.
+// Return unavailable data rather than manufacturing a satellite result offline.
 const generateLocalSatelliteAnalysis = (
   eventTypesToAnalyze: string[],
   regionName: string,
   startDate: string,
   endDate: string,
   coordinates: { lat: number; lng: number },
-  classificationType: ClassificationType,
-  enableChangeDetection: boolean,
-  numClasses: number
 ) => {
   const mainEvent = eventTypesToAnalyze[0] || "environmental_change";
-  const formattedEvent = mainEvent.replace(/_/g, " ");
-  const hash = Math.abs(Math.sin(coordinates.lat * 12.9898 + coordinates.lng * 78.233)) * 100;
-  const changePercent = Number((12.4 + (hash % 28.5)).toFixed(1));
-  const areaKm2 = Math.round(180 + (hash * 3.5));
-  const isMultiEvent = eventTypesToAnalyze.length > 1;
-  const severity = changePercent > 30 ? "high" : changePercent > 18 ? "medium" : "low";
-
-  const summaryText = `Sentinel-2 satellite imagery analysis for ${regionName} reveals a ${changePercent}% change associated with ${formattedEvent} between ${startDate} and ${endDate}.`;
-  const fullAnalysisText = `Multi-spectral analysis of Sentinel-2 MSI imagery over ${regionName} shows significant spectral variance across SWIR and NIR bands. ${formattedEvent.toUpperCase()} indicators confirm active spatial transformation across ${areaKm2} km². Vegetation health metrics (NDVI) and moisture indices (NDWI) exhibit a calculated deviation from baseline conditions.`;
-  const recommendationsList = [
-    `Deploy localized ground monitoring teams across primary ${formattedEvent} hotspots in ${regionName}.`,
-    `Establish automated satellite surveillance alerts for the upcoming 6-month period.`,
-    `Integrate regional conservation measures and engage local stakeholders for rapid intervention.`,
-  ];
-
-  return {
-    // Not a real analysis - no imagery was fetched or processed. These
-    // numbers are deterministically generated from the coordinates so the
-    // UI has something to show when the edge function is unreachable. The
-    // existing `results.fallback` banner (see the results panel below)
-    // already exists for this; without this flag it was being shown as a
-    // normal successful result.
+  const result = {
     fallback: true,
-    fallbackReason: "LOCAL_SIMULATION",
+    fallbackReason: "SENTINEL_API_ERROR",
+    analysisMethod: "model_only",
     eventType: mainEvent,
     eventTypes: eventTypesToAnalyze,
-    isMultiEvent,
+    isMultiEvent: false,
     region: regionName,
     startDate,
     endDate,
-    area: `${areaKm2} km²`,
-    changePercent,
-    summary: summaryText,
-    fullAnalysis: fullAnalysisText,
-    severity,
-    recommendations: recommendationsList,
-    dataSources: ["Sentinel-2 MSI (Multi-Spectral Instrument)"],
-    cloudCoverage: {
-      percentage: Number((2.1 + (hash % 4)).toFixed(1)),
-      detection_accuracy: 94.2,
-      impact: "minimal",
-      affected_areas: "Minor cloud masking in northern sector",
-      qa_band_quality: "good",
+    area: null,
+    changePercent: null,
+    summary: "No analysis data is available because the satellite analysis service could not be reached.",
+    fullAnalysis: "No measured satellite values or model-generated narrative are available for this request.",
+    severity: null,
+    recommendations: [],
+    dataSources: [],
+    cloudCoverage: null,
+    dataQuality: null,
+    sensorInfo: {
+      sensor: "Sentinel-2 MSI L2A",
+      statistics_grid: "128x128",
+      metres_per_cell: {
+        x: 0.1 * 111_320 * Math.cos((coordinates.lat * Math.PI) / 180) / 128,
+        y: 0.1 * 111_320 / 128,
+      },
+      center: coordinates,
+      native_band_resolutions_m: { B02: 10, B03: 10, B04: 10, B08: 10, B11: 20, B12: 20 },
     },
-    dataQuality: {
-      overall_score: 91, radiometric_quality: 94, geometric_accuracy: 92,
-      temporal_coverage: 88, atmospheric_correction: "applied", reflectance_type: "SR",
-    },
-    analysisConfidence: 91,
-    landsatInfo: {
-      sensor: "Sentinel-2 MSI", spatial_resolution: "10m",
-      acquisition_dates: [startDate, endDate], processing_level: "Level-2A Surface Reflectance",
-      bands_used: ["B02", "B03", "B04", "B08", "B11", "B12"],
-    },
-    spectralIndices: {
-      ndvi: { min: 0.12, max: 0.84, mean: Number((0.48 - (changePercent / 200)).toFixed(2)), std: 0.14 },
-      ndwi: { min: -0.35, max: 0.42, mean: -0.08 },
-      nbr: { min: -0.15, max: 0.65, mean: 0.28 },
-      ndbi: { min: -0.42, max: 0.38, mean: -0.12 },
-    },
-    classificationResults: classificationType ? {
-      method: classificationType,
-      num_classes: numClasses,
-      classes: [
-        { id: 1, name: "Dense Forest / Vegetation", area_km2: Math.round(areaKm2 * 0.4), area_percent: 40 },
-        { id: 2, name: "Open Vegetation / Agriculture", area_km2: Math.round(areaKm2 * 0.25), area_percent: 25 },
-        { id: 3, name: "Bare Soil / Degraded Land", area_km2: Math.round(areaKm2 * 0.20), area_percent: 20 },
-        { id: 4, name: "Water Bodies", area_km2: Math.round(areaKm2 * 0.10), area_percent: 10 },
-        { id: 5, name: "Urban / Built-up", area_km2: Math.round(areaKm2 * 0.05), area_percent: 5 },
-      ],
-      accuracy_metrics: { overall_accuracy: 92.4, kappa_coefficient: 0.89 },
-    } : null,
-    classificationType,
-    changeDetection: enableChangeDetection ? {
-      method: "post_classification",
-      total_changed_area_km2: Math.round(areaKm2 * (changePercent / 100)),
-      change_percent: changePercent,
-      major_changes: [{ type: `${formattedEvent} transition zone`, area_km2: Math.round(areaKm2 * 0.12), severity }],
-      change_hotspots: [{ location: `${regionName} Central Sector`, confidence: 93, change_magnitude: changePercent }],
-    } : null,
-    enableChangeDetection,
-    multiEventAnalysis: isMultiEvent ? {
-      events: eventTypesToAnalyze.map(evt => ({
-        event_type: evt,
-        change_percent: Number((changePercent * (0.7 + Math.random() * 0.5)).toFixed(1)),
-        severity,
-        key_findings: `Significant activity observed for ${evt.replace(/_/g, " ")} in target area.`,
-      })),
-      combined_impact: `Compounding environmental impacts detected across ${eventTypesToAnalyze.length} categories.`,
-    } : null,
-    predictiveModeling: {
-      trend_direction: changePercent > 20 ? "declining" : "stable",
-      projected_change_6mo: Number((changePercent * 1.15).toFixed(1)),
-      projected_change_12mo: Number((changePercent * 1.32).toFixed(1)),
-      confidence: 88,
-      methodology: "machine_learning_time_series",
-    },
-    methodologyTransparency: {
-      percentage_derivation: `Calculated from pixel-level Sentinel-2 band differencing across ${startDate} to ${endDate}.`,
-      uncertainty_range: { lower: Number((changePercent * 0.9).toFixed(1)), upper: Number((changePercent * 1.1).toFixed(1)) },
-      confidence_interval: "95%",
-      validation_notes: "Validated against Sentinel-2 Level-2A Surface Reflectance standard data models.",
-      known_limitations: ["Resolution constrained to 10m Sentinel-2 grid size."],
+    spectralIndices: null,
+    classificationResults: null,
+    classificationType: null,
+    changeDetection: null,
+    enableChangeDetection: false,
+    multiEventAnalysis: null,
+    temporalBreakdown: null,
+    predictiveModeling: null,
+    methodologyTransparency: null,
+    dataProvenance: {
+      analysisMethod: "model_only",
+      disclaimer: "No measured values or generated narrative are available.",
+      realDataSourcesUsed: [],
     },
     coordinates,
     timestamp: new Date().toISOString(),
+  };
+  const unavailable = {
+    origin: "unavailable",
+    source: "No data returned",
+    sensor: "Not available",
+    method: "model_only",
+    dateRange: `${startDate}/${endDate}`,
+  };
+  return {
+    ...result,
+    fieldProvenance: Object.fromEntries(
+      [...Object.keys(result), "fieldProvenance"].map((field) => [field, unavailable]),
+    ),
   };
 };
 
@@ -224,17 +169,12 @@ export function GeoWitnessPanel() {
   const [tool, setTool] = useState<Tool>("analysis");
 
   const [eventType, setEventType] = useState("deforestation");
-  const [selectedEventTypes, setSelectedEventTypes] = useState<string[]>([]);
-  const [isMultiEventMode, setIsMultiEventMode] = useState(false);
   const [region, setRegion] = useState("");
   const [startDate, setStartDate] = useState("2022-01-01");
   const [endDate, setEndDate] = useState("2024-01-01");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [results, setResults] = useState<any>(null);
   const [selectedLocation, setSelectedLocation] = useState<{ lat: number; lng: number; name: string } | null>(null);
-  const [classificationType, setClassificationType] = useState<ClassificationType>(null);
-  const [enableChangeDetection, setEnableChangeDetection] = useState(false);
-  const [numClasses, setNumClasses] = useState(6);
   const [importedFeatures, setImportedFeatures] = useState<AnalysisFeature[]>([]);
 
   const handleLocationSelect = (location: { name: string; lat: number; lng: number }) => {
@@ -278,7 +218,7 @@ export function GeoWitnessPanel() {
 
     const coordinates = selectedLocation;
     const targetRegionName = selectedLocation.name;
-    const eventTypesToAnalyze = isMultiEventMode && selectedEventTypes.length > 0 ? selectedEventTypes : [eventType];
+    const eventTypesToAnalyze = [eventType];
 
     setIsAnalyzing(true);
     setResults(null);
@@ -292,7 +232,7 @@ export function GeoWitnessPanel() {
         color: data.changePercent > 50 ? "#ef4444" : "#f97316",
       }]);
       const boundarySize = 0.15;
-      const changePercent = data.changePercent || 0;
+      const changePercent = typeof data.changePercent === "number" ? data.changePercent : null;
       mapCtx.setPolygons([{
         coordinates: [
           [coordinates.lng - boundarySize, coordinates.lat + boundarySize],
@@ -301,8 +241,10 @@ export function GeoWitnessPanel() {
           [coordinates.lng - boundarySize, coordinates.lat - boundarySize],
           [coordinates.lng - boundarySize, coordinates.lat + boundarySize],
         ],
-        label: `${changePercent.toFixed(1)}% ${eventType.replace(/_/g, " ")} detected`,
-        color: changePercent > 50 ? "#ef4444" : changePercent > 25 ? "#f97316" : "#22c55e",
+        label: changePercent === null
+          ? `${eventType.replace(/_/g, " ")} analysis — change not measured`
+          : `${changePercent.toFixed(1)}% ${eventType.replace(/_/g, " ")} change measured`,
+        color: changePercent === null ? "#6b7280" : changePercent > 50 ? "#ef4444" : changePercent > 25 ? "#f97316" : "#22c55e",
         fillOpacity: 0.3,
       }]);
       mapCtx.setView([coordinates.lat, coordinates.lng], 10);
@@ -311,11 +253,7 @@ export function GeoWitnessPanel() {
         east: coordinates.lng + boundarySize, west: coordinates.lng - boundarySize,
       });
 
-      // Don't persist locally-simulated results into history - they're not
-      // a real analysis, and every future reader of analysis_history
-      // (Reports, GeoSearch grounding, etc.) would otherwise have to
-      // remember to filter them back out.
-      if (data?.fallbackReason !== "LOCAL_SIMULATION") {
+      if (!data?.fallback) {
         saveAnalysis({
           type: "geowitness",
           eventType: eventTypesToAnalyze[0],
@@ -348,7 +286,6 @@ export function GeoWitnessPanel() {
             body: JSON.stringify({
               eventTypes: eventTypesToAnalyze, eventType: eventTypesToAnalyze[0],
               region: targetRegionName, startDate, endDate, coordinates,
-              classificationType, enableChangeDetection, numClasses,
             }),
             signal: controller.signal,
           }
@@ -359,25 +296,25 @@ export function GeoWitnessPanel() {
 
       const data = response.ok
         ? await response.json()
-        : generateLocalSatelliteAnalysis(eventTypesToAnalyze, targetRegionName, startDate, endDate, coordinates, classificationType, enableChangeDetection, numClasses);
+        : generateLocalSatelliteAnalysis(eventTypesToAnalyze, targetRegionName, startDate, endDate, coordinates);
 
       applyResult(data);
-      if (data?.fallbackReason === "LOCAL_SIMULATION") {
-        toast.warning("Analysis service unreachable - showing a simulated preview, not real satellite data.");
-      } else if (isFallbackAnalysis(data)) {
-        toast.warning("AI analysis is temporarily delayed due to provider load. Showing a fallback result.");
+      if (isFallbackAnalysis(data)) {
+        toast.warning("No measured values are available for this analysis.");
       } else {
         toast.success("Satellite analysis complete!");
       }
     } catch (error) {
-      console.warn("Analysis API unreachable, showing a local simulated preview:", error);
-      const fallbackData = generateLocalSatelliteAnalysis(eventTypesToAnalyze, targetRegionName, startDate, endDate, coordinates, classificationType, enableChangeDetection, numClasses);
+      console.error("Analysis API request failed:", error);
+      const fallbackData = generateLocalSatelliteAnalysis(eventTypesToAnalyze, targetRegionName, startDate, endDate, coordinates);
       applyResult(fallbackData);
-      toast.warning("Analysis service unreachable - showing a simulated preview, not real satellite data.");
+      toast.error("Analysis service is unavailable. No measured values are shown.");
     } finally {
       setIsAnalyzing(false);
     }
   };
+
+  const sensorInfo = results?.sensorInfo ?? results?.landsatInfo;
 
   return (
     <div className="flex flex-col h-full">
@@ -402,31 +339,19 @@ export function GeoWitnessPanel() {
       <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden scrollbar-thin p-3.5 space-y-4">
         {tool === "analysis" && (
           <div className="space-y-4">
-            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-surface-2 rounded-lg">
-              <div className="flex items-center gap-2">
-                <Layers className="h-4 w-4 text-gray-500 dark:text-v2-secondary" />
-                <Label htmlFor="multi-event" className="text-[13px] font-medium text-gray-900 dark:text-v2-primary">Multi-Event Analysis</Label>
-              </div>
-              <Switch id="multi-event" checked={isMultiEventMode} onCheckedChange={setIsMultiEventMode} />
+            <div>
+              <label className="text-[13px] font-medium mb-2 block text-gray-900 dark:text-v2-primary">Event Type</label>
+              <Select value={eventType} onValueChange={setEventType}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent className="max-h-[300px]">
+                  {eventTypes.map((type) => (
+                    <SelectItem key={type.value} value={type.value}>
+                      <span className="flex items-center gap-2"><span>{type.icon}</span>{type.label}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
-
-            {isMultiEventMode ? (
-              <MultiEventSelector selectedEvents={selectedEventTypes} onSelectionChange={setSelectedEventTypes} maxSelection={5} />
-            ) : (
-              <div>
-                <label className="text-[13px] font-medium mb-2 block text-gray-900 dark:text-v2-primary">Event Type</label>
-                <Select value={eventType} onValueChange={setEventType}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent className="max-h-[300px]">
-                    {eventTypes.map((type) => (
-                      <SelectItem key={type.value} value={type.value}>
-                        <span className="flex items-center gap-2"><span>{type.icon}</span>{type.label}</span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
 
             <div>
               <label className="text-[13px] font-medium mb-2 block text-gray-900 dark:text-v2-primary">Search Location</label>
@@ -461,14 +386,9 @@ export function GeoWitnessPanel() {
               </div>
             </div>
 
-            <ClassificationControls
-              classificationType={classificationType}
-              onClassificationTypeChange={setClassificationType}
-              enableChangeDetection={enableChangeDetection}
-              onChangeDetectionToggle={setEnableChangeDetection}
-              numClasses={numClasses}
-              onNumClassesChange={setNumClasses}
-            />
+            <p className="text-xs text-muted-foreground">
+              Classification, change matrices, and multi-event analysis are disabled until they use measured inputs.
+            </p>
 
             <Button className="w-full bg-gradient-ocean hover:opacity-90" onClick={runAnalysis} disabled={isAnalyzing}>
               {isAnalyzing ? (
@@ -489,41 +409,45 @@ export function GeoWitnessPanel() {
               <div className="space-y-4 pt-4 border-t border-gray-200 dark:border-border-subtle">
                 <div className="flex items-center justify-between">
                   <h4 className="font-bold text-[15px] text-gray-900 dark:text-v2-primary">Analysis Results</h4>
-                  {results.isMultiEvent && <Badge variant="secondary" className="text-xs"><Layers className="h-3 w-3 mr-1" />Multi-Event</Badge>}
                 </div>
+                <DataProvenancePanel results={results} />
 
-                {results.landsatInfo && (
+                {sensorInfo && (
                   <div className="p-3 bg-brand-dim border border-brand-border rounded-lg">
                     <div className="flex items-center gap-2 mb-2">
                       <Satellite className="h-4 w-4 text-brand" />
-                      <span className="text-[13px] font-medium text-gray-900 dark:text-v2-primary">{results.landsatInfo.sensor || "Sentinel-2 MSI"}</span>
-                      <Badge variant="outline" className="text-xs">{results.landsatInfo.spatial_resolution || "10m"}</Badge>
+                      <span className="text-[13px] font-medium text-gray-900 dark:text-v2-primary">{sensorInfo.sensor || "Sentinel-2 MSI L2A"}</span>
+                      {sensorInfo.statistics_grid && <Badge variant="outline" className="text-xs">{sensorInfo.statistics_grid} statistics grid</Badge>}
                     </div>
+                    {sensorInfo.metres_per_cell && (
+                      <p className="text-xs text-muted-foreground">
+                        Grid cell: {sensorInfo.metres_per_cell.x.toFixed(1)} × {sensorInfo.metres_per_cell.y.toFixed(1)} m
+                      </p>
+                    )}
                   </div>
                 )}
 
                 <CloudCoverageDisplay
-                  cloudCoverage={results.cloudCoverage?.percentage}
-                  dataQuality={results.dataQuality?.overall_score}
-                  analysisConfidence={results.analysisConfidence}
-                  sensorType={results.landsatInfo?.sensor}
-                  acquisitionDate={results.landsatInfo?.acquisition_dates?.[0]}
+                  cloudCoverage={typeof results.cloudCoverage?.maskedPixelRatio === "number" ? results.cloudCoverage.maskedPixelRatio * 100 : null}
+                  dataQuality={typeof results.dataQuality?.validPixelRatio === "number" ? results.dataQuality.validPixelRatio * 100 : null}
+                  sensorType={sensorInfo?.sensor}
+                  acquisitionDate={sensorInfo?.acquisition_dates?.[0]}
                 />
-                <SpectralIndicesDisplay spectralIndices={results.spectralIndices} landsatInfo={results.landsatInfo} />
+                <SpectralIndicesDisplay spectralIndices={results.spectralIndices} sensorInfo={sensorInfo} landsatInfo={sensorInfo} />
                 <ClassificationResults classificationResults={results.classificationResults} changeDetection={results.changeDetection} />
 
                 <div className="p-3 rounded-lg bg-critical-dim border border-critical/20 flex items-start gap-3">
                   <AlertTriangle className="h-5 w-5 text-critical mt-0.5 flex-shrink-0" />
                   <div>
                     <p className="font-semibold text-critical text-sm">
-                      {results.fallback ? (results.fallbackReason === "LOCAL_SIMULATION" ? "Simulated Result - Not Real Data" : "Analysis Delayed") : results.severity === "critical" ? "Critical Impact" : results.severity === "high" ? "High Impact" : results.severity === "medium" ? "Moderate Impact" : "Low Impact"} Detected
+                      {results.fallback ? "Analysis Unavailable" : results.severity ? `${results.severity} impact` : "Severity unavailable"}
                     </p>
                     <p className="text-[11px] text-gray-400 dark:text-v2-muted">
                       {results.fallback
-                        ? (results.fallbackReason === "LOCAL_SIMULATION"
-                            ? "The analysis service is unreachable. These numbers are generated on your device for preview only - no satellite imagery was processed. Retry once you're back online for a real result."
-                            : "The AI provider is temporarily overloaded. Retry shortly for full results.")
-                        : "Attention recommended"}
+                        ? "No measured values or generated narrative are available. Retry when the service is available."
+                        : results.fieldProvenance?.severity?.origin === "model_generated"
+                          ? "Model-generated interpretation; not a measured result."
+                          : "Severity is derived from measured NDVI change using documented thresholds."}
                     </p>
                   </div>
                 </div>
@@ -537,25 +461,41 @@ export function GeoWitnessPanel() {
                   </div>
                   <div className="p-3 bg-gray-50 dark:bg-surface-2 rounded-lg">
                     <p className="text-[11px] text-gray-400 dark:text-v2-muted">Change</p>
-                    <p className="font-bold text-xl text-critical">{Number(results.changePercent).toFixed(1)}%</p>
+                    <p className="font-bold text-xl text-critical">
+                      {typeof results.changePercent === "number" ? `${results.changePercent.toFixed(1)}%` : "Unavailable"}
+                    </p>
+                    <Badge variant="outline" className="mt-1 text-[10px]">
+                      {results.fieldProvenance?.changePercent?.origin === "measured" ? "Measured" : "Not measured"}
+                    </Badge>
                   </div>
                 </div>
 
                 <div>
-                  <p className="text-[11px] text-gray-400 dark:text-v2-muted mb-1">Summary</p>
+                  <div className="flex items-center gap-2 mb-1">
+                    <p className="text-[11px] text-gray-400 dark:text-v2-muted">Summary</p>
+                    <Badge variant="outline" className="text-[10px]">
+                      {results.fieldProvenance?.summary?.origin === "model_generated" ? "Model-generated text" : "Unavailable"}
+                    </Badge>
+                  </div>
                   <p className="text-[13px] leading-relaxed text-gray-700 dark:text-v2-secondary">{results.summary}</p>
                 </div>
 
                 {results.fullAnalysis && (
                   <div>
-                    <p className="text-[11px] text-gray-400 dark:text-v2-muted mb-1">Detailed Analysis</p>
+                    <div className="flex items-center gap-2 mb-1">
+                      <p className="text-[11px] text-gray-400 dark:text-v2-muted">Detailed Analysis</p>
+                      <Badge variant="outline" className="text-[10px]">Model-generated text</Badge>
+                    </div>
                     <div className="text-[13px] leading-relaxed bg-gray-50 dark:bg-surface-2 p-3 rounded-lg text-gray-700 dark:text-v2-secondary">{results.fullAnalysis}</div>
                   </div>
                 )}
 
                 {results.recommendations?.length > 0 && (
                   <div>
-                    <p className="text-[11px] text-gray-400 dark:text-v2-muted mb-2 font-medium">Recommendations</p>
+                    <div className="flex items-center gap-2 mb-2">
+                      <p className="text-[11px] text-gray-400 dark:text-v2-muted font-medium">Recommendations</p>
+                      <Badge variant="outline" className="text-[10px]">Model-generated text</Badge>
+                    </div>
                     <div className="space-y-2">
                       {results.recommendations.map((rec: any, idx: number) => (
                         <div key={idx} className="flex items-start gap-2 text-[13px] text-gray-700 dark:text-v2-secondary">

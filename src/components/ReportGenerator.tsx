@@ -519,7 +519,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       console.log(`Visualization response for ${type}:`, data.imageUrl ? 'Image received' : data.gridData ? 'Grid data received' : 'No image', data.description?.substring(0, 100));
 
       if (data.imageUrl || data.gridData) {
-        lastDataSourcesRef.current[type] = data.dataSource || "AI illustration (Google Gemini)";
+        lastDataSourcesRef.current[type] = data.dataSource || "Model-generated illustration";
         return { imageUrl: data.imageUrl ?? null, gridData: data.gridData, dataSource: data.dataSource };
       }
 
@@ -760,6 +760,12 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       // Extract data — use ONLY real values from the analysis. No synthetic fallbacks.
       const rawChange = analysisData?.changePercent ?? analysisData?.change_percent;
       const hasChange = rawChange !== undefined && rawChange !== null && !isNaN(parseFloat(rawChange));
+      const analysisMethod = analysisData?.analysisMethod ?? analysisData?.dataProvenance?.analysisMethod;
+      const hasMeasuredBasis = analysisMethod === "measured" || analysisMethod === "real_sentinel_statistics";
+      if (!hasMeasuredBasis || !hasChange) {
+        toast.error("A report requires measured satellite values. Model-only narratives cannot be used as measurements.");
+        return;
+      }
       const changePercent = hasChange ? parseFloat(rawChange) : 0;
       const risk = getRiskLevel(changePercent);
       const eventInfo = getEventTypeInfo(eventType || analysisData?.eventType);
@@ -773,7 +779,6 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       const endDate = analysisData?.endDate || analysisData?.end_date || new Date().toISOString().split('T')[0];
       const regionName = region || analysisData?.region || "Study Region";
       const area = analysisData?.area || analysisData?.area_analyzed || "N/A";
-      const confidence = analysisData?.confidenceLevel ?? analysisData?.confidence ?? analysisData?.analysisConfidence ?? null;
 
       // Only include Driver Analysis if there's real underlying data for it -
       // otherwise it would be pure filler (and previously WAS, in the
@@ -992,7 +997,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       
       pdf.setFillColor(34, 197, 94);
       pdf.roundedRect(pageWidth - margin - 50, metaStartY + 8, 45, 8, 2, 2, "F");
-      pdf.text(confidence !== null ? `Confidence Level: ${confidence}%` : `Confidence Level: N/A`, pageWidth - margin - 48, metaStartY + 13);
+      pdf.text("Measured satellite values", pageWidth - margin - 48, metaStartY + 13);
 
       yPos += 65;
 
@@ -1099,7 +1104,6 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         ["Total Analysis Area (Baseline)", area, ""],
         ["Change Detected", `${Math.abs(changePercent).toFixed(1)}%`, changePercent > 15 ? "CRITICAL" : changePercent > 8 ? "MODERATE" : "LOW"],
         ["Annual Change Rate", `${(Math.abs(changePercent) / 2).toFixed(1)}% per year`, changePercent > 10 ? "CONCERNING" : "ACCEPTABLE"],
-        ["Confidence Level", confidence !== null ? `${confidence}%` : "N/A", confidence !== null ? (confidence >= 85 ? "HIGH" : "MODERATE") : "—"],
         ["Risk Classification", risk.level, risk.level],
       ];
       yPos = addTableWithBorders(assessmentHeaders, assessmentRows, yPos, [70, 50, 50]);
@@ -1610,15 +1614,16 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           imageLabel("landsat_falsecolor", "False-color imagery panel"),
           imageLabel("ndvi_map", "NDVI imagery panel"),
           ["Trend chart", "Rendered directly from this report's own figures (not AI-generated)"],
-          ["Spectral indices / change %", analysisData?.dataProvenance?.analysisMethod === "real_sentinel_statistics"
-            ? "Real Sentinel-2 measurement (NDVI/NDWI/NBR computed from actual pixels)"
-            : "AI-estimated (Google Gemini) - not measured from pixel data"],
+          ["Spectral indices / change %", hasMeasuredBasis
+            ? "Measured Sentinel-2 values; narrative text is model-generated"
+            : "Unavailable"],
+          ["Narrative summary and recommendations", "Groq-generated text; not a measurement"],
           ["Location coordinates", analysisData?.locations?.[0]?.verified === false ? "AI-estimated, not geocoder-verified" : "Geocoded (OpenStreetMap/Nominatim) or user-selected"],
           ...selectedAdvancedViz
             .filter((id) => advancedImages[id])
             .map((id) => {
               const viz = ADVANCED_VIZ_TYPES.find((v) => v.id === id);
-              return [viz?.label || id, lastDataSourcesRef.current[id] || "AI illustration (Google Gemini)"];
+              return [viz?.label || id, lastDataSourcesRef.current[id] || "Model-generated illustration"];
             }),
         ];
         yPos = addTableWithBorders(provenanceHeaders, provenanceRows, yPos, [70, 100]);
@@ -1636,12 +1641,10 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         pdf.setFontSize(9);
         pdf.setTextColor(75, 85, 99);
         const limitations = [
-          "AI-estimated figures are plausible approximations, not ground-truth measurements - validate against field data before acting on them.",
+          "Narrative text is model-generated and is not an independent measurement or ground-truth validation.",
           "Real satellite imagery (where used) is subject to cloud cover and a multi-day revisit cycle, so the most recent clear scene may predate the report date.",
           "AI interpretations are probabilistic and can vary between runs of the same query.",
-          confidence !== null
-            ? `This report's reported confidence level is ${confidence}%, self-assessed by the analysis - treat it as a rough indicator, not a statistical guarantee.`
-            : "No confidence level was reported for this analysis.",
+          "The numeric values in this report are measurements for the specified Sentinel-2 study area and time window; verify against field data before high-stakes decisions.",
         ];
         limitations.forEach((line) => {
           checkPageBreak(12);
@@ -1665,9 +1668,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           },
           {
             title: "Numeric Analysis Generation",
-            content: analysisData?.dataProvenance?.analysisMethod === "real_sentinel_statistics"
-              ? "The change percentage and NDVI/NDWI/NBR values in this report are real measurements: Sentinel-2 pixels for the start and end of the study period were fetched via the Sentinel Hub Statistics API, cloud-masked using the Scene Classification Layer, and averaged to compute each index. The reported % change is the real difference between those two measured periods. Google Gemini is given these real numbers and writes the narrative summary, severity assessment, and recommendations around them, but does not generate the figures themselves. Classification results and change-matrix breakdowns (where shown) remain Gemini-generated estimates, not computed from these real pixels."
-              : "Spectral index values, change percentages, and classification statistics are generated by Google Gemini from a text prompt describing the region, event type, and the real formulas for standard indices (NDVI, NDWI, NBR, NDBI). The model produces plausible estimates based on patterns in its training data - it does not compute these values from actual pixel data, and no image differencing or classification algorithm is run against real imagery for these figures."
+            content: "NDVI, NDWI, and NBR values, valid-pixel coverage, and the NDVI change percentage are computed from Sentinel-2 MSI L2A pixels through the Sentinel Hub Statistics API. Area is derived from the analysis bounding box. Groq generates narrative text only; classification, change matrices, and multi-event analysis are disabled."
           },
           {
             title: "Map & Chart Rendering",
@@ -1675,7 +1676,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           },
           {
             title: "Validation Approach",
-            content: "This system does not perform independent ground-truth validation. The self-reported confidence level reflects the AI model's own assessment, not a statistically validated accuracy metric. For decisions with real consequences, validate findings against field data or authoritative sources such as USGS Earth Explorer or the Copernicus Browser."
+            content: "This system does not perform independent ground-truth validation. Validate measured values against field data or authoritative sources such as USGS Earth Explorer or the Copernicus Browser before decisions with real consequences."
           }
         ];
 
@@ -1702,13 +1703,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         
         const uncertaintyHeaders = ["ASPECT", "NOTE"];
         const uncertaintyRows: string[][] = [];
-        const transparencyRange = analysisData?.methodologyTransparency?.uncertainty_range;
-        if (transparencyRange && (transparencyRange.lower !== undefined || transparencyRange.upper !== undefined)) {
-          uncertaintyRows.push(["AI-reported uncertainty range", `${transparencyRange.lower ?? "?"}% to ${transparencyRange.upper ?? "?"}% (self-assessed by the model, not independently verified)`]);
-        }
-        if (confidence !== null) {
-          uncertaintyRows.push(["Self-reported confidence level", `${confidence}% (the model's own assessment, not a statistical accuracy metric)`]);
-        }
+        uncertaintyRows.push(["Model-generated narrative", "Interpretive text only; not a measured value or confidence estimate"]);
         uncertaintyRows.push(["Real imagery geolocation (where used)", "Sentinel-2 L2A products are typically geolocated to within about 1 pixel (~10m) per ESA specifications"]);
         uncertaintyRows.push(["Numeric spectral/change analysis", "Not independently validated by this system - see Validation Approach above"]);
         yPos = addTableWithBorders(uncertaintyHeaders, uncertaintyRows, yPos, [75, 95]);
@@ -1723,17 +1718,13 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         yPos = addSubsectionTitle("Data Sources Used In This Report", yPos);
 
         const usedRealImagery = Object.values(lastDataSourcesRef.current).some((s) => /sentinel/i.test(s));
-        const usedRealStatistics = analysisData?.dataProvenance?.analysisMethod === "real_sentinel_statistics";
-        const eeConfigured = !!analysisData?.dataProvenance?.earthEngine?.configured;
+        const usedRealStatistics = hasMeasuredBasis;
         const dataSources = [
-          "[1] Google Gemini (Google DeepMind). Generated the narrative analysis, findings, and recommendations in this report, and any AI-illustrated (non-real) imagery panels. https://ai.google.dev",
+          "[1] Groq API. Generated narrative analysis, findings, and recommendations; this text is not a measurement.",
           ...(usedRealImagery || usedRealStatistics ? [
             `[2] European Space Agency (ESA) / Copernicus Data Space Ecosystem. Real Sentinel-2 L2A satellite ${[usedRealImagery && "imagery (true-color/false-color/NDVI panels)", usedRealStatistics && "pixel statistics (spectral index values and change %)"].filter(Boolean).join(" and ")} used in this report. https://dataspace.copernicus.eu`,
           ] : []),
           "[3] OpenStreetMap Contributors. Basemap tiles for the study area map, and/or place-name geocoding used to resolve this report's location. https://www.openstreetmap.org",
-          ...(eeConfigured ? [
-            "[4] Google Earth Engine. A service-account credential is configured for this project but was not used to source real pixel data for this specific report - see Quality Assurance & Limitations.",
-          ] : []),
         ];
 
         pdf.setFontSize(9);
@@ -1755,7 +1746,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           "Supabase Edge Functions (Deno) - backend APIs for AI analysis and imagery retrieval",
           ...(usedRealImagery ? ["Sentinel Hub Process API (Copernicus Data Space Ecosystem) - real satellite imagery retrieval"] : []),
           ...(usedRealStatistics ? ["Sentinel Hub Statistics API (Copernicus Data Space Ecosystem) - real spectral index/change computation"] : []),
-          "Google Gemini API - AI-generated narrative analysis and, where real imagery was unavailable, illustrative visualizations",
+          "Groq API - model-generated narrative text",
         ];
 
         tools.forEach((tool) => {
@@ -1846,7 +1837,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             pdf.addImage(image, "PNG", margin + 5, yPos + 5, contentWidth - 10, 60);
             yPos += 75;
 
-            const source = lastDataSourcesRef.current[vizId] || "AI illustration (Google Gemini)";
+            const source = lastDataSourcesRef.current[vizId] || "Model-generated illustration";
             pdf.setFontSize(8);
             pdf.setTextColor(107, 114, 128);
             pdf.setFont("helvetica", "italic");
