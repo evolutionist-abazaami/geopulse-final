@@ -1,73 +1,90 @@
-# Welcome to your Lovable project
+# GeoPulse - AI-Powered Geospatial Intelligence for Africa
 
-## Project info
+Advanced environmental monitoring and geospatial analysis platform powered by AI and satellite imagery.
 
-**URL**: https://lovable.dev/projects/6051ba89-424a-415b-ad12-2689a4847171
+## Features
 
-## How can I edit this code?
+- **Satellite Imagery Analysis**: Process and analyze satellite data for environmental monitoring
+- **AI-Powered Insights**: Leverage machine learning for intelligent geospatial analysis
+- **Interactive Maps**: Visualize data with interactive mapping capabilities
+- **Real-time Monitoring**: Track environmental changes and hazards in real-time
+- **Data Export**: Export analysis results in various GIS formats
+- **User Authentication**: Secure user management with Supabase
 
-There are several ways of editing your application.
+## Tech Stack
 
-**Use Lovable**
+- **Frontend**: React 18, TypeScript, Vite
+- **UI Framework**: Tailwind CSS, Radix UI components
+- **Maps**: MapLibre GL, Leaflet
+- **Backend**: Supabase (PostgreSQL, Auth, Edge Functions)
+- **AI/ML**: Integration with Google Earth Engine and AI models
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/6051ba89-424a-415b-ad12-2689a4847171) and start prompting.
+## Getting Started
 
-Changes made via Lovable will be committed automatically to this repo.
+### Prerequisites
 
-**Use your preferred IDE**
+- Node.js 18+ and npm
+- Supabase account and project
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+### Installation
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+1. Clone the repository:
+```bash
+git clone <repository-url>
+cd dagawie-main
+```
 
-Follow these steps:
+2. Install dependencies:
+```bash
+npm install
+```
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+3. Set up environment variables:
+Create a `.env` file in the root directory with your Supabase configuration:
+```env
+VITE_SUPABASE_URL=your-supabase-url
+VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
+```
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+4. Start the development server:
+```bash
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+The application will be available at `http://localhost:8080`
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+## Supabase Setup
 
-**Use GitHub Codespaces**
+This project uses Supabase for backend services. To set up the backend:
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+1. Create a new Supabase project at [supabase.com](https://supabase.com)
+2. Copy your project URL and anon key to the `.env` file
+3. Run the database migrations in the `supabase/migrations` folder
+4. Deploy the edge functions in the `supabase/functions` folder
 
-## What technologies are used for this project?
+### Database Schema
 
-This project is built with:
+The application includes several key tables:
+- User profiles and authentication
+- Satellite imagery metadata
+- Analysis results
+- Geographic data
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+## Available Scripts
 
-## How can I deploy this project?
+- `npm run dev` - Start development server
+- `npm run build` - Build for production
+- `npm run preview` - Preview production build
+- `npm run lint` - Run ESLint
 
-Simply open [Lovable](https://lovable.dev/projects/6051ba89-424a-415b-ad12-2689a4847171) and click on Share -> Publish.
+## Contributing
 
-## Can I connect a custom domain to my Lovable project?
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests and linting
+5. Submit a pull request
 
-Yes, you can!
+## License
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+This project is licensed under the MIT License.
