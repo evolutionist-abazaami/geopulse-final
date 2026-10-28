@@ -1,5 +1,9 @@
 # GeoPulse — Self-Hosting Migration Package
 
+> Historical migration snapshot. The active Edge Functions and migrations are
+> maintained under `supabase/functions/` and `supabase/migrations/`; deploy
+> those paths rather than the legacy function copies in this directory.
+
 Everything needed to run GeoPulse on your own Supabase project (hosted or
 self-hosted) with no dependency on Lovable.
 
@@ -66,7 +70,8 @@ in code where it needs a user.
 ### 4. Set secrets
 
 ```bash
-supabase secrets set GEMINI_API_KEY=... GOOGLE_EARTH_ENGINE_API_KEY=...
+supabase secrets set GROQ_API_KEY=... GEMINI_API_KEY=... \
+  SENTINELHUB_CLIENT_ID=... SENTINELHUB_CLIENT_SECRET=...
 ```
 
 `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` and
@@ -110,8 +115,9 @@ Storage objects in `demo-recordings` must be re-uploaded under the same
 
 | Service | Used by | Key |
 |---|---|---|
-| Google Gemini | all AI features | `GEMINI_API_KEY` |
-| Google Earth Engine | satellite/Landsat analysis | `GOOGLE_EARTH_ENGINE_API_KEY` |
+| Groq | current analysis, search, and assistant narratives | `GROQ_API_KEY` |
+| Google Gemini | generated visualization fallback and legacy functions | `GEMINI_API_KEY` |
+| Copernicus Data Space Sentinel Hub | Sentinel-2 imagery and statistics | `SENTINELHUB_CLIENT_ID`, `SENTINELHUB_CLIENT_SECRET` |
 | Open-Meteo | weather ingest, hazard evaluation | none (free, keyless) |
 | Nominatim / OSM | geocoding | none (respect usage policy; self-host for volume) |
 | MapLibre + Terrarium DEM tiles | map rendering | none |

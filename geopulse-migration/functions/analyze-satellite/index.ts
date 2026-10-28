@@ -225,7 +225,6 @@ serve(async (req) => {
     }
     
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-    const GOOGLE_EARTH_ENGINE_KEY = Deno.env.get("GOOGLE_EARTH_ENGINE_API_KEY");
     
     if (!GEMINI_API_KEY) {
       throw new Error("GEMINI_API_KEY not configured");
@@ -426,7 +425,7 @@ LANDSAT DATA REQUIREMENTS:
 - Target 90%+ cloud detection accuracy using QA band
 - Include radiometric and geometric quality metrics
 
-${GOOGLE_EARTH_ENGINE_KEY ? "Access imagery via Google Earth Engine when available." : ""}`;
+`;
 
     const requestBody = JSON.stringify({
       systemInstruction: { parts: [{ text: systemPrompt }] },
