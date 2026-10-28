@@ -17,10 +17,23 @@ export interface GeoSearchResult {
   query: string;
   interpretation: string;
   findings: string[];
-  locations: { name: string; lat: number; lng: number; verified?: boolean }[];
-  confidenceLevel: number;
+  locations: {
+    name: string;
+    lat: number;
+    lng: number;
+    verified?: boolean;
+    source?: "nominatim" | "ai_estimate" | "local_lookup" | "user_selected";
+  }[];
+  confidenceLevel: number | null;
+  confidenceLevelOrigin: "model_generated" | "unavailable";
   recommendations: string[];
-  reportLocation?: { lat: number; lng: number; name: string; verified: boolean } | null;
+  reportLocation?: {
+    lat: number;
+    lng: number;
+    name: string;
+    verified: boolean;
+    source?: "nominatim" | "ai_estimate" | "local_lookup" | "user_selected";
+  } | null;
 }
 
 export type RightPanelMode =

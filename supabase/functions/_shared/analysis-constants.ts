@@ -30,6 +30,13 @@ export const NDVI_SEVERITY_THRESHOLDS = {
 // Regression slopes smaller than this magnitude are reported as stable.
 export const TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH = 0.1;
 
+export const HAZARD_SEVERITY_RATIO_THRESHOLDS = {
+  moderate: 0.3,
+  high: 0.75,
+  critical: 1.5,
+} as const;
+export const MAX_HAZARD_OBSERVATION_DISTANCE_KM = 25;
+
 export const SENTINEL_2_SENSOR = "Sentinel-2 MSI L2A";
 
 export const SENTINEL_2_BAND_RESOLUTIONS_METERS = {

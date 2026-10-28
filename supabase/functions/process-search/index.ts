@@ -271,20 +271,27 @@ Consider satellite data availability and relevance. Be specific and detailed rat
         interpretation: interpretation.split('\n\n')[0],
         findings: interpretation.split('\n').filter((line: string) => line.trim().startsWith('-') || line.trim().startsWith('•')),
         locations: [],
-        confidenceLevel: 75,
+        confidenceLevel: null,
         recommendations: [],
       };
     }
 
     const rawLocations = Array.isArray(structuredResult.locations) ? structuredResult.locations : [];
     const locations = await resolveLocations(rawLocations);
+    const confidenceLevel = typeof structuredResult.confidenceLevel === "number" &&
+        Number.isFinite(structuredResult.confidenceLevel) &&
+        structuredResult.confidenceLevel >= 1 &&
+        structuredResult.confidenceLevel <= 100
+      ? structuredResult.confidenceLevel
+      : null;
 
     const result = {
       query,
       interpretation: structuredResult.interpretation || interpretation,
       findings: cleanTextArray(structuredResult.findings),
       locations,
-      confidenceLevel: structuredResult.confidenceLevel || 85,
+      confidenceLevel,
+      confidenceLevelOrigin: confidenceLevel === null ? "unavailable" as const : "model_generated" as const,
       recommendations: cleanTextArray(structuredResult.recommendations),
       timestamp: new Date().toISOString(),
     };
@@ -298,6 +305,7 @@ Consider satellite data availability and relevance. Be specific and detailed rat
         results: {
           findings: result.findings,
           locations: result.locations,
+          confidenceLevelOrigin: result.confidenceLevelOrigin,
           recommendations: result.recommendations,
         },
         confidence_level: result.confidenceLevel,

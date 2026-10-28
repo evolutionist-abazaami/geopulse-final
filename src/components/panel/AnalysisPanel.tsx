@@ -28,7 +28,11 @@ export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
   }
   if (typeof payload.confidenceLevel === "number") {
     const val = payload.confidenceLevel;
-    metrics.push({ label: "Confidence", formatted: `${Math.round(val)}%`, sentiment: "neutral" });
+    metrics.push({
+      label: payload.confidenceLevelOrigin === "model_generated" ? "Model-generated confidence" : "Confidence",
+      formatted: `${Math.round(val)}%`,
+      sentiment: "neutral",
+    });
   }
   if (payload.area) {
     metrics.push({ label: "Area", formatted: String(payload.area), sentiment: "neutral" });

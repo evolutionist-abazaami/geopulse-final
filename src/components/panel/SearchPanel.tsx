@@ -9,6 +9,16 @@ export function SearchPanel({ data }: { data: GeoSearchResult }) {
   const mapCtx = useMapContext();
   const rightPanel = useRightPanel();
   const firstLocation = data.locations?.[0];
+  const displayLocation = firstLocation || data.reportLocation;
+  const locationStatus = displayLocation?.verified
+    ? displayLocation.source === "nominatim"
+      ? "Geocoded (Nominatim)"
+      : displayLocation.source === "user_selected"
+      ? "User-provided coordinates"
+      : "Verified location"
+    : displayLocation?.source === "ai_estimate"
+    ? "AI-estimated location (unverified)"
+    : "Unverified fallback location";
 
   return (
     <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden scrollbar-thin p-3.5 space-y-3">
@@ -20,25 +30,34 @@ export function SearchPanel({ data }: { data: GeoSearchResult }) {
 
       <div>
         <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[11px] text-gray-400 dark:text-v2-muted">Confidence</span>
-          <span className="text-[11px] font-medium text-gray-900 dark:text-v2-primary">{data.confidenceLevel}%</span>
+          <span className="text-[11px] text-gray-400 dark:text-v2-muted">
+            {data.confidenceLevelOrigin === "model_generated" ? "Model-generated confidence" : "Confidence unavailable"}
+          </span>
+          <span className="text-[11px] font-medium text-gray-900 dark:text-v2-primary">
+            {data.confidenceLevel === null ? "Unavailable" : `${data.confidenceLevel}%`}
+          </span>
         </div>
-        <div className="h-1 bg-gray-200 dark:bg-surface-3 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-brand rounded-full transition-all duration-slow"
-            style={{ width: `${Math.max(0, Math.min(100, data.confidenceLevel))}%` }}
-          />
-        </div>
+        {data.confidenceLevelOrigin === "model_generated" && (
+          <>
+            <div className="h-1 bg-gray-200 dark:bg-surface-3 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-brand rounded-full transition-all duration-slow"
+                style={{ width: `${Math.max(0, Math.min(100, data.confidenceLevel ?? 0))}%` }}
+              />
+            </div>
+            <p className="mt-1 text-[10px] text-gray-400 dark:text-v2-muted">AI estimate; not a measured environmental value.</p>
+          </>
+        )}
       </div>
 
-      {data.reportLocation && (
+      {displayLocation && (
         <div className="flex items-center gap-1.5 text-xs">
           <MapPin className="h-3 w-3 text-gray-400 dark:text-v2-muted" />
-          <span className="text-gray-500 dark:text-v2-muted">{data.reportLocation.name}</span>
-          {data.reportLocation.verified ? (
-            <span className="px-1.5 py-0.5 rounded-full bg-stable-dim text-stable font-medium">Verified location</span>
+          <span className="text-gray-500 dark:text-v2-muted">{displayLocation.name}</span>
+          {displayLocation.verified ? (
+            <span className="px-1.5 py-0.5 rounded-full bg-stable-dim text-stable font-medium">{locationStatus}</span>
           ) : (
-            <span className="px-1.5 py-0.5 rounded-full bg-warning-dim text-warning font-medium">Estimated location</span>
+            <span className="px-1.5 py-0.5 rounded-full bg-warning-dim text-warning font-medium">{locationStatus}</span>
           )}
         </div>
       )}

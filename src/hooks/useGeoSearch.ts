@@ -77,8 +77,15 @@ const generateLocalSearchInterpretation = (queryText: string, selectedLoc: Selec
     query: queryText,
     interpretation,
     findings,
-    locations: [{ name: loc.name, lat: loc.lat, lng: loc.lng, verified: !!selectedLoc || parsed.location.type !== "custom" }],
-    confidenceLevel: 93,
+    locations: [{
+      name: loc.name,
+      lat: loc.lat,
+      lng: loc.lng,
+      verified: !!selectedLoc,
+      source: selectedLoc ? "user_selected" : "local_lookup",
+    }],
+    confidenceLevel: null,
+    confidenceLevelOrigin: "unavailable",
     recommendations,
   };
 };
@@ -128,22 +135,36 @@ export function useGeoSearch() {
         : [];
       const locList = locatableResults.length > 0
         ? locatableResults
-        : [selectedLocation || { name: parsedLoc.location.name, lat: parsedLoc.location.lat, lng: parsedLoc.location.lng, verified: parsedLoc.location.type !== "custom" }];
+        : [selectedLocation
+          ? { ...selectedLocation, verified: true, source: "user_selected" }
+          : {
+            name: parsedLoc.location.name,
+            lat: parsedLoc.location.lat,
+            lng: parsedLoc.location.lng,
+            verified: false,
+            source: "local_lookup",
+          }];
 
       let reportLocation: GeoSearchResult["reportLocation"] = null;
 
       if (locList.length > 0) {
         const first = locList[0];
         mapCtx.setMarkers(locList.map((loc: any) => ({
-          lat: loc.lat || parsedLoc.location.lat,
-          lng: loc.lng || parsedLoc.location.lng,
+          lat: loc.lat ?? parsedLoc.location.lat,
+          lng: loc.lng ?? parsedLoc.location.lng,
           label: loc.name || parsedLoc.location.name,
           color: "#0891b2",
         })));
 
-        if (first.lat && first.lng) {
+        if (Number.isFinite(first.lat) && Number.isFinite(first.lng)) {
           mapCtx.setView([first.lat, first.lng], 10);
-          reportLocation = { lat: first.lat, lng: first.lng, name: first.name || parsedLoc.location.name, verified: first.verified !== false };
+          reportLocation = {
+            lat: first.lat,
+            lng: first.lng,
+            name: first.name || parsedLoc.location.name,
+            verified: first.verified === true,
+            source: first.source,
+          };
 
           const boundarySize = 0.2;
           mapCtx.setPolygons([{
@@ -165,8 +186,13 @@ export function useGeoSearch() {
         query: queryText,
         interpretation: raw.interpretation,
         findings: raw.findings || [],
-        locations: raw.locations || [],
-        confidenceLevel: raw.confidenceLevel ?? 85,
+        locations: locList,
+        confidenceLevel: typeof raw.confidenceLevel === "number" && Number.isFinite(raw.confidenceLevel)
+          ? raw.confidenceLevel
+          : null,
+        confidenceLevelOrigin: typeof raw.confidenceLevel === "number" && Number.isFinite(raw.confidenceLevel)
+          ? "model_generated"
+          : "unavailable",
         recommendations: raw.recommendations || [],
         reportLocation,
       };

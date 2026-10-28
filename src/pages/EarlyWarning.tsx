@@ -77,6 +77,7 @@ const HAZARD_TYPES = [
 const METRICS = [
   { value: "temperature_c", label: "Temperature (°C)" },
   { value: "rainfall_mm", label: "Rainfall (mm)" },
+  { value: "daily_rain_sum", label: "Daily rainfall total (mm)" },
   { value: "soil_moisture", label: "Soil Moisture" },
   { value: "wind_speed_kmh", label: "Wind Speed (km/h)" },
   { value: "humidity_percent", label: "Humidity (%)" },

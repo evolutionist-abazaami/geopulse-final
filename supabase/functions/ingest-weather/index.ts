@@ -112,6 +112,7 @@ serve(async (req) => {
           const weatherData = await fetchWeatherData(location.lat, location.lng);
           const current = weatherData.current;
 
+          // Open-Meteo current.rain is precipitation for the preceding model interval, not a daily accumulation.
           const observation = {
             region_name: location.name,
             lat: location.lat,
