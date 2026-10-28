@@ -101,6 +101,8 @@ const eventTypes = [
   { value: "volcanic_activity", label: "Volcanic Activity", icon: "🌋" },
 ];
 
+const SENTINEL2_AVAILABLE_FROM = "2015-06-23";
+
 const isFallbackAnalysis = (data: any) => Boolean(data?.fallback || data?.fallbackReason === "SERVICE_UNAVAILABLE");
 
 const generateLocalSatelliteAnalysis = (
@@ -359,6 +361,12 @@ const GeoWitness = () => {
   };
 
   const runAnalysis = async () => {
+    if (startDate < SENTINEL2_AVAILABLE_FROM) {
+      setResults(null);
+      toast.error(`Sentinel-2 imagery is available from ${SENTINEL2_AVAILABLE_FROM}. Choose a later start date.`);
+      return;
+    }
+
     // selectedLocation is only ever set by actually picking a geocoded
     // search result or clicking the map (handleLocationSelect/handleMapClick)
     // - typing in the search box alone only updates the free-text `region`
@@ -382,6 +390,11 @@ const GeoWitness = () => {
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
+      const supabaseApiKey = (
+        import.meta.env.VITE_SUPABASE_ANON_KEY ||
+        import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+        ""
+      ).trim();
 
       // The backend's own Gemini retry chain is capped at ~18s, but this
       // timeout is a safety net against that budget being exceeded (slow
@@ -400,6 +413,7 @@ const GeoWitness = () => {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
+              apikey: supabaseApiKey,
               "Authorization": `Bearer ${session?.access_token || (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "").trim()}`,
             },
             body: JSON.stringify({
@@ -757,13 +771,16 @@ const GeoWitness = () => {
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="text-sm font-medium mb-2 block">Start Date</label>
-                    <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+                    <Input type="date" min={SENTINEL2_AVAILABLE_FROM} value={startDate} onChange={(e) => setStartDate(e.target.value)} />
                   </div>
                   <div>
                     <label className="text-sm font-medium mb-2 block">End Date</label>
                     <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
                   </div>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Sentinel-2 imagery is available from {SENTINEL2_AVAILABLE_FROM}.
+                </p>
 
                 {/* Classification & Change Detection Controls */}
                 <ClassificationControls
@@ -858,6 +875,14 @@ const GeoWitness = () => {
                 )}
 
                 {/* Cloud Coverage & Quality Display */}
+                {results.analysisMethod === "model_only" && results.fallbackReason === "INSUFFICIENT_VALID_PIXELS" && (
+                  <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+                    <p className="text-sm font-medium">Satellite measurements unavailable</p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Not enough valid pixels were available in both comparison periods. Use dates after June 23, 2015, and try a longer period or a less cloudy season.
+                    </p>
+                  </div>
+                )}
                 <CloudCoverageDisplay
                   cloudCoverage={results.cloudCoverage?.percentage}
                   dataQuality={results.dataQuality?.overall_score}
