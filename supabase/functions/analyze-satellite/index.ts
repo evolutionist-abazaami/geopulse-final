@@ -561,10 +561,9 @@ serve(async (req) => {
     // Model fallback chain - if one is overloaded, try the next.
     // Ordered from most capable to most available.
     const modelChain = [
-      "llama-3.3-70b-versatile",
       "openai/gpt-oss-120b",
       "openai/gpt-oss-20b",
-      "llama-3.1-8b-instant",
+      "qwen/qwen3.6-27b",
     ];
 
     let aiResponse: Response | null = null;
@@ -572,7 +571,7 @@ serve(async (req) => {
     let lastStatus = 0;
     let successModel = "";
     const attemptsPerModel = 2;
-    // 4 models x 2 attempts, each a real network round-trip to an overloaded
+    // 3 models x 2 attempts, each a real network round-trip to an overloaded
     // API, can otherwise compound to 40-90s on a degraded/rate-limited key -
     // long enough that a user watching a spinner reasonably assumes the app
     // is broken. The overall deadline alone doesn't bound this tightly
@@ -611,7 +610,9 @@ serve(async (req) => {
         lastErrorText = await aiResponse.text();
         lastStatus = aiResponse.status;
         console.error(`AI API error on ${model} (attempt ${attempt}/${attemptsPerModel}):`, aiResponse.status, lastErrorText.slice(0, 200));
+        const modelUnavailable = aiResponse.status === 404;
         const isRetryable = aiResponse.status === 503 || aiResponse.status === 429 || aiResponse.status === 500;
+        if (modelUnavailable) break;
         if (!isRetryable) break outer;
         // Short backoff between attempts on same model; rotate to next model after.
         if (attempt < attemptsPerModel && Date.now() < retryDeadline) {

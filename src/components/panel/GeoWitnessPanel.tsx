@@ -89,11 +89,14 @@ const generateLocalSatelliteAnalysis = (
   startDate: string,
   endDate: string,
   coordinates: { lat: number; lng: number },
+  failure?: { reason: string; status?: number; message: string },
 ) => {
   const mainEvent = eventTypesToAnalyze[0] || "environmental_change";
   const result = {
     fallback: true,
-    fallbackReason: "SENTINEL_API_ERROR",
+    fallbackReason: failure?.reason ?? "SERVICE_UNAVAILABLE",
+    providerStatus: failure?.status ?? null,
+    providerMessage: failure?.message ?? "The satellite analysis service could not be reached.",
     analysisMethod: "model_only",
     eventType: mainEvent,
     eventTypes: eventTypesToAnalyze,
@@ -281,6 +284,7 @@ export function GeoWitnessPanel() {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
+              apikey: (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "").trim(),
               Authorization: `Bearer ${session?.access_token || (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "").trim()}`,
             },
             body: JSON.stringify({
@@ -294,9 +298,28 @@ export function GeoWitnessPanel() {
         clearTimeout(timeoutId);
       }
 
-      const data = response.ok
-        ? await response.json()
-        : generateLocalSatelliteAnalysis(eventTypesToAnalyze, targetRegionName, startDate, endDate, coordinates);
+      let data: unknown;
+      if (response.ok) {
+        data = await response.json();
+      } else {
+        const responseText = await response.text();
+        let providerMessage = response.statusText || "The analysis request failed.";
+        try {
+          const errorBody = JSON.parse(responseText);
+          if (typeof errorBody?.error === "string") providerMessage = errorBody.error;
+          else if (typeof errorBody?.message === "string") providerMessage = errorBody.message;
+        } catch {
+          if (responseText.trim()) providerMessage = responseText.trim().slice(0, 240);
+        }
+        data = generateLocalSatelliteAnalysis(
+          eventTypesToAnalyze,
+          targetRegionName,
+          startDate,
+          endDate,
+          coordinates,
+          { reason: "FUNCTION_HTTP_ERROR", status: response.status, message: providerMessage },
+        );
+      }
 
       applyResult(data);
       if (isFallbackAnalysis(data)) {
@@ -306,7 +329,17 @@ export function GeoWitnessPanel() {
       }
     } catch (error) {
       console.error("Analysis API request failed:", error);
-      const fallbackData = generateLocalSatelliteAnalysis(eventTypesToAnalyze, targetRegionName, startDate, endDate, coordinates);
+      const fallbackData = generateLocalSatelliteAnalysis(
+        eventTypesToAnalyze,
+        targetRegionName,
+        startDate,
+        endDate,
+        coordinates,
+        {
+          reason: "NETWORK_ERROR",
+          message: error instanceof Error ? error.message : "The analysis request failed before a response was received.",
+        },
+      );
       applyResult(fallbackData);
       toast.error("Analysis service is unavailable. No measured values are shown.");
     } finally {
@@ -449,6 +482,11 @@ export function GeoWitnessPanel() {
                           ? "Model-generated interpretation; not a measured result."
                           : "Severity is derived from measured NDVI change using documented thresholds."}
                     </p>
+                    {results.fallback && results.providerMessage && (
+                      <p className="text-[11px] text-gray-500 dark:text-v2-muted mt-1">
+                        Service detail{results.providerStatus ? ` (HTTP ${results.providerStatus})` : ""}: {results.providerMessage}
+                      </p>
+                    )}
                   </div>
                 </div>
 

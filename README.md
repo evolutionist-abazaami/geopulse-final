@@ -21,6 +21,9 @@ model-generated explanations while keeping measurement provenance explicit.
   Groq-generated narrative is separately identified; its percentages and
   index-like values are checked against measurements, retried once, and
   replaced with a deterministic summary if mismatches remain.
+- **Narrative model availability:** `analyze-satellite` rotates to another
+  configured Groq model when a model ID is unavailable. Keep its model list
+  aligned with Groq's active model catalog as models are deprecated.
 - **Visualizations:** `generate-visualization` prefers Sentinel Hub imagery.
   Gemini-generated fallback illustrations are not satellite measurements and
   must be interpreted as generated visuals.
