@@ -598,11 +598,9 @@ export type Database = {
         Args: { p_share_id: string }
         Returns: {
           created_at: string
-          created_by: string | null
           event_type: string
           expires_at: string | null
           id: string
-          is_active: boolean
           location_name: string
           report_data: Json
           report_type: string
@@ -610,12 +608,6 @@ export type Database = {
           title: string
           view_count: number
         }[]
-        SetofOptions: {
-          from: "*"
-          to: "shared_reports"
-          isOneToOne: false
-          isSetofReturn: true
-        }
       }
       increment_shared_report_view: {
         Args: { p_share_id: string }
