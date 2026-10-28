@@ -27,6 +27,7 @@ jobs:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
     - run: npm ci
+    - run: npm test --if-present
     - run: npm run build --if-present
     # Type/lint debt predates this workflow (see the platform review) -
     # surfaced here for visibility without blocking merges on unrelated

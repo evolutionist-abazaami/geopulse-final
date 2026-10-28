@@ -3,7 +3,7 @@
 # separate terms of service, privacy policy, and support
 # documentation.
 
-# This workflow will install Deno then run `deno lint` and `deno test`.
+# This workflow installs Deno and checks/tests the Supabase edge functions.
 # For more information see: https://github.com/denoland/setup-deno
 
 name: Deno
@@ -42,8 +42,8 @@ jobs:
         run: deno lint
         continue-on-error: true
 
-      # No edge function tests exist yet - re-enable once supabase/functions
-      # has real *_test.ts files, otherwise this just fails with "no test
-      # modules found" on every run.
-      # - name: Run tests
-      #   run: deno test -A
+      - name: Check Supabase function entry points
+        run: find supabase/functions -mindepth 2 -maxdepth 2 -name index.ts -print0 | xargs -0 deno check --no-lock
+
+      - name: Run tests
+        run: deno test --allow-net=deno.land supabase/functions

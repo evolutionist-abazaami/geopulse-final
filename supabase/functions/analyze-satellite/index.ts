@@ -4,21 +4,31 @@ import {
   AOI_HALF_WIDTH_DEGREES,
   DAYS_PER_MONTH_APPROXIMATION,
   ENABLE_UNVERIFIED_MODEL_FEATURES,
-  EXCLUDED_SCL_CLASSES,
   FIRST_INTERIOR_SAMPLE_MIN_GAP_DAYS,
   INTERIOR_SAMPLE_HALF_WIDTH_DAYS,
-  MAX_ANALYSIS_WINDOW_DAYS,
-  MAX_CLOUD_COVERAGE_PERCENT,
   MIN_VALID_PIXEL_RATIO,
   NEAR_ZERO_NDVI_BASELINE,
-  NDVI_SEVERITY_THRESHOLDS,
   SECOND_INTERIOR_SAMPLE_MIN_GAP_DAYS,
   SENTINEL_2_BAND_RESOLUTIONS_METERS,
   SENTINEL_2_SENSOR,
   STATISTICS_GRID_SIZE,
-  TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH,
 } from "../_shared/analysis-constants.ts";
-import type { FallbackReason, Origin } from "../_shared/analysis-constants.ts";
+import type { FallbackReason } from "../_shared/analysis-constants.ts";
+import {
+  attachFieldProvenance,
+  calculateChangePercent,
+  createAnalysisWindows,
+  deriveSeverity,
+  deriveTrendDirection,
+  normalizeNumericFields,
+} from "../_shared/satellite-analysis.ts";
+import type {
+  AnalysisMethod,
+  SpectralBandStats,
+} from "../_shared/satellite-analysis.ts";
+import { fetchSpectralStatistics } from "../_shared/sentinel-statistics.ts";
+import type { SpectralStatsResult } from "../_shared/sentinel-statistics.ts";
+import { groqChatCompletion } from "../_shared/groq-client.ts";
 import {
   buildDeterministicSummary,
   checkNarrativeNumbers,
@@ -137,83 +147,6 @@ function cleanTextArray(value: unknown): string[] {
     .filter((s) => s.trim().length > 0);
 }
 
-type AnalysisMethod = "measured" | "model_only";
-type FieldProvenance = {
-  origin: Origin;
-  source: string;
-  sensor: string;
-  method: AnalysisMethod;
-  dateRange: string;
-};
-
-const MODEL_GENERATED_FIELDS = new Set([
-  "summary",
-  "fullAnalysis",
-  "recommendations",
-  "severity",
-  "classificationResults",
-  "changeDetection",
-  "multiEventAnalysis",
-  "methodologyTransparency",
-  "narrativeGuard",
-]);
-
-function attachFieldProvenance<T extends Record<string, unknown>>(
-  result: T,
-  method: AnalysisMethod,
-  startDate: string,
-  endDate: string,
-  generatedNarrative = true,
-): T & { fieldProvenance: Record<string, FieldProvenance> } {
-  const dateRange = `${startDate}/${endDate}`;
-  const measuredFields = new Set([
-    "area",
-    "changePercent",
-    "temporalBreakdown",
-    "cloudCoverage",
-    "dataQuality",
-    "spectralIndices",
-    "predictiveModeling",
-  ]);
-  const fieldProvenance: Record<string, FieldProvenance> = {};
-
-  for (const [field, value] of Object.entries(result)) {
-    let origin: Origin = "unavailable";
-    let source = "Not available";
-    let sensor = "Not applicable";
-
-    if (field === "coordinates" && value !== null) {
-      origin = "geocoded";
-      source = "Request coordinates";
-    } else if (field === "narrativeGuard") {
-      source = "Programmatic numeric validation";
-    } else if (field === "severity" && method === "measured" && value !== null) {
-      origin = "measured";
-      source = "NDVI change thresholds";
-      sensor = SENTINEL_2_SENSOR;
-    } else if (generatedNarrative && MODEL_GENERATED_FIELDS.has(field) && value !== null) {
-      origin = "model_generated";
-      source = "Groq-generated narrative";
-      sensor = SENTINEL_2_SENSOR;
-    } else if (method === "measured" && measuredFields.has(field) && value !== null) {
-      origin = "measured";
-      source = "Sentinel Hub Statistics API";
-      sensor = SENTINEL_2_SENSOR;
-    }
-
-    fieldProvenance[field] = { origin, source, sensor, method, dateRange };
-  }
-
-  fieldProvenance.fieldProvenance = {
-    origin: "unavailable",
-    source: "Generated provenance metadata",
-    sensor: "Not applicable",
-    method,
-    dateRange,
-  };
-  return { ...result, fieldProvenance };
-}
-
 function getAnalysisSensorInfo(lat: number | null, lng: number | null) {
   const widthMeters = lat === null
     ? null
@@ -232,27 +165,6 @@ function getAnalysisSensorInfo(lat: number | null, lng: number | null) {
     center: lat !== null && lng !== null ? { lat, lng } : null,
     processing_level: "Level-2A",
   };
-}
-
-export function deriveSeverity(changePercent: number): "low" | "medium" | "high" | "critical" {
-  const magnitude = Math.abs(changePercent);
-  if (magnitude >= NDVI_SEVERITY_THRESHOLDS.critical) return "critical";
-  if (magnitude >= NDVI_SEVERITY_THRESHOLDS.high) return "high";
-  if (magnitude >= NDVI_SEVERITY_THRESHOLDS.medium) return "medium";
-  return "low";
-}
-
-export function calculateChangePercent(baseline: number, current: number): number {
-  const delta = current - baseline;
-  return Math.abs(baseline) > NEAR_ZERO_NDVI_BASELINE
-    ? (delta / Math.abs(baseline)) * 100
-    : delta * 100;
-}
-
-export function deriveTrendDirection(slopePercentPerMonth: number): "improving" | "stable" | "declining" {
-  if (slopePercentPerMonth > TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH) return "improving";
-  if (slopePercentPerMonth < -TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH) return "declining";
-  return "stable";
 }
 
 function buildFallbackAnalysis(params: {
@@ -328,41 +240,6 @@ function buildFallbackAnalysis(params: {
 // to estimate them. Same credentials, a different Sentinel Hub API
 // (Statistics instead of Process) that aggregates real pixel values over an
 // area/time range rather than rendering an image.
-interface SpectralBandStats {
-  mean: number;
-  min: number;
-  max: number;
-}
-
-interface SpectralStatsResult {
-  ndvi: SpectralBandStats | null;
-  ndwi: SpectralBandStats | null;
-  nbr: SpectralBandStats | null;
-  sampleCount: number;
-  validPixelRatio: number;
-}
-
-const STATISTICS_EVALSCRIPT = `//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["B03","B04","B08","B12","SCL","dataMask"] }],
-    output: [
-      { id: "ndvi", bands: 1 },
-      { id: "ndwi", bands: 1 },
-      { id: "nbr", bands: 1 },
-      { id: "dataMask", bands: 1 }
-    ]
-  };
-}
-function isCloud(scl) { return [${EXCLUDED_SCL_CLASSES.join(",")}].includes(scl); }
-function evaluatePixel(s) {
-  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04);
-  let ndwi = (s.B03 - s.B08) / (s.B03 + s.B08);
-  let nbr = (s.B08 - s.B12) / (s.B08 + s.B12);
-  let mask = isCloud(s.SCL) ? 0 : s.dataMask;
-  return { ndvi: [ndvi], ndwi: [ndwi], nbr: [nbr], dataMask: [mask] };
-}`;
-
 let cachedSentinelToken: { token: string; expiresAt: number } | null = null;
 
 async function getSentinelHubToken(): Promise<string | null> {
@@ -402,86 +279,6 @@ async function getSentinelHubToken(): Promise<string | null> {
   if (!data.access_token) return null;
   cachedSentinelToken = { token: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
   return cachedSentinelToken.token;
-}
-
-async function fetchSpectralStatistics(
-  token: string,
-  lat: number,
-  lng: number,
-  from: Date,
-  to: Date
-): Promise<SpectralStatsResult | null> {
-  const bbox = [
-    lng - AOI_HALF_WIDTH_DEGREES,
-    lat - AOI_HALF_WIDTH_DEGREES,
-    lng + AOI_HALF_WIDTH_DEGREES,
-    lat + AOI_HALF_WIDTH_DEGREES,
-  ];
-  const windowDays = Math.max(1, Math.ceil((to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000)));
-
-  let response: Response;
-  try {
-    response = await fetch("https://sh.dataspace.copernicus.eu/api/v1/statistics", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-      body: JSON.stringify({
-        input: {
-          bounds: { bbox, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } },
-          data: [{
-            type: "sentinel-2-l2a",
-            dataFilter: { maxCloudCoverage: MAX_CLOUD_COVERAGE_PERCENT },
-          }],
-        },
-        aggregation: {
-          timeRange: { from: from.toISOString(), to: to.toISOString() },
-          aggregationInterval: { of: `P${windowDays}D` },
-          evalscript: STATISTICS_EVALSCRIPT,
-          width: STATISTICS_GRID_SIZE,
-          height: STATISTICS_GRID_SIZE,
-        },
-      }),
-    });
-  } catch (e) {
-    console.error("Sentinel Hub statistics request failed:", e instanceof Error ? e.message : e);
-    return null;
-  }
-
-  if (!response.ok) {
-    console.error("Sentinel Hub statistics API error:", response.status, (await response.text()).slice(0, 500));
-    return null;
-  }
-
-  let json: any;
-  try {
-    json = await response.json();
-  } catch (e) {
-    console.error("Sentinel Hub statistics response was not valid JSON:", e instanceof Error ? e.message : e);
-    return null;
-  }
-
-  const outputs = json?.data?.[0]?.outputs;
-  if (!outputs) {
-    console.warn("Sentinel Hub statistics returned no data interval - likely no cloud-free scenes in this window.");
-    return null;
-  }
-
-  const extractBand = (id: string): SpectralBandStats | null => {
-    const stats = outputs[id]?.bands?.B0?.stats;
-    if (!stats || typeof stats.mean !== "number") return null;
-    return { mean: stats.mean, min: stats.min, max: stats.max };
-  };
-
-  const ndviBandStats = outputs.ndvi?.bands?.B0?.stats;
-  const sampleCount = ndviBandStats?.sampleCount || 0;
-  const noDataCount = ndviBandStats?.noDataCount || 0;
-
-  return {
-    ndvi: extractBand("ndvi"),
-    ndwi: extractBand("ndwi"),
-    nbr: extractBand("nbr"),
-    sampleCount,
-    validPixelRatio: sampleCount > 0 ? (sampleCount - noDataCount) / sampleCount : 0,
-  };
 }
 
 async function fetchSentinelSceneCount(
@@ -607,22 +404,13 @@ serve(async (req) => {
       const sentinelToken = await getSentinelHubToken();
       if (sentinelToken) {
         fallbackReason = "SENTINEL_API_ERROR";
-        const now = new Date();
-        const studyStart = new Date(startDate);
-        const studyEnd = new Date(Math.min(new Date(endDate).getTime(), now.getTime()));
-        if (studyEnd.getTime() > studyStart.getTime()) {
-        realWindowLengthDays = Math.ceil(
-          (studyEnd.getTime() - studyStart.getTime()) / (24 * 60 * 60 * 1000),
-        );
-          const totalMs = studyEnd.getTime() - studyStart.getTime();
-          const midpoint = new Date(studyStart.getTime() + totalMs / 2);
+        const windows = createAnalysisWindows(startDate, endDate);
+        if (windows) {
+          const { studyStart, studyEnd, beforeTo, afterFrom } = windows;
+          realWindowLengthDays = windows.windowLengthDays;
           // Wide enough that Sentinel-2's ~5-day revisit cycle has a real chance of
           // landing a cloud-free-enough scene even over persistently cloudy regions
           // (much of West Africa), without the before/after windows overlapping.
-          const maxWindowMs = MAX_ANALYSIS_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-
-          const beforeTo = new Date(Math.min(midpoint.getTime(), studyStart.getTime() + maxWindowMs));
-          const afterFrom = new Date(Math.max(midpoint.getTime(), studyEnd.getTime() - maxWindowMs));
 
           const [beforeStats, afterStats] = await Promise.all([
             fetchSpectralStatistics(sentinelToken, coordinates.lat, coordinates.lng, studyStart, beforeTo),
@@ -805,16 +593,8 @@ serve(async (req) => {
         const requestController = new AbortController();
         const requestTimeoutId = setTimeout(() => requestController.abort(), perRequestTimeoutMs);
         try {
-          aiResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${GROQ_API_KEY}`,
-            },
-            body: JSON.stringify({ model, ...requestParams }),
-            signal: requestController.signal,
-          });
-        } catch (e) {
+          aiResponse = await groqChatCompletion(GROQ_API_KEY, { model, ...requestParams }, { signal: requestController.signal });
+          } catch (e) {
           console.error(`AI request to ${model} timed out or failed (attempt ${attempt}):`, e instanceof Error ? e.message : e);
           aiResponse = null;
           lastStatus = 503; // treat a timeout the same as an overloaded provider for the fallback path below
@@ -946,13 +726,9 @@ serve(async (req) => {
       const retryTimeoutId = setTimeout(() => retryController.abort(), 8000);
 
       try {
-        const retryResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${GROQ_API_KEY}`,
-          },
-          body: JSON.stringify({
+        const retryResponse = await groqChatCompletion(
+          GROQ_API_KEY,
+          {
             model: successModel,
             ...requestParams,
             temperature: 0.1,
@@ -966,10 +742,9 @@ serve(async (req) => {
                 content: `Rewrite the narrative for ${eventTypeLabels} in ${region} from ${startDate} to ${endDate}. The only available measured values are: ${strictMeasurements}. Use no other numeric claims.`,
               },
             ],
-          }),
-          signal: retryController.signal,
-        });
-
+          },
+          { signal: retryController.signal },
+        );
         if (!retryResponse.ok) {
           console.error("Narrative guard retry failed:", retryResponse.status);
         } else {
@@ -1031,6 +806,15 @@ serve(async (req) => {
       if (realStats!.after.nbr) realSpectralIndices.nbr = realStats!.after.nbr;
     }
 
+    const analysisMethod: AnalysisMethod = usedRealStats ? "measured" : "model_only";
+    const numericFields = normalizeNumericFields(analysisMethod, {
+      area: usedRealStats && realAreaKm2 !== null ? `${realAreaKm2} km²` : null,
+      changePercent: finalChangePercent,
+      temporalBreakdown: usedRealStats && realTemporalBreakdown?.length ? realTemporalBreakdown : null,
+      spectralIndices: usedRealStats ? realSpectralIndices : null,
+      predictiveModeling: usedRealStats ? realPredictiveModeling : null,
+    });
+
     const result = {
       eventType: eventTypes[0],
       eventTypes,
@@ -1038,10 +822,8 @@ serve(async (req) => {
       region,
       startDate,
       endDate,
-      analysisMethod: usedRealStats ? "measured" as const : "model_only" as const,
-      area: usedRealStats && realAreaKm2 !== null ? `${realAreaKm2} km²` : null,
-      changePercent: finalChangePercent,
-      temporalBreakdown: usedRealStats && realTemporalBreakdown?.length ? realTemporalBreakdown : null,
+      analysisMethod,
+      ...numericFields,
       summary: replaceNarrative
         ? buildDeterministicSummary(
           region,
@@ -1083,13 +865,11 @@ serve(async (req) => {
           }
         : null,
       sensorInfo: getAnalysisSensorInfo(coordinates?.lat ?? null, coordinates?.lng ?? null),
-      spectralIndices: usedRealStats ? realSpectralIndices : null,
       classificationResults: null,
       classificationType,
       changeDetection: null,
       enableChangeDetection: false,
       multiEventAnalysis: null,
-      predictiveModeling: usedRealStats ? realPredictiveModeling : null,
       methodologyTransparency: null,
       fallbackReason: usedRealStats ? null : fallbackReason,
       dataProvenance: {
