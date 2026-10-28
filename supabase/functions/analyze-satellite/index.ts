@@ -19,6 +19,10 @@ import {
   TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH,
 } from "../_shared/analysis-constants.ts";
 import type { FallbackReason, Origin } from "../_shared/analysis-constants.ts";
+import {
+  buildDeterministicSummary,
+  checkNarrativeNumbers,
+} from "../_shared/narrative-guard.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -151,6 +155,7 @@ const MODEL_GENERATED_FIELDS = new Set([
   "changeDetection",
   "multiEventAnalysis",
   "methodologyTransparency",
+  "narrativeGuard",
 ]);
 
 function attachFieldProvenance<T extends Record<string, unknown>>(
@@ -180,6 +185,8 @@ function attachFieldProvenance<T extends Record<string, unknown>>(
     if (field === "coordinates" && value !== null) {
       origin = "geocoded";
       source = "Request coordinates";
+    } else if (field === "narrativeGuard") {
+      source = "Programmatic numeric validation";
     } else if (field === "severity" && method === "measured" && value !== null) {
       origin = "measured";
       source = "NDVI change thresholds";
@@ -723,7 +730,7 @@ serve(async (req) => {
             fallbackReason = beforeStats || afterStats
               ? "INSUFFICIENT_VALID_PIXELS"
               : "SENTINEL_API_ERROR";
-            console.warn("Sentinel Hub statistics unavailable or too cloud-obscured for real change detection this request - falling back to AI-estimated figures.");
+            console.warn("Sentinel Hub statistics unavailable or too cloud-obscured for real change detection; numerical fields will be unavailable.");
           }
         }
       } else {
@@ -865,7 +872,7 @@ serve(async (req) => {
 
     const aiData = await aiResponse.json();
     if (aiData.choices?.[0]?.finish_reason === "length") {
-      console.warn("Groq response was truncated by max_tokens - JSON parse will likely fail and fall back to the regex extractor.");
+      console.warn("Groq response was truncated by max_tokens; JSON parsing may fail.");
     }
     let analysis = aiData.choices?.[0]?.message?.content || '';
     analysis = analysis.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
@@ -883,6 +890,132 @@ serve(async (req) => {
         recommendations: [],
       };
     }
+
+    const narrativeMeasurements = {
+      percentages: realStats
+        ? [
+          ...(realChangePercent === null ||
+              Math.abs(realStats.before.ndvi?.mean ?? 0) <= NEAR_ZERO_NDVI_BASELINE
+            ? []
+            : [realChangePercent]),
+          realStats.after.validPixelRatio * 100,
+        ]
+        : [],
+      indices: {
+        NDVI: [realStats?.before.ndvi?.mean, realStats?.after.ndvi?.mean].filter(
+          (value): value is number => value !== undefined,
+        ),
+        NDWI: [realStats?.before.ndwi?.mean, realStats?.after.ndwi?.mean].filter(
+          (value): value is number => value !== undefined,
+        ),
+        NBR: [realStats?.before.nbr?.mean, realStats?.after.nbr?.mean].filter(
+          (value): value is number => value !== undefined,
+        ),
+      },
+    };
+    const getNarrativeFields = (parsed: Record<string, any>, raw: string) => ({
+      summary: parsed.summary || parsed.detailed_analysis?.split('\n')[0] || raw,
+      fullAnalysis: parsed.detailed_analysis || raw,
+      recommendations: cleanTextArray(parsed.recommendations),
+    });
+
+    let narrativeFields = getNarrativeFields(parsedAnalysis, analysis);
+    const initialMismatches = checkNarrativeNumbers(narrativeFields, narrativeMeasurements);
+    let finalMismatches = initialMismatches;
+    let retryAttempted = false;
+
+    if (parseFailed || initialMismatches.length > 0) {
+      retryAttempted = true;
+      const strictMeasurements = realStats
+        ? [
+          `NDVI before: ${realStats.before.ndvi?.mean?.toFixed(3) ?? "unavailable"}`,
+          `NDVI after: ${realStats.after.ndvi?.mean?.toFixed(3) ?? "unavailable"}`,
+          `NDWI before: ${realStats.before.ndwi?.mean?.toFixed(3) ?? "unavailable"}`,
+          `NDWI after: ${realStats.after.ndwi?.mean?.toFixed(3) ?? "unavailable"}`,
+          `NBR before: ${realStats.before.nbr?.mean?.toFixed(3) ?? "unavailable"}`,
+          `NBR after: ${realStats.after.nbr?.mean?.toFixed(3) ?? "unavailable"}`,
+          `NDVI change: ${realChangePercent === null
+            ? "unavailable"
+            : Math.abs(realStats.before.ndvi?.mean ?? 0) <= NEAR_ZERO_NDVI_BASELINE
+            ? `${realChangePercent.toFixed(1)} percentage points`
+            : `${realChangePercent.toFixed(1)}%`}`,
+          `Valid-pixel coverage: ${(realStats.after.validPixelRatio * 100).toFixed(1)}%`,
+        ].join("; ")
+        : "No measured numeric values are available.";
+      const retryController = new AbortController();
+      const retryTimeoutId = setTimeout(() => retryController.abort(), 8000);
+
+      try {
+        const retryResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${GROQ_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: successModel,
+            ...requestParams,
+            temperature: 0.1,
+            messages: [
+              {
+                role: "system",
+                content: "Return valid JSON with summary, detailed_analysis, severity, and recommendations only. Do not invent, estimate, round, or calculate any numbers. Use only the exact measured values supplied. If a number is not supplied, omit it. If no measurements are supplied, state that measurements are unavailable and use no numeric claims.",
+              },
+              {
+                role: "user",
+                content: `Rewrite the narrative for ${eventTypeLabels} in ${region} from ${startDate} to ${endDate}. The only available measured values are: ${strictMeasurements}. Use no other numeric claims.`,
+              },
+            ],
+          }),
+          signal: retryController.signal,
+        });
+
+        if (!retryResponse.ok) {
+          console.error("Narrative guard retry failed:", retryResponse.status);
+        } else {
+          const retryData = await retryResponse.json();
+          const retryAnalysis = String(retryData.choices?.[0]?.message?.content || "")
+            .replace(/```json\s*/g, "")
+            .replace(/```\s*/g, "")
+            .trim();
+
+          try {
+            const retryParsed = JSON.parse(retryAnalysis);
+            if (retryParsed && typeof retryParsed === "object" && !Array.isArray(retryParsed)) {
+              analysis = retryAnalysis;
+              parsedAnalysis = retryParsed;
+              parseFailed = false;
+              narrativeFields = getNarrativeFields(parsedAnalysis, analysis);
+              finalMismatches = checkNarrativeNumbers(narrativeFields, narrativeMeasurements);
+            } else {
+              console.error("Narrative guard retry returned a non-object JSON value.");
+            }
+          } catch (retryParseError) {
+            console.error("Narrative guard retry returned invalid JSON:", retryParseError);
+          }
+        }
+      } catch (retryError) {
+        console.error(
+          "Narrative guard retry timed out or failed:",
+          retryError instanceof Error ? retryError.message : retryError,
+        );
+      } finally {
+        clearTimeout(retryTimeoutId);
+      }
+    }
+
+    const replaceNarrative = finalMismatches.length > 0;
+    const narrativeGuard = {
+      checked: true,
+      mismatches: finalMismatches.length,
+      replaced: replaceNarrative,
+    };
+    console.info("NARRATIVE_GUARD", {
+      initialMismatches: initialMismatches.length,
+      finalMismatches: finalMismatches.length,
+      retryAttempted,
+      replaced: replaceNarrative,
+    });
 
     // Real data, where fetched above, wins over whatever the AI produced -
     // this guarantees the "real" claim in dataProvenance is actually true
@@ -909,10 +1042,29 @@ serve(async (req) => {
       area: usedRealStats && realAreaKm2 !== null ? `${realAreaKm2} km²` : null,
       changePercent: finalChangePercent,
       temporalBreakdown: usedRealStats && realTemporalBreakdown?.length ? realTemporalBreakdown : null,
-      summary: parsedAnalysis.summary || parsedAnalysis.detailed_analysis?.split('\n')[0] || "Environmental analysis complete",
-      fullAnalysis: parsedAnalysis.detailed_analysis || analysis,
+      summary: replaceNarrative
+        ? buildDeterministicSummary(
+          region,
+          startDate,
+          endDate,
+          usedRealStats && realStats && realChangePercent !== null
+            ? {
+              ndviBefore: realStats.before.ndvi!.mean,
+              ndviAfter: realStats.after.ndvi!.mean,
+              changePercent: realChangePercent,
+              validPixelRatio: realStats.after.validPixelRatio,
+              areaKm2: realAreaKm2 ?? 0,
+              nearZeroBaseline: Math.abs(realStats.before.ndvi!.mean) <= NEAR_ZERO_NDVI_BASELINE,
+            }
+            : null,
+        )
+        : narrativeFields.summary,
+      fullAnalysis: replaceNarrative
+        ? "The generated narrative contained numeric claims that did not match measured values and was excluded."
+        : narrativeFields.fullAnalysis,
       severity: usedRealStats ? deriveSeverity(realChangePercent!) : (parsedAnalysis.severity || null),
-      recommendations: cleanTextArray(parsedAnalysis.recommendations),
+      recommendations: replaceNarrative ? [] : cleanTextArray(parsedAnalysis.recommendations),
+      narrativeGuard,
       dataSources: usedRealStats
         ? ["Sentinel-2 MSI L2A statistics (Copernicus Data Space)", `Groq-generated narrative (${successModel})`]
         : [`Groq-generated narrative (${successModel}); no measured satellite values`],
