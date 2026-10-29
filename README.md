@@ -6,10 +6,13 @@ model-generated explanations while keeping measurement provenance explicit.
 
 ## Data flow and provenance
 
-- **Location search:** `process-search` uses Groq to interpret a query and
-  Nominatim/OpenStreetMap to verify place coordinates. If geocoding fails,
-  model-provided coordinates are retained only with an unverified
-  `ai_estimate` label. Search confidence is model-generated, not a measurement.
+- **Location search:** place names and coordinates come from an explicit
+  Nominatim/OpenStreetMap search. Returned GeoJSON boundaries are used for
+  map outlines and polygon-based analysis; results without a boundary are
+  explicitly point locations. No model-generated coordinates or environmental
+  search findings are accepted. Nominatim is a community service with a strict
+  usage policy and no application-wide rate limit in this prototype; see
+  [`docs/DATA_SOURCES.md`](./docs/DATA_SOURCES.md) before increasing traffic.
 - **Satellite measurements:** `analyze-satellite` requests Sentinel-2 MSI L2A
   statistics for studies starting on or after June 23, 2015. Older study
   periods use the date-appropriate Landsat Collection 2 Level-2 collection
@@ -19,8 +22,10 @@ model-generated explanations while keeping measurement provenance explicit.
   credentials. The earliest supported Landsat Level-2 date is August 1982.
   The selected sensor is reported with the results; cross-mission comparisons
   are identified rather than presented as same-sensor measurements. The AOI is
-  approximately 11 km across (±0.05° around the selected point), aggregated on
-  a 128×128 statistics grid. Sentinel-2 scenes are limited to 60% cloud
+  approximately 11 km across (±0.05° around the selected point), or uses the
+  supplied selected boundary, aggregated on a 128×128 statistics grid.
+  Boundary results are regional aggregates, not fine-grained affected-area
+  maps. Sentinel-2 scenes are limited to 60% cloud
   coverage; Landsat cloud and quality flags are masked at the pixel level.
   Sentinel-2 SCL classes 3, 8, 9, and 10 are masked; Landsat Collection 2
   fill, dilated cloud, cirrus, cloud, shadow, and snow QA flags are masked.
@@ -62,6 +67,8 @@ environment. Never commit `.env` files or secret values.
 | `VITE_SUPABASE_URL` | Supabase project URL |
 | `VITE_SUPABASE_ANON_KEY` or `VITE_SUPABASE_PUBLISHABLE_KEY` | Public Supabase client key |
 | `VITE_ENABLE_DEMO_RECORDER` | Optional demo recorder feature flag |
+| `VITE_MAP_STYLE_URL` | Optional MapLibre style URL (defaults to OpenFreeMap Liberty) |
+| `VITE_TERRAIN_TILE_URL` | Optional Terrarium DEM tile URL |
 
 ### Supabase Edge Functions
 
@@ -70,7 +77,7 @@ environment. Never commit `.env` files or secret values.
 | `SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_ANON_KEY` | Public key used by the assistant function's Supabase client |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server-side database access for Edge Functions |
-| `GROQ_API_KEY` | Generated analysis, assistant, search, and hazard narratives |
+| `GROQ_API_KEY` | Generated analysis, assistant, and hazard narratives |
 | `SENTINELHUB_CLIENT_ID` | Sentinel Hub client credentials for measured imagery/statistics |
 | `SENTINELHUB_CLIENT_SECRET` | Sentinel Hub client credentials for measured imagery/statistics |
 | `EARTH_ENGINE_PROJECT_ID` | Google Cloud project registered for Earth Engine |

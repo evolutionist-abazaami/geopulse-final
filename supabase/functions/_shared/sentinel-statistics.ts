@@ -5,6 +5,8 @@ import {
   STATISTICS_GRID_SIZE,
 } from "./analysis-constants.ts";
 import type { SpectralBandStats } from "./satellite-analysis.ts";
+import type { AoiGeometry } from "./geojson.ts";
+import type { AoiBounds } from "./geojson.ts";
 
 export interface SpectralStatsResult {
   ndvi: SpectralBandStats | null;
@@ -42,13 +44,17 @@ export async function fetchSpectralStatistics(
   from: Date,
   to: Date,
   fetcher: typeof fetch = fetch,
+  geometry?: AoiGeometry,
+  geometryBounds?: AoiBounds,
 ): Promise<SpectralStatsResult | null> {
-  const bbox = [
-    lng - AOI_HALF_WIDTH_DEGREES,
-    lat - AOI_HALF_WIDTH_DEGREES,
-    lng + AOI_HALF_WIDTH_DEGREES,
-    lat + AOI_HALF_WIDTH_DEGREES,
-  ];
+  const bbox = geometryBounds
+    ? [geometryBounds.west, geometryBounds.south, geometryBounds.east, geometryBounds.north]
+    : [
+      lng - AOI_HALF_WIDTH_DEGREES,
+      lat - AOI_HALF_WIDTH_DEGREES,
+      lng + AOI_HALF_WIDTH_DEGREES,
+      lat + AOI_HALF_WIDTH_DEGREES,
+    ];
   const windowDays = Math.max(1, Math.ceil((to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000)));
 
   let response: Response;
@@ -58,7 +64,10 @@ export async function fetchSpectralStatistics(
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
       body: JSON.stringify({
         input: {
-          bounds: { bbox, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } },
+          bounds: {
+            ...(geometry ? { geometry } : { bbox }),
+            properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" },
+          },
           data: [{
             type: "sentinel-2-l2a",
             dataFilter: { maxCloudCoverage: MAX_CLOUD_COVERAGE_PERCENT },

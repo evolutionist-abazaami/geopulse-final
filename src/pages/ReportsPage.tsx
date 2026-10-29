@@ -7,7 +7,6 @@ import { useAnalysisHistory } from "@/hooks/useAnalysisHistory";
 
 const typePillStyles: Record<string, string> = {
   geowitness: "bg-brand-dim text-brand",
-  geosearch: "bg-event-search/15 text-event-search",
 };
 
 // Ported verbatim from the old Dashboard.tsx page's bulk export.

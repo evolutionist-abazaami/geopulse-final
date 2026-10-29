@@ -30,6 +30,7 @@ export default function MapView() {
           selectionMode={mapCtx.selectionMode}
           onLocationSelect={mapCtx.onLocationSelect}
           selectedArea={mapCtx.selectedArea}
+          selectedBoundary={mapCtx.selectedBoundary}
           is3DEnabled={mapCtx.is3DEnabled}
           activeHeatmapLayer={mapCtx.activeHeatmapLayer}
           showFullscreenControl

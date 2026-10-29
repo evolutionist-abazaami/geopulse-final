@@ -1,51 +1,42 @@
-import { useState, useEffect, useRef } from "react";
-import { Input } from "@/components/ui/input";
+import { useEffect, useRef, useState } from "react";
+import { Loader2, MapPin, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Search, MapPin, Loader2, X } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-
-interface LocationResult {
-  display_name: string;
-  lat: string;
-  lon: string;
-  boundingbox: string[];
-  type: string;
-  importance: number;
-}
+import type { GeocodedPlace } from "@/types/geospatial";
+import { searchPlaces } from "@/utils/locationSearch";
 
 interface LocationSearchProps {
-  onLocationSelect: (location: {
-    name: string;
-    lat: number;
-    lng: number;
-    bounds?: [[number, number], [number, number]];
-  }) => void;
+  onLocationSelect: (location: GeocodedPlace) => void;
   onInputChange?: (value: string) => void;
   placeholder?: string;
   className?: string;
   defaultValue?: string;
 }
 
-const LocationSearch = ({
+function locationIcon(type: string): string {
+  if (type === "country") return "🌍";
+  if (["city", "town", "village", "municipality"].includes(type)) return "🏙️";
+  if (["basin", "water", "river", "lake"].some((part) => type.includes(part))) return "💧";
+  if (["state", "region", "county", "administrative"].some((part) => type.includes(part))) return "🗺️";
+  return "📍";
+}
+
+export default function LocationSearch({
   onLocationSelect,
   onInputChange,
-  placeholder = "Search any location in Africa...",
+  placeholder = "Search countries, regions, towns, or basins...",
   className,
   defaultValue = "",
-}: LocationSearchProps) => {
+}: LocationSearchProps) {
   const [query, setQuery] = useState(defaultValue);
-  const [results, setResults] = useState<LocationResult[]>([]);
+  const [results, setResults] = useState<GeocodedPlace[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const controllerRef = useRef<AbortController | null>(null);
 
-  const handleQueryChange = (val: string) => {
-    setQuery(val);
-    onInputChange?.(val);
-  };
-
-  // Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
@@ -56,172 +47,113 @@ const LocationSearch = ({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Debounced search using Nominatim (OpenStreetMap geocoding)
-  useEffect(() => {
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-    }
+  useEffect(() => () => controllerRef.current?.abort(), []);
 
-    if (query.length < 2) {
+  const handleSearch = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const searchTerm = query.trim();
+    if (searchTerm.length < 2 || isSearching) return;
+
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    setIsSearching(true);
+    setError(null);
+    setShowResults(true);
+
+    const timeoutId = setTimeout(() => controller.abort(), 12_000);
+    try {
+      const places = await searchPlaces(searchTerm, controller.signal);
+      setResults(places);
+      if (places.length === 0) setError("No matching places found. Try a more specific name.");
+    } catch (searchError) {
+      if (controller.signal.aborted) {
+        setError("Location search timed out or was cancelled. Please try again.");
+      } else {
+        setError(searchError instanceof Error ? searchError.message : "Location search failed.");
+      }
       setResults([]);
-      return;
+    } finally {
+      clearTimeout(timeoutId);
+      if (controllerRef.current === controller) controllerRef.current = null;
+      setIsSearching(false);
     }
-
-    debounceRef.current = setTimeout(async () => {
-      setIsSearching(true);
-      try {
-        // Search with Africa bounding box to prioritize African locations
-        const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
-            query
-          )}&viewbox=-18,37,52,-35&bounded=0&limit=10&addressdetails=1`,
-          {
-            headers: {
-              "Accept-Language": "en",
-              "User-Agent": "GeoPulse Environmental Analysis App",
-            },
-          }
-        );
-
-        if (response.ok) {
-          const data: LocationResult[] = await response.json();
-          // Filter to prioritize African countries
-          const africanCountries = [
-            "Nigeria", "Ghana", "Kenya", "Ethiopia", "South Africa", "Egypt", "Morocco",
-            "Algeria", "Tunisia", "Libya", "Sudan", "South Sudan", "Tanzania", "Uganda",
-            "Rwanda", "Burundi", "DRC", "Congo", "Cameroon", "Mali", "Niger", "Chad",
-            "Senegal", "Mauritania", "Ivory Coast", "Burkina Faso", "Benin", "Togo",
-            "Guinea", "Sierra Leone", "Liberia", "Gambia", "Guinea-Bissau", "Gabon",
-            "Equatorial Guinea", "Central African Republic", "Angola", "Zambia", "Zimbabwe",
-            "Mozambique", "Malawi", "Botswana", "Namibia", "Lesotho", "Eswatini", "Madagascar",
-            "Mauritius", "Seychelles", "Comoros", "Djibouti", "Eritrea", "Somalia", "Somaliland",
-            "Côte d'Ivoire", "Democratic Republic of the Congo", "Republic of Congo",
-          ];
-          
-          const sortedResults = data.sort((a, b) => {
-            const aInAfrica = africanCountries.some(c => a.display_name.includes(c));
-            const bInAfrica = africanCountries.some(c => b.display_name.includes(c));
-            if (aInAfrica && !bInAfrica) return -1;
-            if (!aInAfrica && bInAfrica) return 1;
-            return b.importance - a.importance;
-          });
-          
-          setResults(sortedResults.slice(0, 8));
-          setShowResults(true);
-        }
-      } catch (error) {
-        console.error("Location search error:", error);
-      } finally {
-        setIsSearching(false);
-      }
-    }, 300);
-
-    return () => {
-      if (debounceRef.current) {
-        clearTimeout(debounceRef.current);
-      }
-    };
-  }, [query]);
-
-  const handleSelect = (result: LocationResult) => {
-    const bounds: [[number, number], [number, number]] = [
-      [parseFloat(result.boundingbox[0]), parseFloat(result.boundingbox[2])],
-      [parseFloat(result.boundingbox[1]), parseFloat(result.boundingbox[3])],
-    ];
-
-    onLocationSelect({
-      name: result.display_name.split(",").slice(0, 2).join(", "),
-      lat: parseFloat(result.lat),
-      lng: parseFloat(result.lon),
-      bounds,
-    });
-
-    setQuery(result.display_name.split(",").slice(0, 2).join(", "));
-    setShowResults(false);
   };
 
-  const getLocationTypeIcon = (type: string) => {
-    switch (type) {
-      case "city":
-      case "town":
-      case "village":
-        return "🏙️";
-      case "administrative":
-        return "📍";
-      case "country":
-        return "🌍";
-      case "state":
-      case "region":
-        return "🗺️";
-      case "natural":
-        return "🌳";
-      case "water":
-        return "💧";
-      default:
-        return "📌";
-    }
+  const handleSelect = (place: GeocodedPlace) => {
+    setQuery(place.name);
+    onInputChange?.(place.name);
+    onLocationSelect(place);
+    setShowResults(false);
+    setError(null);
   };
 
   return (
     <div ref={containerRef} className={cn("relative", className)}>
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input
-          type="text"
-          value={query}
-          onChange={(e) => handleQueryChange(e.target.value)}
-          placeholder={placeholder}
-          className="pl-10 pr-10"
-          onFocus={() => results.length > 0 && setShowResults(true)}
-        />
-        {isSearching && (
-          <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
-        )}
-        {query && !isSearching && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
-            onClick={() => {
-              handleQueryChange("");
-              setResults([]);
+      <form onSubmit={handleSearch} className="flex items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            type="search"
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              onInputChange?.(event.target.value);
+              setError(null);
             }}
-          >
-            <X className="h-3 w-3" />
-          </Button>
-        )}
-      </div>
+            placeholder={placeholder}
+            className="pl-10 pr-10"
+            onFocus={() => results.length > 0 && setShowResults(true)}
+            aria-label="Search for a place"
+          />
+          {query && !isSearching && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
+              onClick={() => {
+                setQuery("");
+                setResults([]);
+                setError(null);
+                onInputChange?.("");
+              }}
+              aria-label="Clear location search"
+            >
+              <X className="h-3 w-3" />
+            </Button>
+          )}
+        </div>
+        <Button type="submit" size="sm" disabled={isSearching || query.trim().length < 2}>
+          {isSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : "Search"}
+        </Button>
+      </form>
 
-      {showResults && results.length > 0 && (
-        <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-border rounded-lg shadow-lg z-50 max-h-64 overflow-y-auto">
-          {results.map((result, index) => (
+      {showResults && (results.length > 0 || error) && (
+        <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-border rounded-lg shadow-lg z-50 max-h-80 overflow-y-auto">
+          {results.map((place, index) => (
             <button
-              key={`${result.lat}-${result.lon}-${index}`}
-              onClick={() => handleSelect(result)}
+              key={`${place.lat}-${place.lng}-${index}`}
+              type="button"
+              onClick={() => handleSelect(place)}
               className="w-full px-4 py-3 text-left hover:bg-muted/50 flex items-start gap-3 border-b border-border last:border-0 transition-colors"
             >
-              <span className="text-lg mt-0.5">{getLocationTypeIcon(result.type)}</span>
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm truncate">
-                  {result.display_name.split(",").slice(0, 2).join(", ")}
-                </p>
-                <p className="text-xs text-muted-foreground truncate">
-                  {result.display_name.split(",").slice(2).join(", ").trim()}
-                </p>
-              </div>
+              <span className="text-lg mt-0.5" aria-hidden="true">{locationIcon(place.type)}</span>
+              <span className="flex-1 min-w-0">
+                <span className="block font-medium text-sm truncate">{place.name}</span>
+                <span className="block text-xs text-muted-foreground truncate">
+                  {place.displayName}
+                </span>
+                <span className="block text-[10px] text-muted-foreground mt-1">
+                  {place.geometry ? "Boundary available" : "Point location"} · OpenStreetMap
+                </span>
+              </span>
               <MapPin className="h-4 w-4 text-muted-foreground flex-shrink-0 mt-1" />
             </button>
           ))}
-        </div>
-      )}
-
-      {showResults && query.length >= 2 && results.length === 0 && !isSearching && (
-        <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-border rounded-lg shadow-lg z-50 p-4">
-          <p className="text-sm text-muted-foreground text-center">No locations found</p>
+          {error && <p className="p-3 text-sm text-muted-foreground text-center">{error}</p>}
         </div>
       )}
     </div>
   );
-};
-
-export default LocationSearch;
+}

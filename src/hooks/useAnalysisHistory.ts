@@ -5,7 +5,7 @@ import type { AnalysisHistoryRow } from "@/contexts/RightPanelContext";
 import type { RegionBounds } from "@/contexts/MapContext";
 
 export interface SaveAnalysisInput {
-  type: "geowitness" | "geosearch";
+  type: "geowitness";
   eventType?: string | null;
   regionName: string;
   regionBounds: RegionBounds;
@@ -29,6 +29,7 @@ export function useAnalysisHistory() {
       .from("analysis_history")
       .select("*")
       .eq("user_id", user.id)
+      .eq("type", "geowitness")
       .order("created_at", { ascending: false })
       .limit(50);
     setRows((data as unknown as AnalysisHistoryRow[]) || []);
@@ -39,8 +40,7 @@ export function useAnalysisHistory() {
     load();
   }, [load]);
 
-  // Each screen (Sidebar, GeoWitnessPanel, TopBar's search save, ReportsPage)
-  // mounts its own instance of this hook with independent state. Without
+  // Each screen mounts its own instance of this hook with independent state. Without
   // this subscription, running an analysis in one instance wouldn't show up
   // in the Sidebar's history list until it happened to reload. Realtime
   // keeps every instance in sync the same way AlertsPanel/AlertMarkers
@@ -61,6 +61,7 @@ export function useAnalysisHistory() {
         { event: "INSERT", schema: "public", table: "analysis_history" },
         (payload) => {
           const row = payload.new as AnalysisHistoryRow;
+          if (row.type !== "geowitness") return;
           if (userId && row.user_id !== userId) return;
           setRows((prev) => (prev.some((r) => r.id === row.id) ? prev : [row, ...prev]));
         }

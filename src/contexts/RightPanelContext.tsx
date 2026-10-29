@@ -1,10 +1,11 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import type { RegionBounds } from "./MapContext";
+import type { GeocodedPlace } from "@/types/geospatial";
 
 export interface AnalysisHistoryRow {
   id: string;
   user_id: string;
-  type: "geowitness" | "geosearch";
+  type: "geowitness";
   event_type: string | null;
   region_name: string;
   region_bounds: RegionBounds;
@@ -13,34 +14,11 @@ export interface AnalysisHistoryRow {
   created_at: string;
 }
 
-export interface GeoSearchResult {
-  query: string;
-  interpretation: string;
-  findings: string[];
-  locations: {
-    name: string;
-    lat: number;
-    lng: number;
-    verified?: boolean;
-    source?: "nominatim" | "ai_estimate" | "local_lookup" | "user_selected";
-  }[];
-  confidenceLevel: number | null;
-  confidenceLevelOrigin: "model_generated" | "unavailable";
-  recommendations: string[];
-  reportLocation?: {
-    lat: number;
-    lng: number;
-    name: string;
-    verified: boolean;
-    source?: "nominatim" | "ai_estimate" | "local_lookup" | "user_selected";
-  } | null;
-}
-
 export type RightPanelMode =
   | { type: "analysis"; data: AnalysisHistoryRow }
-  | { type: "search"; data: GeoSearchResult }
+  | { type: "search"; data: GeocodedPlace }
   | { type: "ai" }
-  | { type: "geowitness" }
+  | { type: "geowitness"; initialLocation?: GeocodedPlace }
   | null;
 
 interface RightPanelContextValue {

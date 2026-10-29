@@ -10,10 +10,44 @@ import LocationSearch from "./LocationSearch";
 import { ComparisonChart } from "./charts/ComparisonChart";
 import SplitMapComparison from "./SplitMapComparison";
 import AnimatedMapTransition from "./AnimatedMapTransition";
-import ComparisonReportGenerator from "./ComparisonReportGenerator";
+import ComparisonReportGenerator, { type ComparisonResult } from "./ComparisonReportGenerator";
+import type { GeocodedPlace } from "@/types/geospatial";
+
+interface SatelliteAnalysisResponse {
+  analysisMethod: "measured";
+  fallback?: boolean;
+  changePercent: number;
+  area?: string | null;
+  sensorInfo?: { sensor?: string };
+  fieldProvenance: {
+    changePercent?: { origin?: string };
+  };
+}
+
+const isMeasuredAnalysis = (value: unknown): value is SatelliteAnalysisResponse => {
+  if (!value || typeof value !== "object") return false;
+  const data = value as Record<string, unknown>;
+  const provenance = data.fieldProvenance;
+  if (!provenance || typeof provenance !== "object") return false;
+  const changeProvenance = (provenance as Record<string, unknown>).changePercent;
+  if (!changeProvenance || typeof changeProvenance !== "object") return false;
+  const changeOrigin = (changeProvenance as Record<string, unknown>).origin;
+  if (data.area !== undefined && data.area !== null && typeof data.area !== "string") return false;
+  if (data.sensorInfo !== undefined && data.sensorInfo !== null) {
+    if (typeof data.sensorInfo !== "object") return false;
+    const sensor = (data.sensorInfo as Record<string, unknown>).sensor;
+    if (sensor !== undefined && typeof sensor !== "string") return false;
+  }
+
+  return data.analysisMethod === "measured" &&
+    data.fallback !== true &&
+    typeof data.changePercent === "number" &&
+    Number.isFinite(data.changePercent) &&
+    changeOrigin === "measured";
+};
 
 interface ComparisonModeProps {
-  onComparisonComplete?: (result: any) => void;
+  onComparisonComplete?: (result: ComparisonResult) => void;
 }
 
 const eventTypes = [
@@ -25,48 +59,9 @@ const eventTypes = [
   { value: "wildfire", label: "Wildfire", icon: "🔥" },
 ];
 
-const generateLocalComparison = (
-  locName: string,
-  event: string,
-  p1Start: string,
-  p1End: string,
-  p2Start: string,
-  p2End: string
-) => {
-  const change1 = 14.8;
-  const change2 = 23.4;
-  return {
-    location: locName,
-    eventType: event,
-    period1: {
-      range: `${p1Start} to ${p1End}`,
-      changePercent: change1,
-      area: "240 km²",
-      summary: `Period 1 analysis for ${locName} shows a ${change1}% change baseline.`,
-    },
-    period2: {
-      range: `${p2Start} to ${p2End}`,
-      changePercent: change2,
-      area: "240 km²",
-      summary: `Period 2 analysis for ${locName} shows an increased change level of ${change2}%.`,
-    },
-    comparison: {
-      trend: "increasing",
-      difference: "8.6",
-      insight: `${event.replace(/_/g, " ")} has increased by 8.6% between Period 1 and Period 2 in ${locName}.`,
-    },
-    chartData: [
-      { name: "Period 1", before: change1, after: change2 },
-      { name: "Impact Level", before: change1 * 1.2, after: change2 * 1.2 },
-    ],
-  };
-};
-
-const isFallbackAnalysis = (data: any) => Boolean(data?.fallback || data?.fallbackReason === "SERVICE_UNAVAILABLE");
-
 const ComparisonMode = ({ onComparisonComplete }: ComparisonModeProps) => {
   const [eventType, setEventType] = useState("deforestation");
-  const [selectedLocation, setSelectedLocation] = useState<{ lat: number; lng: number; name: string } | null>(null);
+  const [selectedLocation, setSelectedLocation] = useState<GeocodedPlace | null>(null);
   
   // Period 1
   const [period1Start, setPeriod1Start] = useState("2020-01-01");
@@ -77,11 +72,11 @@ const ComparisonMode = ({ onComparisonComplete }: ComparisonModeProps) => {
   const [period2End, setPeriod2End] = useState("2024-01-01");
   
   const [isComparing, setIsComparing] = useState(false);
-  const [comparisonResult, setComparisonResult] = useState<any>(null);
+  const [comparisonResult, setComparisonResult] = useState<ComparisonResult | null>(null);
   const [showSplitMap, setShowSplitMap] = useState(true);
   const [viewMode, setViewMode] = useState<"split" | "animated">("split");
 
-  const handleLocationSelect = (location: { name: string; lat: number; lng: number }) => {
+  const handleLocationSelect = (location: GeocodedPlace) => {
     setSelectedLocation(location);
   };
 
@@ -113,6 +108,7 @@ const ComparisonMode = ({ onComparisonComplete }: ComparisonModeProps) => {
             startDate: period1Start,
             endDate: period1End,
             coordinates: { lat: selectedLocation.lat, lng: selectedLocation.lng },
+            geometry: selectedLocation.geometry,
           }),
         }),
         fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/analyze-satellite`, {
@@ -127,53 +123,53 @@ const ComparisonMode = ({ onComparisonComplete }: ComparisonModeProps) => {
             startDate: period2Start,
             endDate: period2End,
             coordinates: { lat: selectedLocation.lat, lng: selectedLocation.lng },
+            geometry: selectedLocation.geometry,
           }),
         }),
       ]);
 
-      let period1Data;
-      let period2Data;
-
       if (!period1Response.ok || !period2Response.ok) {
-        console.warn("Comparison API returned non-200 response. Using GeoPulse Comparison Engine.");
-        const fallbackRes = generateLocalComparison(selectedLocation.name, eventType, period1Start, period1End, period2Start, period2End);
-        setComparisonResult(fallbackRes);
-        onComparisonComplete?.(fallbackRes);
-        toast.success("Comparison complete (GeoPulse Engine)");
+        throw new Error("One or both satellite analysis requests failed. No comparison was generated.");
+      }
+
+      const period1Payload: unknown = await period1Response.json();
+      const period2Payload: unknown = await period2Response.json();
+
+      if (!isMeasuredAnalysis(period1Payload) || !isMeasuredAnalysis(period2Payload)) {
+        toast.warning("Measured data is unavailable for one or both periods. No comparison was generated.");
         return;
-      } else {
-        period1Data = await period1Response.json();
-        period2Data = await period2Response.json();
       }
 
-      if (isFallbackAnalysis(period1Data) || isFallbackAnalysis(period2Data)) {
-        toast.warning("Comparison loaded with temporary fallback data because the AI provider is overloaded.");
-      }
+      const period1Data = period1Payload;
+      const period2Data = period2Payload;
 
+      const period1Change = period1Data.changePercent;
+      const period2Change = period2Data.changePercent;
+      const difference = period2Change - period1Change;
+      const trend: ComparisonResult["comparison"]["trend"] =
+        difference > 0 ? "higher" : difference < 0 ? "lower" : "similar";
       const result = {
         location: selectedLocation.name,
         eventType,
         period1: {
           range: `${period1Start} to ${period1End}`,
-          changePercent: period1Data.changePercent || 14.8,
-          area: period1Data.area || "240 km²",
-          summary: period1Data.summary || `Period 1 analysis for ${selectedLocation.name}`,
+          changePercent: period1Change,
+          area: period1Data.area ?? "Unavailable",
+          sensor: period1Data.sensorInfo?.sensor ?? "Unavailable",
         },
         period2: {
           range: `${period2Start} to ${period2End}`,
-          changePercent: period2Data.changePercent || 23.4,
-          area: period2Data.area || "240 km²",
-          summary: period2Data.summary || `Period 2 analysis for ${selectedLocation.name}`,
+          changePercent: period2Change,
+          area: period2Data.area ?? "Unavailable",
+          sensor: period2Data.sensorInfo?.sensor ?? "Unavailable",
         },
         comparison: {
-          trend: (period2Data.changePercent || 23.4) > (period1Data.changePercent || 14.8) ? "increasing" : 
-                 (period2Data.changePercent || 23.4) < (period1Data.changePercent || 14.8) ? "decreasing" : "stable",
-          difference: Math.abs((period2Data.changePercent || 23.4) - (period1Data.changePercent || 14.8)).toFixed(1),
-          insight: generateInsight(period1Data.changePercent || 14.8, period2Data.changePercent || 23.4, eventType),
+          trend,
+          difference: Math.abs(difference).toFixed(1),
+          insight: `The measured NDVI change metric is ${Math.abs(difference).toFixed(1)} percentage points ${difference > 0 ? "higher" : difference < 0 ? "lower" : "unchanged"} in period 2. This does not establish a cause or event-specific impact.`,
         },
         chartData: [
-          { name: "Period 1", before: period1Data.changePercent || 14.8, after: period2Data.changePercent || 23.4 },
-          { name: "Impact Level", before: Math.min(100, (period1Data.changePercent || 14.8) * 1.2), after: Math.min(100, (period2Data.changePercent || 23.4) * 1.2) },
+          { name: "NDVI change", before: period1Change, after: period2Change },
         ],
       };
 
@@ -182,36 +178,21 @@ const ComparisonMode = ({ onComparisonComplete }: ComparisonModeProps) => {
       toast.success("Comparison complete!");
 
     } catch (error) {
-      console.warn("Comparison API unreachable. Engaging GeoPulse Comparison Engine:", error);
-      const fallbackRes = generateLocalComparison(selectedLocation.name, eventType, period1Start, period1End, period2Start, period2End);
-      setComparisonResult(fallbackRes);
-      onComparisonComplete?.(fallbackRes);
-      toast.success("Comparison complete (GeoPulse Engine)");
+      console.error("Comparison API request failed:", error);
+      setComparisonResult(null);
+      toast.error(error instanceof Error ? error.message : "Comparison failed. No measurements were returned.");
     } finally {
       setIsComparing(false);
-    }
-  };
-
-  const generateInsight = (percent1: number, percent2: number, event: string): string => {
-    const diff = percent2 - percent1;
-    const eventLabel = eventTypes.find(e => e.value === event)?.label || event;
-    
-    if (Math.abs(diff) < 5) {
-      return `${eventLabel} levels have remained relatively stable between the two periods.`;
-    } else if (diff > 0) {
-      return `${eventLabel} has increased by ${diff.toFixed(1)}% between the two periods, indicating worsening conditions.`;
-    } else {
-      return `${eventLabel} has decreased by ${Math.abs(diff).toFixed(1)}% between the two periods, suggesting recovery or intervention success.`;
     }
   };
 
   const getTrendIcon = () => {
     if (!comparisonResult) return null;
     switch (comparisonResult.comparison.trend) {
-      case "increasing":
-        return <TrendingUp className="h-5 w-5 text-destructive" />;
-      case "decreasing":
-        return <TrendingDown className="h-5 w-5 text-green-500" />;
+      case "higher":
+        return <TrendingUp className="h-5 w-5 text-muted-foreground" />;
+      case "lower":
+        return <TrendingDown className="h-5 w-5 text-muted-foreground" />;
       default:
         return <Minus className="h-5 w-5 text-muted-foreground" />;
     }
@@ -248,6 +229,7 @@ const ComparisonMode = ({ onComparisonComplete }: ComparisonModeProps) => {
           <label className="text-sm font-medium mb-2 block">Location</label>
           <LocationSearch
             onLocationSelect={handleLocationSelect}
+            onInputChange={() => setSelectedLocation(null)}
             placeholder="Search location..."
             defaultValue={selectedLocation?.name}
           />
@@ -375,12 +357,12 @@ const ComparisonMode = ({ onComparisonComplete }: ComparisonModeProps) => {
 
           <div className="grid grid-cols-2 gap-3">
             <Card className="p-3 bg-primary/5 border-primary/20">
-              <p className="text-xs text-muted-foreground mb-1">Period 1</p>
+              <p className="text-xs text-muted-foreground mb-1">Period 1 NDVI change</p>
               <p className="text-2xl font-bold text-primary">{comparisonResult.period1.changePercent}%</p>
               <p className="text-xs text-muted-foreground truncate">{comparisonResult.period1.range}</p>
             </Card>
             <Card className="p-3 bg-secondary/5 border-secondary/20">
-              <p className="text-xs text-muted-foreground mb-1">Period 2</p>
+              <p className="text-xs text-muted-foreground mb-1">Period 2 NDVI change</p>
               <p className="text-2xl font-bold text-secondary">{comparisonResult.period2.changePercent}%</p>
               <p className="text-xs text-muted-foreground truncate">{comparisonResult.period2.range}</p>
             </Card>
@@ -390,7 +372,7 @@ const ComparisonMode = ({ onComparisonComplete }: ComparisonModeProps) => {
             <div className="flex items-center gap-2 mb-2">
               {getTrendIcon()}
               <span className="text-sm font-medium capitalize">{comparisonResult.comparison.trend}</span>
-              <span className="text-sm text-muted-foreground">({comparisonResult.comparison.difference}% change)</span>
+              <span className="text-sm text-muted-foreground">({comparisonResult.comparison.difference} percentage points)</span>
             </div>
             <p className="text-sm text-muted-foreground">{comparisonResult.comparison.insight}</p>
           </Card>

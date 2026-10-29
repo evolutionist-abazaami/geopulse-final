@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Badge } from "@/components/ui/badge";
 import { Play, Pause, RotateCcw, ChevronLeft, ChevronRight } from "lucide-react";
+import type { BoundaryGeometry } from "@/types/geospatial";
+import { MAP_STYLE_URL } from "@/utils/mapConfig";
 
 interface AnimatedMapTransitionProps {
   center: [number, number];
@@ -20,7 +22,7 @@ interface AnimatedMapTransitionProps {
     changePercent?: number;
     summary?: string;
   };
-  selectedLocation?: { lat: number; lng: number; name: string } | null;
+  selectedLocation?: { lat: number; lng: number; name: string; geometry?: BoundaryGeometry } | null;
 }
 
 const AnimatedMapTransition = ({
@@ -40,141 +42,6 @@ const AnimatedMapTransition = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(50); // ms per frame
   const animationRef = useRef<number | null>(null);
-
-  // Generate interpolated heatmap data based on transition progress
-  const generateInterpolatedData = useCallback((
-    progress: number,
-    baseLat: number,
-    baseLng: number
-  ) => {
-    const p1Change = period1Data?.changePercent || 0;
-    const p2Change = period2Data?.changePercent || 0;
-    
-    // Interpolate between the two periods
-    const currentChange = p1Change + (p2Change - p1Change) * (progress / 100);
-    const intensity = Math.min(1, Math.abs(currentChange) / 100);
-    
-    const points: { lat: number; lng: number; intensity: number }[] = [];
-    
-    // Generate points with varying density based on progress
-    const numPoints = 30 + Math.floor(progress / 5);
-    for (let i = 0; i < numPoints; i++) {
-      const angle = (i / numPoints) * Math.PI * 2;
-      const radius = 0.1 + Math.random() * 0.4 * (1 + progress / 100);
-      const latOffset = Math.cos(angle) * radius + (Math.random() - 0.5) * 0.15;
-      const lngOffset = Math.sin(angle) * radius + (Math.random() - 0.5) * 0.15;
-      
-      // Intensity increases/decreases based on transition
-      const pointIntensity = Math.max(0.1, intensity + (Math.random() - 0.5) * 0.3);
-      
-      points.push({
-        lat: baseLat + latOffset,
-        lng: baseLng + lngOffset,
-        intensity: pointIntensity,
-      });
-    }
-    return { points, currentChange };
-  }, [period1Data, period2Data]);
-
-  // Update heatmap layer with interpolated data
-  const updateHeatmap = useCallback((progress: number) => {
-    const map = mapInstance.current;
-    if (!map || !mapLoaded || !selectedLocation) return;
-
-    const { points, currentChange } = generateInterpolatedData(
-      progress,
-      selectedLocation.lat,
-      selectedLocation.lng
-    );
-
-    const sourceId = "animated-heatmap";
-    const layerId = "animated-heatmap-layer";
-
-    // Dynamic colors based on severity
-    const getColors = () => {
-      if (currentChange > 50) {
-        return ["#fee5d9", "#fcae91", "#fb6a4a", "#cb181d"]; // Red (severe)
-      } else if (currentChange > 25) {
-        return ["#fff7bc", "#fec44f", "#d95f0e", "#993404"]; // Orange (moderate)
-      }
-      return ["#f7fcb9", "#addd8e", "#31a354", "#006837"]; // Green (low)
-    };
-
-    const colors = getColors();
-
-    try {
-      // Update or create source
-      const source = map.getSource(sourceId) as maplibregl.GeoJSONSource;
-      if (source) {
-        source.setData({
-          type: "FeatureCollection",
-          features: points.map(point => ({
-            type: "Feature" as const,
-            properties: { intensity: point.intensity },
-            geometry: {
-              type: "Point" as const,
-              coordinates: [point.lng, point.lat],
-            },
-          })),
-        });
-      } else {
-        map.addSource(sourceId, {
-          type: "geojson",
-          data: {
-            type: "FeatureCollection",
-            features: points.map(point => ({
-              type: "Feature" as const,
-              properties: { intensity: point.intensity },
-              geometry: {
-                type: "Point" as const,
-                coordinates: [point.lng, point.lat],
-              },
-            })),
-          },
-        });
-
-        map.addLayer({
-          id: layerId,
-          type: "heatmap",
-          source: sourceId,
-          paint: {
-            "heatmap-weight": ["get", "intensity"],
-            "heatmap-intensity": 1.5,
-            "heatmap-color": [
-              "interpolate",
-              ["linear"],
-              ["heatmap-density"],
-              0, "rgba(0,0,0,0)",
-              0.1, colors[0],
-              0.3, colors[1],
-              0.5, colors[2],
-              0.7, colors[3],
-              1, colors[3],
-            ],
-            "heatmap-radius": 60,
-            "heatmap-opacity": 0.8,
-          },
-        });
-      }
-
-      // Update layer paint properties for color changes
-      if (map.getLayer(layerId)) {
-        map.setPaintProperty(layerId, "heatmap-color", [
-          "interpolate",
-          ["linear"],
-          ["heatmap-density"],
-          0, "rgba(0,0,0,0)",
-          0.1, colors[0],
-          0.3, colors[1],
-          0.5, colors[2],
-          0.7, colors[3],
-          1, colors[3],
-        ]);
-      }
-    } catch (error) {
-      console.error("Error updating heatmap:", error);
-    }
-  }, [mapLoaded, selectedLocation, generateInterpolatedData]);
 
   // Animation loop
   useEffect(() => {
@@ -215,11 +82,6 @@ const AnimatedMapTransition = ({
     };
   }, [isPlaying, playbackSpeed]);
 
-  // Update heatmap when progress changes
-  useEffect(() => {
-    updateHeatmap(transitionProgress);
-  }, [transitionProgress, updateHeatmap]);
-
   // Initialize map
   useEffect(() => {
     if (!mapRef.current) return;
@@ -227,26 +89,7 @@ const AnimatedMapTransition = ({
 
     const map = new maplibregl.Map({
       container: mapRef.current,
-      style: {
-        version: 8 as const,
-        sources: {
-          osm: {
-            type: "raster" as const,
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-            tileSize: 256,
-            attribution: '&copy; OpenStreetMap',
-          },
-        },
-        layers: [
-          {
-            id: "osm-tiles",
-            type: "raster" as const,
-            source: "osm",
-            minzoom: 0,
-            maxzoom: 19,
-          },
-        ],
-      },
+      style: MAP_STYLE_URL,
       center: [center[1], center[0]],
       zoom: zoom,
     });
@@ -275,6 +118,37 @@ const AnimatedMapTransition = ({
     });
   }, [center, zoom]);
 
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map || !mapLoaded) return;
+
+    const sourceId = "comparison-boundary-source";
+    const data = {
+      type: "FeatureCollection" as const,
+      features: selectedLocation?.geometry
+        ? [{ type: "Feature" as const, properties: {}, geometry: selectedLocation.geometry }]
+        : [],
+    };
+    const source = map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
+    if (source) {
+      source.setData(data);
+    } else {
+      map.addSource(sourceId, { type: "geojson", data });
+      map.addLayer({
+        id: "comparison-boundary-fill",
+        type: "fill",
+        source: sourceId,
+        paint: { "fill-color": "#0891b2", "fill-opacity": 0.12 },
+      });
+      map.addLayer({
+        id: "comparison-boundary-outline",
+        type: "line",
+        source: sourceId,
+        paint: { "line-color": "#0891b2", "line-width": 2 },
+      });
+    }
+  }, [mapLoaded, selectedLocation?.geometry]);
+
   // Add marker for selected location
   useEffect(() => {
     if (!mapInstance.current || !mapLoaded || !selectedLocation) return;
@@ -284,17 +158,7 @@ const AnimatedMapTransition = ({
 
     const el = document.createElement("div");
     el.className = "animated-map-marker";
-    el.innerHTML = `
-      <div style="
-        background: linear-gradient(135deg, #0891b2, #0891b2dd);
-        width: 28px;
-        height: 28px;
-        border-radius: 50%;
-        border: 3px solid white;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-        animation: pulse 2s infinite;
-      "></div>
-    `;
+    el.style.cssText = "width:28px;height:28px;border-radius:50%;background:#0891b2;border:3px solid white;box-shadow:0 4px 12px rgba(0,0,0,.4)";
 
     new maplibregl.Marker(el)
       .setLngLat([selectedLocation.lng, selectedLocation.lat])
@@ -329,9 +193,11 @@ const AnimatedMapTransition = ({
   };
 
   // Calculate current interpolated values
-  const p1Change = period1Data?.changePercent || 0;
-  const p2Change = period2Data?.changePercent || 0;
-  const currentChange = p1Change + (p2Change - p1Change) * (transitionProgress / 100);
+  const p1Change = period1Data?.changePercent;
+  const p2Change = period2Data?.changePercent;
+  const currentChange = typeof p1Change === "number" && typeof p2Change === "number"
+    ? p1Change + (p2Change - p1Change) * (transitionProgress / 100)
+    : null;
 
   const getCurrentPeriodLabel = () => {
     if (transitionProgress < 25) return period1Label;
@@ -371,16 +237,14 @@ const AnimatedMapTransition = ({
           </div>
         </div>
 
-        {/* Current Stats Overlay */}
+        {/* Aggregate values are interpolated between periods; no spatial heatmap is implied. */}
         <div className="absolute bottom-20 left-3 z-10">
           <div className="bg-background/95 backdrop-blur-sm rounded-lg p-3 shadow-md space-y-2">
-            <div className="flex items-center gap-2">
-              <Badge className={`${getChangeColor(currentChange)} text-white`}>
-                {currentChange.toFixed(1)}% change
-              </Badge>
-            </div>
+            {currentChange !== null
+              ? <Badge className={`${getChangeColor(currentChange)} text-white`}>{currentChange.toFixed(1)}% NDVI change</Badge>
+              : <Badge variant="outline">No measured comparison values</Badge>}
             <p className="text-xs text-muted-foreground">
-              {getCurrentPeriodLabel()}
+              {getCurrentPeriodLabel()} · aggregate interpolation, not a pixel heatmap
             </p>
           </div>
         </div>

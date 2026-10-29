@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, X, Loader2, Bell, MessageCircle, Sun, Moon, User, Settings, LogOut } from "lucide-react";
+import { Bell, MessageCircle, Sun, Moon, User, Settings, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import type { User as SupabaseUser } from "@supabase/supabase-js";
-import { useGeoSearch } from "@/hooks/useGeoSearch";
+import LocationSearch from "@/components/LocationSearch";
+import { useMapContext } from "@/contexts/MapContext";
 import { useRightPanel } from "@/contexts/RightPanelContext";
-import { useAnalysisHistory } from "@/hooks/useAnalysisHistory";
 import { useTheme } from "@/hooks/useTheme";
+import type { GeocodedPlace } from "@/types/geospatial";
 
 function TopBarIconButton({ icon: Icon, onClick, active, badge }: { icon: typeof Bell; onClick: () => void; active: boolean; badge?: number }) {
   return (
@@ -119,63 +120,38 @@ function UserAvatar() {
 }
 
 export function TopBar() {
-  const [query, setQuery] = useState("");
-  const { isSearching, search } = useGeoSearch();
+  const mapCtx = useMapContext();
   const rightPanel = useRightPanel();
-  const { saveAnalysis } = useAnalysisHistory();
   const navigate = useNavigate();
 
-  const handleSearch = async () => {
-    if (!query.trim()) return;
-    // Search results land on the map (marker + boundary + fly-to, same as
-    // v1's GeoSearch page) - navigate to it first so that's actually visible
-    // even if the search was triggered from Reports/Settings/Early Warning.
+  const handleLocationSelect = (place: GeocodedPlace) => {
     navigate("/");
-    const result = await search(query);
-    if (!result) return;
-    rightPanel.open({ type: "search", data: result });
+    mapCtx.setMarkers([{ lat: place.lat, lng: place.lng, label: place.name, color: "#0891b2" }]);
+    mapCtx.setPolygons([]);
+    mapCtx.setSelectedArea(null);
+    mapCtx.setSelectedBoundary(place.geometry ?? null);
 
-    const first = result.locations?.[0] || result.reportLocation;
-    if (first) {
-      const size = 0.2;
-      saveAnalysis({
-        type: "geosearch",
-        regionName: first.name,
-        regionBounds: { north: first.lat + size, south: first.lat - size, east: first.lng + size, west: first.lng - size },
-        resultPayload: result,
-      });
+    if (place.bounds) {
+      const [[south, west], [north, east]] = place.bounds;
+      const regionBounds = { north, south, east, west };
+      mapCtx.flyToBounds(regionBounds);
+    } else {
+      mapCtx.setView([place.lat, place.lng], 10);
     }
+
+    rightPanel.open({
+      type: "search",
+      data: place,
+    });
   };
 
   return (
     <header className="flex items-center h-12 px-4 gap-3 bg-white dark:bg-surface-1 border-b border-gray-200 dark:border-border-subtle flex-shrink-0">
-      <div
-        className={cn(
-          "flex items-center gap-2 flex-1 max-w-[520px] h-9 px-3",
-          "bg-gray-50 dark:bg-surface-2 border border-gray-200 dark:border-border-default rounded-lg",
-          "transition-all duration-fast",
-          "focus-within:border-blue-300 dark:focus-within:border-border-accent focus-within:shadow-[0_0_0_3px_rgba(59,130,246,0.12)]"
-        )}
-      >
-        {isSearching ? (
-          <Loader2 className="w-4 h-4 text-gray-400 dark:text-v2-muted animate-spin flex-shrink-0" />
-        ) : (
-          <Search className="w-4 h-4 text-gray-400 dark:text-v2-muted flex-shrink-0" />
-        )}
-        <input
-          type="text"
-          placeholder='Ask about environmental changes… e.g. "Flooding in Lagos 2023"'
-          className="flex-1 bg-transparent border-none outline-none text-[14px] text-gray-900 dark:text-v2-primary placeholder:text-gray-400 dark:placeholder:text-v2-muted"
-          onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-          onChange={(e) => setQuery(e.target.value)}
-          value={query}
-        />
-        {query && (
-          <button onClick={() => setQuery("")} className="text-gray-400 dark:text-v2-muted hover:text-gray-900 dark:hover:text-v2-primary transition-colors duration-fast">
-            <X className="w-3.5 h-3.5" />
-          </button>
-        )}
-      </div>
+      <LocationSearch
+        onLocationSelect={handleLocationSelect}
+        placeholder="Search countries, regions, towns, or basins..."
+        className="flex-1 max-w-[520px]"
+      />
 
       <div className="flex items-center gap-1 ml-auto">
         <TopBarIconButton icon={Bell} onClick={() => navigate("/early-warning")} active={false} />

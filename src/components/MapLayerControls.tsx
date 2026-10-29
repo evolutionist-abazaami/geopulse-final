@@ -23,10 +23,10 @@ const MapLayerControls = ({
   onHeatmapLayerChange,
 }: MapLayerControlsProps) => {
   const heatmapLayers = [
-    { value: "vegetation" as const, label: "Vegetation Density", icon: TreePine, color: "text-green-500" },
-    { value: "temperature" as const, label: "Temperature", icon: Thermometer, color: "text-red-500" },
-    { value: "rainfall" as const, label: "Rainfall", icon: CloudRain, color: "text-blue-500" },
-    { value: "none" as const, label: "No Heatmap", icon: X, color: "text-muted-foreground" },
+    { value: "vegetation" as const, label: "Vegetation NDVI (MODIS)", icon: TreePine, color: "text-green-500" },
+    { value: "temperature" as const, label: "Land Surface Temperature", icon: Thermometer, color: "text-red-500" },
+    { value: "rainfall" as const, label: "Rainfall Rate (GPM IMERG)", icon: CloudRain, color: "text-blue-500" },
+    { value: "none" as const, label: "No Overlay", icon: X, color: "text-muted-foreground" },
   ];
 
   const activeLayer = heatmapLayers.find(l => l.value === activeHeatmapLayer);
@@ -77,9 +77,14 @@ const MapLayerControls = ({
           so its own baked-in color scale is shown rather than a guessed one */}
       {activeHeatmapLayer !== "none" && (
         <div className="mt-2 pt-2 border-t border-border/50">
-          <div className="flex items-start gap-1.5">
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-start gap-1.5">
             <Satellite className="h-3 w-3 text-muted-foreground mt-0.5 flex-shrink-0" />
             <p className="text-[11px] text-muted-foreground leading-snug">{GIBS_LAYERS[activeHeatmapLayer].attribution}</p>
+            </div>
+            <p className="text-[10px] text-muted-foreground leading-snug mt-1">
+              Context imagery only; this layer is not the selected-area analysis result.
+            </p>
           </div>
         </div>
       )}

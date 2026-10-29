@@ -3,7 +3,7 @@ import { Card } from "@/components/ui/card";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 
 interface TrendChartProps {
-  data: Array<{ date: string; value: number; label?: string }>;
+  data: Array<{ date: string; value: number | null; label?: string }>;
   title: string;
   color?: string;
   showLegend?: boolean;

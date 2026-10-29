@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   Map as MapIcon, Satellite, Shield, FileText,
-  ChevronLeft, ChevronRight, Clock, TreePine, Droplets, Flame, Sun, Search,
+  ChevronLeft, ChevronRight, Clock, TreePine, Droplets, Flame, Sun,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
@@ -19,20 +19,13 @@ const eventTypeStyles: Record<string, { bg: string; icon: string; Icon: typeof T
   flood: { bg: "bg-event-flood/15", icon: "text-event-flood", Icon: Droplets },
   wildfire: { bg: "bg-event-wildfire/15", icon: "text-event-wildfire", Icon: Flame },
   drought: { bg: "bg-event-drought/15", icon: "text-event-drought", Icon: Sun },
-  geosearch: { bg: "bg-event-search/15", icon: "text-event-search", Icon: Search },
 };
 
 function styleFor(row: AnalysisHistoryRow) {
-  return eventTypeStyles[row.event_type || ""] || eventTypeStyles[row.type === "geosearch" ? "geosearch" : "deforestation"];
+  return eventTypeStyles[row.event_type || ""] || eventTypeStyles.deforestation;
 }
 
-// Like a chat history list, the title should read as what was asked, not
-// just where. GeoSearch has a real free-text query; GeoWitness doesn't, so
-// its region name (already effectively "what was analyzed") stays the title.
 function titleFor(row: AnalysisHistoryRow) {
-  if (row.type === "geosearch" && typeof row.result_payload?.query === "string" && row.result_payload.query.trim()) {
-    return row.result_payload.query as string;
-  }
   return row.region_name;
 }
 
@@ -96,7 +89,8 @@ export function Sidebar() {
     setSelectedId(row.id);
     rightPanel.open({ type: "analysis", data: row });
     mapCtx.flyToBounds(row.region_bounds);
-    mapCtx.highlightRegion(row.region_bounds);
+    mapCtx.setSelectedBoundary(null);
+    mapCtx.setSelectedArea(null);
     if (location.pathname !== "/") navigate("/");
   };
 
@@ -164,7 +158,7 @@ export function Sidebar() {
               <div className="flex flex-col items-center justify-center py-8 px-3 text-center">
                 <Clock className="w-8 h-8 text-gray-300 dark:text-v2-disabled mb-3" />
                 <p className="text-[12px] text-gray-400 dark:text-v2-muted">No analyses yet</p>
-                <p className="text-[11px] text-gray-300 dark:text-v2-disabled mt-1">Run GeoWitness or search to get started</p>
+                <p className="text-[11px] text-gray-300 dark:text-v2-disabled mt-1">Run an analysis to get started</p>
               </div>
             ) : (
               (["Today", "Yesterday", "This week", "Older"] as const).map((label, i) => {
@@ -193,9 +187,7 @@ export function Sidebar() {
                           <div className="flex-1 min-w-0">
                             <p className="text-[12px] text-gray-900 dark:text-v2-primary truncate">{titleFor(row)}</p>
                             <p className="text-[11px] text-gray-400 dark:text-v2-muted truncate">
-                              {row.type === "geowitness"
-                                ? `${(row.event_type || "analysis").replace(/_/g, " ")} · ${timeAgo(row.created_at)}`
-                                : `${row.region_name} · ${timeAgo(row.created_at)}`}
+                              {(row.event_type || "analysis").replace(/_/g, " ")} · {timeAgo(row.created_at)}
                             </p>
                           </div>
                         </button>

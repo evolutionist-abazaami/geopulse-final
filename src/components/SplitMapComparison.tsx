@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { Badge } from "@/components/ui/badge";
+import type { BoundaryGeometry } from "@/types/geospatial";
+import { MAP_STYLE_URL } from "@/utils/mapConfig";
 
 interface SplitMapComparisonProps {
   center: [number, number];
@@ -17,7 +19,7 @@ interface SplitMapComparisonProps {
     changePercent?: number;
     summary?: string;
   };
-  selectedLocation?: { lat: number; lng: number; name: string } | null;
+  selectedLocation?: { lat: number; lng: number; name: string; geometry?: BoundaryGeometry } | null;
 }
 
 const SplitMapComparison = ({
@@ -36,80 +38,6 @@ const SplitMapComparison = ({
   const rightMapInstance = useRef<maplibregl.Map | null>(null);
   const [mapsLoaded, setMapsLoaded] = useState({ left: false, right: false });
   const isSyncing = useRef(false);
-
-  // Generate simulated heatmap data based on change percent
-  const generateHeatmapData = useCallback((changePercent: number, baseLat: number, baseLng: number) => {
-    const points: { lat: number; lng: number; intensity: number }[] = [];
-    const intensity = Math.min(1, changePercent / 100);
-    
-    // Generate points around the selected location
-    for (let i = 0; i < 20; i++) {
-      const latOffset = (Math.random() - 0.5) * 0.5;
-      const lngOffset = (Math.random() - 0.5) * 0.5;
-      points.push({
-        lat: baseLat + latOffset,
-        lng: baseLng + lngOffset,
-        intensity: Math.max(0.1, intensity + (Math.random() - 0.5) * 0.3),
-      });
-    }
-    return points;
-  }, []);
-
-  // Add heatmap layer to map
-  const addHeatmapToMap = useCallback((
-    map: maplibregl.Map,
-    data: { lat: number; lng: number; intensity: number }[],
-    isPeriod1: boolean
-  ) => {
-    const sourceId = isPeriod1 ? "period1-heatmap" : "period2-heatmap";
-    const layerId = isPeriod1 ? "period1-heatmap-layer" : "period2-heatmap-layer";
-    
-    // Remove existing layers
-    if (map.getLayer(layerId)) map.removeLayer(layerId);
-    if (map.getSource(sourceId)) map.removeSource(sourceId);
-
-    const colors = isPeriod1 
-      ? ["#f7fcb9", "#addd8e", "#31a354", "#006837"]
-      : ["#fee5d9", "#fcae91", "#fb6a4a", "#cb181d"];
-
-    map.addSource(sourceId, {
-      type: "geojson",
-      data: {
-        type: "FeatureCollection",
-        features: data.map(point => ({
-          type: "Feature" as const,
-          properties: { intensity: point.intensity },
-          geometry: {
-            type: "Point" as const,
-            coordinates: [point.lng, point.lat],
-          },
-        })),
-      },
-    });
-
-    map.addLayer({
-      id: layerId,
-      type: "heatmap",
-      source: sourceId,
-      paint: {
-        "heatmap-weight": ["get", "intensity"],
-        "heatmap-intensity": 1.2,
-        "heatmap-color": [
-          "interpolate",
-          ["linear"],
-          ["heatmap-density"],
-          0, "rgba(0,0,0,0)",
-          0.1, colors[0],
-          0.3, colors[1],
-          0.5, colors[2],
-          0.7, colors[3],
-          1, colors[3],
-        ],
-        "heatmap-radius": 50,
-        "heatmap-opacity": 0.7,
-      },
-    });
-  }, []);
 
   // Sync function to synchronize map movements
   const syncMaps = useCallback((sourceMap: maplibregl.Map, targetMap: maplibregl.Map) => {
@@ -139,26 +67,7 @@ const SplitMapComparison = ({
     if (leftMapInstance.current || rightMapInstance.current) return;
 
     const mapConfig = {
-      style: {
-        version: 8 as const,
-        sources: {
-          osm: {
-            type: "raster" as const,
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-            tileSize: 256,
-            attribution: '&copy; OpenStreetMap',
-          },
-        },
-        layers: [
-          {
-            id: "osm-tiles",
-            type: "raster" as const,
-            source: "osm",
-            minzoom: 0,
-            maxzoom: 19,
-          },
-        ],
-      },
+      style: MAP_STYLE_URL,
       center: [center[1], center[0]] as [number, number],
       zoom: zoom,
       pitch: 0,
@@ -215,7 +124,7 @@ const SplitMapComparison = ({
     });
   }, [center, zoom]);
 
-  // Add markers and heatmaps when data is available
+  // Show the selected place boundary, not a fabricated pixel heatmap.
   useEffect(() => {
     const leftMap = leftMapInstance.current;
     const rightMap = rightMapInstance.current;
@@ -223,54 +132,45 @@ const SplitMapComparison = ({
     if (!leftMap || !rightMap || !mapsLoaded.left || !mapsLoaded.right) return;
     if (!selectedLocation) return;
 
-    // Add markers to both maps
-    const markerConfig = {
-      color: "#0891b2",
-    };
-
-    // Clear existing markers
     const existingMarkers = document.querySelectorAll('.split-map-marker');
     existingMarkers.forEach(m => m.remove());
 
-    [leftMap, rightMap].forEach(map => {
+    [leftMap, rightMap].forEach((map, index) => {
       const el = document.createElement("div");
       el.className = "split-map-marker";
-      el.innerHTML = `
-        <div style="
-          background: linear-gradient(135deg, ${markerConfig.color}, ${markerConfig.color}dd);
-          width: 24px;
-          height: 24px;
-          border-radius: 50%;
-          border: 2px solid white;
-          box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-          animation: pulse 2s infinite;
-        "></div>
-      `;
+      el.style.cssText = "width:24px;height:24px;border-radius:50%;background:#0891b2;border:2px solid white;box-shadow:0 2px 8px rgba(0,0,0,.3)";
 
       new maplibregl.Marker(el)
         .setLngLat([selectedLocation.lng, selectedLocation.lat])
         .addTo(map);
+
+      const sourceId = `selected-boundary-${index}`;
+      const data = {
+        type: "FeatureCollection" as const,
+        features: selectedLocation.geometry
+          ? [{ type: "Feature" as const, properties: {}, geometry: selectedLocation.geometry }]
+          : [],
+      };
+      const source = map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
+      if (source) {
+        source.setData(data);
+      } else {
+        map.addSource(sourceId, { type: "geojson", data });
+        map.addLayer({
+          id: `${sourceId}-fill`,
+          type: "fill",
+          source: sourceId,
+          paint: { "fill-color": "#0891b2", "fill-opacity": 0.12 },
+        });
+        map.addLayer({
+          id: `${sourceId}-outline`,
+          type: "line",
+          source: sourceId,
+          paint: { "line-color": "#0891b2", "line-width": 2 },
+        });
+      }
     });
-
-    // Add heatmaps if data exists
-    if (period1Data?.changePercent !== undefined) {
-      const period1Heatmap = generateHeatmapData(
-        period1Data.changePercent,
-        selectedLocation.lat,
-        selectedLocation.lng
-      );
-      addHeatmapToMap(leftMap, period1Heatmap, true);
-    }
-
-    if (period2Data?.changePercent !== undefined) {
-      const period2Heatmap = generateHeatmapData(
-        period2Data.changePercent,
-        selectedLocation.lat,
-        selectedLocation.lng
-      );
-      addHeatmapToMap(rightMap, period2Heatmap, false);
-    }
-  }, [mapsLoaded, selectedLocation, period1Data, period2Data, generateHeatmapData, addHeatmapToMap]);
+  }, [mapsLoaded, selectedLocation]);
 
   const getChangeColor = (percent?: number) => {
     if (percent === undefined) return "bg-muted";

@@ -1,14 +1,17 @@
+import { lazy, Suspense } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { X } from "lucide-react";
 import { useRightPanel } from "@/contexts/RightPanelContext";
 import { AnalysisPanel } from "@/components/panel/AnalysisPanel";
 import { SearchPanel } from "@/components/panel/SearchPanel";
 import { AiPanel } from "@/components/panel/AiPanel";
-import { GeoWitnessPanel } from "@/components/panel/GeoWitnessPanel";
+const GeoWitnessPanel = lazy(() =>
+  import("@/components/panel/GeoWitnessPanel").then(({ GeoWitnessPanel }) => ({ default: GeoWitnessPanel }))
+);
 
 const PANEL_TITLE: Record<string, string> = {
   analysis: "Analysis",
-  search: "Search results",
+  search: "Place lookup",
   ai: "AI Assistant",
   geowitness: "GeoWitness",
 };
@@ -45,7 +48,11 @@ export function RightPanel() {
             {mode.type === "analysis" && <AnalysisPanel data={mode.data} />}
             {mode.type === "search" && <SearchPanel data={mode.data} />}
             {mode.type === "ai" && <AiPanel />}
-            {mode.type === "geowitness" && <GeoWitnessPanel />}
+            {mode.type === "geowitness" && (
+              <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">Loading analysis tools...</div>}>
+                <GeoWitnessPanel initialLocation={mode.initialLocation} />
+              </Suspense>
+            )}
           </div>
         </motion.aside>
       )}

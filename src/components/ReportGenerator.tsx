@@ -5,15 +5,53 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Download, FileText, Loader2, Image, Check, Shield, AlertTriangle, TrendingUp, MapPin, Calendar, BarChart3, Eye, Mountain, Thermometer, Droplets, Flame, Layers, Target, Leaf, PieChart } from "lucide-react";
+import { Download, FileText, Loader2, Image, Check, Shield, AlertTriangle, TrendingUp, MapPin, Calendar, BarChart3, Eye, Mountain, Droplets, Flame, Layers, Target, Leaf } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import jsPDF from "jspdf";
 import maplibregl from "maplibre-gl";
+import type { MapOptions, StyleSpecification } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
+interface ReportProvenance {
+  origin: string;
+  source?: string;
+  sensor?: string;
+  method?: string;
+}
+
+interface ReportAnalysisData {
+  [key: string]: unknown;
+  id?: string | number;
+  region?: string;
+  eventType?: string;
+  analysisMethod?: string;
+  startDate?: string;
+  start_date?: string;
+  endDate?: string;
+  end_date?: string;
+  changePercent?: number | string | null;
+  change_percent?: number | string | null;
+  area?: string | number | null;
+  severity?: string | null;
+  sensorInfo?: { sensor?: string };
+  landsatInfo?: { sensor?: string };
+  locations?: { lat?: number; lng?: number }[];
+  fieldProvenance?: Record<string, ReportProvenance | undefined>;
+  dataProvenance?: { analysisMethod?: string; disclaimer?: string };
+  spectralIndices?: {
+    ndvi?: { mean?: number };
+    ndwi?: { mean?: number };
+    nbr?: { mean?: number };
+  };
+  temporalBreakdown?: unknown;
+  temporal_breakdown?: unknown;
+  changeDetection?: unknown;
+  classificationResults?: unknown;
+}
+
 interface ReportGeneratorProps {
-  analysisData: any;
+  analysisData: ReportAnalysisData | null;
   eventType?: string;
   region?: string;
   lat?: number;
@@ -28,6 +66,24 @@ interface RiskGridData {
   cols: number;
   cells: (number | null)[];
 }
+
+interface TemporalBreakdownEntry {
+  label?: string;
+  period?: string;
+  changePercent: number;
+}
+
+const readTemporalBreakdown = (value: unknown): TemporalBreakdownEntry[] => {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is TemporalBreakdownEntry => {
+    if (!entry || typeof entry !== "object") return false;
+    const period = entry as Record<string, unknown>;
+    return typeof period.changePercent === "number" &&
+      Number.isFinite(period.changePercent) &&
+      (period.label === undefined || typeof period.label === "string") &&
+      (period.period === undefined || typeof period.period === "string");
+  });
+};
 
 /**
  * jsPDF's built-in fonts (helvetica etc.) only support WinAnsi/Latin-1 glyphs.
@@ -125,13 +181,13 @@ const renderTrendChartPng = (periods: { label: string; value: number }[]): strin
 };
 
 /**
- * Ecosystem Health dashboard drawn from this report's own real Sentinel-2
+ * Spectral index dashboard drawn from this report's measured satellite
  * spectral index measurements, instead of asking an AI model to illustrate
  * a dashboard. Deterministic, free, always available.
  */
 const renderEcosystemHealthPng = (
   indices: { ndvi?: { mean?: number }; ndwi?: { mean?: number }; nbr?: { mean?: number } } | undefined,
-  changePercent: number
+  sensorName: string
 ): string => {
   const width = 900;
   const height = 420;
@@ -144,13 +200,10 @@ const renderEcosystemHealthPng = (
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, width, height);
 
-  const overallScore = Math.max(0, Math.min(100, 100 - Math.abs(changePercent)));
-
   const gauges: { label: string; value: number | undefined; min: number; max: number; format: (v: number) => string; color: string }[] = [
     { label: "NDVI (Vegetation)", value: indices?.ndvi?.mean, min: -1, max: 1, format: (v) => v.toFixed(3), color: "#16a34a" },
     { label: "NDWI (Water)", value: indices?.ndwi?.mean, min: -1, max: 1, format: (v) => v.toFixed(3), color: "#0891b2" },
     { label: "NBR (Burn / Vegetation)", value: indices?.nbr?.mean, min: -1, max: 1, format: (v) => v.toFixed(3), color: "#ea580c" },
-    { label: "Overall Ecosystem Score", value: overallScore, min: 0, max: 100, format: (v) => `${v.toFixed(0)}/100`, color: overallScore > 70 ? "#16a34a" : overallScore > 40 ? "#eab308" : "#dc2626" },
   ];
 
   const padding = 40;
@@ -160,11 +213,11 @@ const renderEcosystemHealthPng = (
   ctx.fillStyle = "#111827";
   ctx.font = "bold 24px Arial";
   ctx.textAlign = "left";
-  ctx.fillText("Ecosystem Health Dashboard", padding, y);
+  ctx.fillText("Spectral Index Measurements", padding, y);
   y += 26;
   ctx.font = "14px Arial";
   ctx.fillStyle = "#6b7280";
-  ctx.fillText("Real Sentinel-2 spectral index measurements for this study area", padding, y);
+  ctx.fillText(`Satellite-derived indices; sensor: ${sensorName}`, padding, y);
   y += 34;
 
   gauges.forEach((g) => {
@@ -198,9 +251,9 @@ const renderEcosystemHealthPng = (
 };
 
 /**
- * Risk zone heatmap drawn from real per-cell NDVI measurements returned by
- * generate-visualization's risk_zones grid endpoint - a genuine spatial
- * measurement, not an AI illustration of one.
+ * Relative NDVI grid drawn from per-cell NDVI values returned by
+ * generate-visualization's risk_zones grid endpoint. Color shading is relative
+ * to the min/max within the displayed grid and is not a risk classification.
  */
 const renderRiskZonesHeatmapPng = (grid: RiskGridData): string => {
   const width = 900;
@@ -217,10 +270,10 @@ const renderRiskZonesHeatmapPng = (grid: RiskGridData): string => {
   ctx.fillStyle = "#111827";
   ctx.font = "bold 24px Arial";
   ctx.textAlign = "left";
-  ctx.fillText("Risk Zone Map", 40, 40);
+  ctx.fillText("Relative NDVI Grid", 40, 40);
   ctx.font = "14px Arial";
   ctx.fillStyle = "#6b7280";
-  ctx.fillText(`Real ${grid.rows}x${grid.cols} gridded Sentinel-2 NDVI - lower vegetation vigor shown in warmer colors`, 40, 62);
+  ctx.fillText(`${grid.rows}x${grid.cols} NDVI values; colors show this grid's relative range, not risk`, 40, 62);
 
   const gridTop = 90;
   const gridSize = 420;
@@ -273,88 +326,17 @@ const renderRiskZonesHeatmapPng = (grid: RiskGridData): string => {
   ctx.fillStyle = "#374151";
   ctx.font = "12px Arial";
   ctx.textAlign = "left";
-  ctx.fillText(`Lower NDVI (${minV.toFixed(2)}) - higher risk`, legendLeft, legendY + 32);
+  ctx.fillText(`Grid minimum (${minV.toFixed(2)})`, legendLeft, legendY + 32);
   ctx.textAlign = "right";
-  ctx.fillText(`Higher NDVI (${maxV.toFixed(2)}) - lower risk`, legendLeft + legendWidth, legendY + 32);
+  ctx.fillText(`Grid maximum (${maxV.toFixed(2)})`, legendLeft + legendWidth, legendY + 32);
 
   return canvas.toDataURL("image/png");
 };
 
 /**
- * Driver Analysis pie chart drawn from this report's real driver data
- * (analysisData.changeDetection.change_drivers) - the same real data the
- * text Driver Analysis section already requires before rendering at all.
- * Callers must not call this without real driverData; there is no
- * AI-illustrated fallback for causal attribution, since that can't be
- * measured from pixels.
- */
-const renderDriverAnalysisPng = (drivers: { driver?: string; name?: string; contribution_percent?: number | string }[]): string => {
-  const width = 900;
-  const height = 500;
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return "";
-
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, width, height);
-
-  ctx.fillStyle = "#111827";
-  ctx.font = "bold 24px Arial";
-  ctx.textAlign = "left";
-  ctx.fillText("Driver Analysis", 40, 40);
-  ctx.font = "14px Arial";
-  ctx.fillStyle = "#6b7280";
-  ctx.fillText("Contributing drivers as estimated by this report's analysis", 40, 62);
-
-  const entries = drivers
-    .map((d) => ({
-      label: d.driver || d.name || "Unspecified",
-      value: typeof d.contribution_percent === "number" ? d.contribution_percent : parseFloat(String(d.contribution_percent)) || 0,
-    }))
-    .filter((d) => d.value > 0);
-
-  const total = entries.reduce((s, d) => s + d.value, 0) || 1;
-  const colors = ["#0891b2", "#16a34a", "#eab308", "#ea580c", "#dc2626", "#7c3aed", "#64748b"];
-
-  const cx = 230;
-  const cy = 280;
-  const r = 150;
-  let startAngle = -Math.PI / 2;
-
-  entries.forEach((d, i) => {
-    const sliceAngle = (d.value / total) * Math.PI * 2;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.arc(cx, cy, r, startAngle, startAngle + sliceAngle);
-    ctx.closePath();
-    ctx.fillStyle = colors[i % colors.length];
-    ctx.fill();
-    startAngle += sliceAngle;
-  });
-
-  let legendY = 100;
-  entries.forEach((d, i) => {
-    ctx.fillStyle = colors[i % colors.length];
-    ctx.fillRect(500, legendY, 16, 16);
-    ctx.fillStyle = "#374151";
-    ctx.font = "14px Arial";
-    ctx.textAlign = "left";
-    ctx.fillText(`${d.label}: ${d.value.toFixed(1)}%`, 524, legendY + 13);
-    legendY += 28;
-  });
-
-  return canvas.toDataURL("image/png");
-};
-
-/**
- * Real 3D terrain snapshot: an off-screen MapLibre GL map with real SRTM-
- * derived elevation (AWS's free/keyless Terrarium DEM tiles) and, when
- * available, this report's own real Sentinel-2 imagery draped on top -
- * instead of asking an AI model to illustrate a 3D terrain picture. Returns
- * null (rather than throwing) on any failure so a slow tile load or WebGL
- * issue never breaks the rest of report generation.
+ * Contextual 3D terrain snapshot centered on the selected coordinates. It
+ * does not display the selected AOI boundary. Returns null on failure so a
+ * slow tile load or WebGL issue never breaks report generation.
  */
 const capture3DTerrainSnapshot = async (
   lat: number | undefined,
@@ -376,10 +358,9 @@ const capture3DTerrainSnapshot = async (
   let map: maplibregl.Map | null = null;
 
   try {
-    // Matches generate-visualization's Sentinel Hub Process API AOI exactly,
-    // so the draped image lines up with the real coordinates it was fetched for.
+    // This is a fixed-size point context view, not a rendering of the AOI geometry.
     const half = 0.05;
-    const sources: Record<string, any> = {
+    const sources: StyleSpecification["sources"] = {
       dem: {
         type: "raster-dem",
         tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
@@ -388,7 +369,7 @@ const capture3DTerrainSnapshot = async (
         maxzoom: 15,
       },
     };
-    const layers: any[] = [];
+    const layers: StyleSpecification["layers"] = [];
 
     if (sentinelTrueColorImage) {
       sources["sentinel-drape"] = {
@@ -412,7 +393,7 @@ const capture3DTerrainSnapshot = async (
       layers.push({ id: "osm-layer", type: "raster", source: "osm" });
     }
 
-    map = new maplibregl.Map({
+    const options: MapOptions = {
       container,
       style: { version: 8, sources, layers },
       center: [lng, lat],
@@ -421,8 +402,9 @@ const capture3DTerrainSnapshot = async (
       bearing: -20,
       interactive: false,
       attributionControl: false,
-      preserveDrawingBuffer: true, // required so getCanvas().toDataURL() works
-    } as any);
+      canvasContextAttributes: { preserveDrawingBuffer: true },
+    };
+    map = new maplibregl.Map(options);
 
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("3D terrain load timed out")), 12000);
@@ -461,14 +443,12 @@ const capture3DTerrainSnapshot = async (
 
 // Advanced visualization types available
 const ADVANCED_VIZ_TYPES = [
-  { id: 'terrain_3d', label: '3D Terrain', icon: Mountain, description: 'Dramatic 3D terrain with elevation' },
-  { id: 'thermal_analysis', label: 'Thermal Map', icon: Thermometer, description: 'Temperature anomaly analysis' },
-  { id: 'ndwi_water', label: 'Water Index', icon: Droplets, description: 'NDWI water body detection' },
-  { id: 'nbr_fire', label: 'Burn Severity', icon: Flame, description: 'NBR fire damage assessment' },
-  { id: 'temporal_animation', label: 'Time Series', icon: Layers, description: 'Multi-year change animation' },
-  { id: 'risk_zones', label: 'Risk Zones', icon: Target, description: 'Priority intervention areas' },
-  { id: 'ecosystem_health', label: 'Ecosystem Health', icon: Leaf, description: 'Comprehensive health dashboard' },
-  { id: 'driver_analysis', label: 'Driver Analysis', icon: PieChart, description: 'Causal factors breakdown' },
+  { id: 'terrain_3d', label: '3D Terrain Context', icon: Mountain, description: 'Point-centered terrain context; does not show the AOI boundary' },
+  { id: 'ndwi_water', label: 'NDWI Index', icon: Droplets, description: 'Normalized Difference Water Index visualization' },
+  { id: 'nbr_fire', label: 'NBR Index', icon: Flame, description: 'Normalized Burn Ratio index visualization' },
+  { id: 'temporal_animation', label: 'Measured Time Series', icon: Layers, description: 'Per-period NDVI values when available' },
+  { id: 'risk_zones', label: 'Relative NDVI Grid', icon: Target, description: 'Per-cell NDVI values with local min-max shading' },
+  { id: 'ecosystem_health', label: 'Spectral Index Measurements', icon: Leaf, description: 'NDVI, NDWI, and NBR measurements when available' },
 ];
 
 const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureMap }: ReportGeneratorProps) => {
@@ -519,7 +499,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       console.log(`Visualization response for ${type}:`, data.imageUrl ? 'Image received' : data.gridData ? 'Grid data received' : 'No image', data.description?.substring(0, 100));
 
       if (data.imageUrl || data.gridData) {
-        lastDataSourcesRef.current[type] = data.dataSource || "Model-generated illustration";
+        lastDataSourcesRef.current[type] = data.dataSource || "Source not supplied by visualization service";
         return { imageUrl: data.imageUrl ?? null, gridData: data.gridData, dataSource: data.dataSource };
       }
 
@@ -573,44 +553,6 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
     });
   };
 
-  // Helper to determine risk level based on change percent
-  const getRiskLevel = (changePercent: number): { level: string; color: [number, number, number]; bgColor: [number, number, number]; description: string } => {
-    const absChange = Math.abs(changePercent);
-    if (absChange >= 25) return { level: "CRITICAL", color: [220, 38, 38], bgColor: [254, 226, 226], description: "Immediate intervention required" };
-    if (absChange >= 15) return { level: "HIGH", color: [234, 88, 12], bgColor: [255, 237, 213], description: "Urgent attention recommended" };
-    if (absChange >= 8) return { level: "MODERATE-TO-HIGH", color: [234, 179, 8], bgColor: [254, 249, 195], description: "Monitoring and assessment needed" };
-    if (absChange >= 3) return { level: "LOW", color: [34, 197, 94], bgColor: [220, 252, 231], description: "Within acceptable parameters" };
-    return { level: "MINIMAL", color: [59, 130, 246], bgColor: [219, 234, 254], description: "No significant concern" };
-  };
-
-  // Get event type display info
-  const getEventTypeInfo = (type: string) => {
-    const types: Record<string, { label: string; category: string; fullTitle: string }> = {
-      deforestation: { label: "Forest Degradation Assessment", category: "Land Cover Change", fullTitle: "FOREST DEGRADATION ASSESSMENT REPORT" },
-      flood: { label: "Flood Impact Assessment", category: "Natural Disaster", fullTitle: "FLOOD IMPACT ASSESSMENT REPORT" },
-      urbanization: { label: "Urban Expansion Analysis", category: "Land Use Change", fullTitle: "URBAN EXPANSION ANALYSIS REPORT" },
-      drought: { label: "Drought Conditions Analysis", category: "Climate Impact", fullTitle: "DROUGHT CONDITIONS ANALYSIS REPORT" },
-      fire: { label: "Wildfire Damage Assessment", category: "Natural Disaster", fullTitle: "WILDFIRE DAMAGE ASSESSMENT REPORT" },
-      landslide: { label: "Landslide Risk Analysis", category: "Geological Hazard", fullTitle: "LANDSLIDE RISK ANALYSIS REPORT" },
-      mining: { label: "Mining Activity Detection", category: "Resource Extraction", fullTitle: "MINING ACTIVITY DETECTION REPORT" },
-      agriculture: { label: "Agricultural Land Analysis", category: "Land Use Change", fullTitle: "AGRICULTURAL LAND ANALYSIS REPORT" },
-      water_quality: { label: "Water Quality Assessment", category: "Environmental Health", fullTitle: "WATER QUALITY ASSESSMENT REPORT" },
-      coastal_erosion: { label: "Coastal Erosion Analysis", category: "Geological Change", fullTitle: "COASTAL EROSION ANALYSIS REPORT" },
-    };
-    if (types[type?.toLowerCase()]) return types[type.toLowerCase()];
-
-    // GeoWitness offers 40+ event types (reforestation, mangrove_loss, heatwave,
-    // desertification, etc.) but only the handful above have a custom label -
-    // everything else previously fell through to the raw snake_case value
-    // (e.g. "forest_degradation") instead of a readable title.
-    const humanized = type ? type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) : "";
-    return {
-      label: humanized ? `${humanized} Assessment` : "Environmental Analysis",
-      category: "General Assessment",
-      fullTitle: `${humanized || "Environmental Analysis"} Report`.toUpperCase(),
-    };
-  };
-
   const generatePDFReport = async () => {
     if (!analysisData) {
       toast.error("No analysis data available");
@@ -622,7 +564,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
     lastDataSourcesRef.current = {};
 
     try {
-      // Generate Sentinel-2 visualizations if enabled
+      // Generate optional satellite visualizations if enabled.
       let trueColorImage: string | null = null;
       let falseColorImage: string | null = null;
       let ndviImage: string | null = null;
@@ -630,24 +572,19 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       let changeDetectionImage: string | null = null;
       let mapSnapshot: string | null = null;
       const advancedImages: Record<string, string | null> = {};
+      const sensorName = analysisData?.sensorInfo?.sensor ||
+        analysisData?.landsatInfo?.sensor ||
+        analysisData?.fieldProvenance?.changePercent?.sensor ||
+        "Unavailable";
 
       if (includeImages) {
-        // Every image below is an independent network call (map snapshot,
-        // Sentinel Hub/AI visualizations), so they're fired concurrently
+        // Independent image requests and the map snapshot are captured concurrently
         // rather than awaited one-by-one - report generation time is then
         // bounded by the slowest single call instead of their sum.
         type VizTask = { key: string; type: string };
         const vizTasks: VizTask[] = [{ key: "trueColor", type: "landsat_truecolor" }];
 
-        // Only these advanced types need a network call: ndwi_water/nbr_fire
-        // now get real Sentinel Hub imagery and risk_zones needs real
-        // gridded stats from the backend; thermal_analysis has no real data
-        // source available yet (Sentinel-2 has no thermal sensor) so it
-        // stays an AI illustration. The rest (ecosystem_health,
-        // temporal_animation, driver_analysis, terrain_3d) are rendered
-        // locally below from data this report already has - no network
-        // call, no AI quota dependency, always available.
-        const NETWORK_ADVANCED_TYPES = new Set(["ndwi_water", "nbr_fire", "thermal_analysis", "risk_zones"]);
+        const NETWORK_ADVANCED_TYPES = new Set(["ndwi_water", "nbr_fire", "risk_zones"]);
 
         if (!isSimple) {
           vizTasks.push({ key: "falseColor", type: "landsat_falsecolor" });
@@ -683,7 +620,6 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           else if (t.key === "changeDetection") changeDetectionImage = result?.imageUrl ?? null;
           else if (t.key === "advanced:risk_zones") {
             if (result?.gridData) riskGridData = result.gridData;
-            else advancedImages.risk_zones = result?.imageUrl ?? null;
           } else if (t.key.startsWith("advanced:")) {
             advancedImages[t.key.slice("advanced:".length)] = result?.imageUrl ?? null;
           }
@@ -693,49 +629,42 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         // already has, drawn on-device (deterministic, free, no quota,
         // always available) instead of asking an AI model to illustrate one.
         if (!isSimple) {
-          const rdChangePercent = parseFloat(analysisData?.changePercent ?? analysisData?.change_percent ?? 0) || 0;
           const rdSpectralIndices = analysisData?.spectralIndices;
-          const rdTemporalBreakdown = analysisData?.temporalBreakdown || analysisData?.temporal_breakdown;
-          const rdDriverData = analysisData?.changeDetection?.change_drivers?.length
-            ? analysisData.changeDetection.change_drivers
-            : null;
+          const rdTemporalBreakdown = analysisData?.fieldProvenance?.temporalBreakdown?.origin === "measured"
+            ? readTemporalBreakdown(analysisData?.temporalBreakdown || analysisData?.temporal_breakdown)
+            : [];
 
-          if (selectedAdvancedViz.includes("temporal_animation")) {
-            const periods = Array.isArray(rdTemporalBreakdown) && rdTemporalBreakdown.length > 0
-              ? rdTemporalBreakdown.map((p: any) => ({
-                  label: String(p.label || p.period || "Period"),
-                  value: p.changePercent !== undefined ? parseFloat(p.changePercent) : 0,
-                }))
-              : [{ label: "Full Study Period", value: rdChangePercent }];
+          if (selectedAdvancedViz.includes("temporal_animation") && Array.isArray(rdTemporalBreakdown) && rdTemporalBreakdown.length > 0) {
+            const periods = rdTemporalBreakdown.map((p) => ({
+              label: String(p.label || p.period || "Period"),
+              value: p.changePercent,
+            }));
             advancedImages.temporal_animation = renderTrendChartPng(periods);
-            lastDataSourcesRef.current.temporal_animation = Array.isArray(rdTemporalBreakdown) && rdTemporalBreakdown.length > 0
-              ? "Real Sentinel-2 measurements (rendered on-device, not AI-generated)"
-              : "Reported study-period total (rendered on-device, not AI-generated)";
+            lastDataSourcesRef.current.temporal_animation = "Measured temporal NDVI change (rendered on-device)";
           }
 
-          if (selectedAdvancedViz.includes("ecosystem_health") && rdSpectralIndices) {
-            advancedImages.ecosystem_health = renderEcosystemHealthPng(rdSpectralIndices, rdChangePercent);
-            lastDataSourcesRef.current.ecosystem_health = "Real Sentinel-2 spectral indices (rendered on-device, not AI-generated)";
+          if (selectedAdvancedViz.includes("ecosystem_health") &&
+            analysisData?.fieldProvenance?.spectralIndices?.origin === "measured" &&
+            rdSpectralIndices) {
+            advancedImages.ecosystem_health = renderEcosystemHealthPng(rdSpectralIndices, sensorName);
+            lastDataSourcesRef.current.ecosystem_health = `Measured spectral indices from ${sensorName} (rendered on-device)`;
           }
 
           if (selectedAdvancedViz.includes("risk_zones") && riskGridData) {
             advancedImages.risk_zones = renderRiskZonesHeatmapPng(riskGridData);
-            lastDataSourcesRef.current.risk_zones = "Real gridded Sentinel-2 NDVI (rendered on-device, not AI-generated)";
+            lastDataSourcesRef.current.risk_zones = `${lastDataSourcesRef.current.risk_zones || "Source unavailable"} (rendered locally)`;
           }
 
-          if (selectedAdvancedViz.includes("driver_analysis") && rdDriverData) {
-            advancedImages.driver_analysis = renderDriverAnalysisPng(rdDriverData);
-            lastDataSourcesRef.current.driver_analysis = "Real analysis driver data (rendered on-device, not AI-generated)";
-          }
+
 
           if (selectedAdvancedViz.includes("terrain_3d")) {
             setGenerationStep("Rendering real 3D terrain from elevation data...");
             const terrainImg = await capture3DTerrainSnapshot(lat, lng, trueColorImage);
             if (terrainImg) {
               advancedImages.terrain_3d = terrainImg;
-              lastDataSourcesRef.current.terrain_3d = trueColorImage
-                ? "Real Sentinel-2 imagery draped on real SRTM elevation data (MapLibre GL, rendered on-device)"
-                : "Real SRTM elevation data (MapLibre GL, rendered on-device)";
+              lastDataSourcesRef.current.terrain_3d =
+                `Terrarium DEM tiles (elevation-tiles-prod); center-point context, not AOI boundary` +
+                (trueColorImage ? `; draped image source: ${lastDataSourcesRef.current.landsat_truecolor || "source unavailable"}` : "");
             }
           }
         }
@@ -759,33 +688,44 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
 
       // Extract data — use ONLY real values from the analysis. No synthetic fallbacks.
       const rawChange = analysisData?.changePercent ?? analysisData?.change_percent;
-      const hasChange = rawChange !== undefined && rawChange !== null && !isNaN(parseFloat(rawChange));
-      const analysisMethod = analysisData?.analysisMethod ?? analysisData?.dataProvenance?.analysisMethod;
-      const hasMeasuredBasis = analysisMethod === "measured" || analysisMethod === "real_sentinel_statistics";
+      const parsedChange = typeof rawChange === "number" ? rawChange : Number(rawChange);
+      const hasChange = rawChange !== undefined && rawChange !== null && Number.isFinite(parsedChange);
+      const analysisMethod = analysisData?.analysisMethod ??
+        analysisData?.fieldProvenance?.changePercent?.method ??
+        analysisData?.dataProvenance?.analysisMethod;
+      const hasMeasuredBasis =
+        analysisData?.fieldProvenance?.changePercent?.origin === "measured" &&
+        (analysisMethod === "measured" || analysisMethod === "real_sentinel_statistics");
       if (!hasMeasuredBasis || !hasChange) {
         toast.error("A report requires measured satellite values. Model-only narratives cannot be used as measurements.");
         return;
       }
-      const changePercent = hasChange ? parseFloat(rawChange) : 0;
-      const risk = getRiskLevel(changePercent);
-      const eventInfo = getEventTypeInfo(eventType || analysisData?.eventType);
+      const changePercent = parsedChange;
+      const severity = analysisData?.fieldProvenance?.severity?.origin === "measured"
+        ? String(analysisData.severity ?? "Unavailable")
+        : "Unavailable";
+      const eventValue = eventType || analysisData?.eventType;
+      const requestedCategory = typeof eventValue === "string" && eventValue.trim()
+        ? eventValue.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+        : "Unavailable";
       const reportDate = new Date();
       // Deterministic report ID derived from analysis content so identical inputs → identical IDs
       const idSeed = `${analysisData?.id || ''}|${analysisData?.region || region || ''}|${analysisData?.eventType || eventType || ''}|${analysisData?.startDate || analysisData?.start_date || ''}|${analysisData?.endDate || analysisData?.end_date || ''}|${rawChange ?? ''}`;
       let hash = 0;
       for (let i = 0; i < idSeed.length; i++) hash = ((hash << 5) - hash + idSeed.charCodeAt(i)) | 0;
       const reportId = `GP-${reportDate.getFullYear()}${String(reportDate.getMonth() + 1).padStart(2, '0')}${String(reportDate.getDate()).padStart(2, '0')}-${Math.abs(hash).toString(36).toUpperCase().padStart(6, '0').slice(0, 8)}`;
-      const startDate = analysisData?.startDate || analysisData?.start_date || new Date().toISOString().split('T')[0];
-      const endDate = analysisData?.endDate || analysisData?.end_date || new Date().toISOString().split('T')[0];
-      const regionName = region || analysisData?.region || "Study Region";
-      const area = analysisData?.area || analysisData?.area_analyzed || "N/A";
-
-      // Only include Driver Analysis if there's real underlying data for it -
-      // otherwise it would be pure filler (and previously WAS, in the
-      // generate-visualization AI-illustration version of this section).
-      const driverData = analysisData?.changeDetection?.change_drivers?.length
-        ? analysisData.changeDetection.change_drivers
-        : null;
+      const startDate = analysisData?.startDate || analysisData?.start_date || "Unavailable";
+      const endDate = analysisData?.endDate || analysisData?.end_date || "Unavailable";
+      const regionName = region || analysisData?.region || "Unavailable";
+      const area = analysisData?.fieldProvenance?.area?.origin === "measured" && analysisData?.area != null
+        ? String(analysisData.area)
+        : "Unavailable";
+      const formatReportDate = (value: string) => {
+        const date = new Date(value);
+        return Number.isNaN(date.getTime())
+          ? "Unavailable"
+          : date.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+      };
 
       // Single source of truth for section numbering, used to render BOTH the
       // table of contents AND each section header - guarantees they can never
@@ -793,18 +733,16 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       const sectionPlan: { key: string; title: string }[] = isSimple
         ? [
             { key: "executive_summary", title: "Executive Summary" },
-            { key: "key_findings", title: "Key Findings & Analysis" },
+            { key: "key_findings", title: "Measured NDVI Values" },
           ]
         : [
             { key: "executive_summary", title: "Executive Summary" },
-            { key: "project_overview", title: "Project Overview & Objectives" },
+            { key: "project_overview", title: "Request Parameters" },
             { key: "satellite_imagery", title: "Satellite Imagery Analysis" },
-            { key: "key_findings", title: "Key Findings & Analysis" },
-            ...(driverData ? [{ key: "driver_analysis", title: "Driver Analysis" }] : []),
-            { key: "risk_assessment", title: "Risk Assessment" },
-            { key: "recommendations", title: "Recommendations & Implementation Roadmap" },
+            { key: "key_findings", title: "Measured NDVI Values" },
+            { key: "risk_assessment", title: "Interpretation & Limitations" },
             { key: "quality_assurance", title: "Quality Assurance & Limitations" },
-            { key: "methodology", title: "Geospatial Analysis Methodology" },
+            { key: "methodology", title: "Analysis Method & Limitations" },
             { key: "references", title: "References & Data Sources" },
           ];
       const sectionNum = (key: string): string => String(sectionPlan.findIndex((s) => s.key === key) + 1);
@@ -929,7 +867,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         pdf.setFontSize(8);
         pdf.setTextColor(107, 114, 128);
         pdf.text(`Page ${pageNum} of ${totalPages}`, margin, pageHeight - 8);
-        pdf.text("CONFIDENTIAL - For authorized use only | © 2026 GeoPulse Environmental Intelligence", pageWidth / 2, pageHeight - 8, { align: "center" });
+        pdf.text("GeoPulse — measured satellite analysis", pageWidth / 2, pageHeight - 8, { align: "center" });
       };
 
       // ============= PAGE 1: COVER PAGE =============
@@ -957,7 +895,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       pdf.setTextColor(17, 24, 39);
       pdf.setFontSize(22);
       pdf.setFont("helvetica", "bold");
-      const titleLines = pdf.splitTextToSize(eventInfo.fullTitle, contentWidth);
+      const titleLines = pdf.splitTextToSize("MEASURED SATELLITE ANALYSIS REPORT", contentWidth);
       pdf.text(titleLines, margin, yPos);
       yPos += titleLines.length * 10 + 8;
 
@@ -977,15 +915,15 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       pdf.setFont("helvetica", "normal");
       
       pdf.text("Report ID:", margin + 5, metaStartY);
-      pdf.text("Analysis Type:", margin + 5, metaStartY + 10);
+      pdf.text("Requested Category:", margin + 5, metaStartY + 10);
       pdf.text("Study Period:", margin + 5, metaStartY + 20);
       pdf.text("Report Date:", margin + 5, metaStartY + 30);
       
       pdf.setTextColor(17, 24, 39);
       pdf.setFont("helvetica", "bold");
       pdf.text(reportId, margin + 40, metaStartY);
-      pdf.text(eventInfo.label, margin + 40, metaStartY + 10);
-      pdf.text(`${new Date(startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })} – ${new Date(endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`, margin + 40, metaStartY + 20);
+      pdf.text(requestedCategory, margin + 40, metaStartY + 10);
+      pdf.text(`${formatReportDate(startDate)} - ${formatReportDate(endDate)}`, margin + 40, metaStartY + 20);
       pdf.text(reportDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }), margin + 40, metaStartY + 30);
       
       // Classification badges
@@ -993,11 +931,11 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       pdf.roundedRect(pageWidth - margin - 50, metaStartY - 5, 45, 8, 2, 2, "F");
       pdf.setTextColor(255, 255, 255);
       pdf.setFontSize(7);
-      pdf.text("PROFESSIONAL ANALYSIS", pageWidth - margin - 48, metaStartY);
+      pdf.text("MEASURED INPUTS", pageWidth - margin - 48, metaStartY);
       
       pdf.setFillColor(34, 197, 94);
       pdf.roundedRect(pageWidth - margin - 50, metaStartY + 8, 45, 8, 2, 2, "F");
-      pdf.text("Measured satellite values", pageWidth - margin - 48, metaStartY + 13);
+      pdf.text("NDVI change percentage", pageWidth - margin - 48, metaStartY + 13);
 
       yPos += 65;
 
@@ -1005,12 +943,12 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       pdf.setTextColor(107, 114, 128);
       pdf.setFontSize(10);
       pdf.setFont("helvetica", "bold");
-      pdf.text("Prepared for:", margin, yPos);
+      pdf.text("Report basis:", margin, yPos);
       yPos += 8;
       
       pdf.setTextColor(55, 65, 81);
       pdf.setFont("helvetica", "normal");
-      pdf.text("Environmental Management Committee & Stakeholders", margin, yPos);
+      pdf.text("Values and provenance returned by the satellite analysis service", margin, yPos);
       yPos += 20;
 
       // Footer section on cover
@@ -1020,7 +958,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       pdf.setTextColor(255, 255, 255);
       pdf.setFontSize(9);
       pdf.text("GeoPulse Environmental Intelligence Platform", margin, pageHeight - 15);
-      pdf.text("www.geopulse.ai | contact@geopulse.ai", margin, pageHeight - 8);
+      pdf.text("Requested category is not event attribution.", margin, pageHeight - 8);
       
       pdf.setFontSize(8);
       pdf.text("Page 1", pageWidth - margin - 12, pageHeight - 8);
@@ -1087,11 +1025,11 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
 
       yPos = addSectionTitle("EXECUTIVE SUMMARY", yPos, sectionNum("executive_summary"));
 
-      // Purpose paragraph with citation references
+      // Summary of measured values and requested-category metadata
       pdf.setFont("helvetica", "normal");
       pdf.setFontSize(10);
       pdf.setTextColor(55, 65, 81);
-      const purposeText = `Purpose of Analysis: This assessment was conducted to evaluate environmental conditions, quantify changes, and inform evidence-based land management policy in ${regionName}. The analysis covers the period from ${new Date(startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })} to ${new Date(endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}.${!isSimple ? ` See Section ${sectionNum("references")} for the specific data sources used in this report.` : ""}`;
+      const purposeText = `This report presents the measured NDVI change value returned for ${regionName} over ${formatReportDate(startDate)} to ${formatReportDate(endDate)}. The requested category (${requestedCategory}) is request metadata; the measurement alone does not establish that event or its cause.${!isSimple ? ` See Section ${sectionNum("references")} for the data source recorded for this result.` : ""}`;
       yPos = addWrappedText(purposeText, margin, yPos, contentWidth, 5);
       yPos += 8;
 
@@ -1099,87 +1037,27 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       yPos = addSubsectionTitle("Assessment Overview", yPos);
 
       // Assessment metrics table
-      const assessmentHeaders = ["METRIC", "VALUE", "STATUS"];
+      const assessmentHeaders = ["MEASUREMENT", "VALUE", "PROVENANCE"];
       const assessmentRows = [
-        ["Total Analysis Area (Baseline)", area, ""],
-        ["Change Detected", `${Math.abs(changePercent).toFixed(1)}%`, changePercent > 15 ? "CRITICAL" : changePercent > 8 ? "MODERATE" : "LOW"],
-        ["Annual Change Rate", `${(Math.abs(changePercent) / 2).toFixed(1)}% per year`, changePercent > 10 ? "CONCERNING" : "ACCEPTABLE"],
-        ["Risk Classification", risk.level, risk.level],
+        ["Area analyzed", area, "Satellite measurement"],
+        ["NDVI change", `${changePercent.toFixed(1)}%`, "Measured"],
+        ["Sensor", sensorName, "Analysis metadata"],
+        ["Severity", severity, severity === "Unavailable" ? "Unavailable" : "Measured"],
       ];
       yPos = addTableWithBorders(assessmentHeaders, assessmentRows, yPos, [70, 50, 50]);
       yPos += 8;
 
-      // Critical Findings section
-      yPos = addSubsectionTitle("Critical Findings", yPos);
-
-      // Splits a real narrative paragraph into distinct chunks, one per
-      // sentence-group, so GeoWitness-sourced reports (analyze-satellite
-      // returns detailed_analysis/summary but no separate "findings" array)
-      // get real, specific findings here instead of duplicating the
-      // Recommendations section verbatim under a different heading - that
-      // previous fallback (`analysisData?.recommendations`) was the reason
-      // exported reports still looked repetitive/unchanged.
-      const splitIntoFindings = (text: string, maxCount: number): string[] =>
-        text
-          .replace(/\s+/g, " ")
-          .split(/(?<=[.!?])\s+(?=[A-Z])/)
-          .map((s) => s.trim())
-          .filter((s) => s.length > 20)
-          .slice(0, maxCount);
-
-      const narrativeFindings = splitIntoFindings(
-        String(analysisData?.fullAnalysis || analysisData?.detailedAnalysis || analysisData?.summary || ""),
-        4
-      );
-
-      const findings = analysisData?.findings?.length > 0
-        ? analysisData.findings
-        : narrativeFindings.length > 0
-        ? narrativeFindings
-        : [
-            { num: "1", title: "Change Pattern Analysis", detail: `Analysis reveals significant environmental change patterns within the study area, with changes concentrated in specific hotspots that require targeted monitoring and intervention.` },
-            { num: "2", title: "Primary Drivers Identified", detail: `Multi-spectral analysis indicates primary drivers including land use change, environmental stressors, and anthropogenic activities contributing to the observed changes.` },
-            { num: "3", title: "Temporal Trends", detail: `Seasonal analysis shows variation in change rates, with peak activity observed during specific periods that correlate with regional patterns.` },
-            { num: "4", title: "Impact Assessment", detail: `The detected changes represent significant implications for ecosystem health, requiring continued monitoring and potential intervention strategies.` },
-          ];
-
-      findings.slice(0, 4).forEach((finding: any, index: number) => {
-        checkPageBreak(20);
-        const text = typeof finding === "string" ? finding : finding.detail || finding.description || "";
-        const title = finding.title || `Finding ${index + 1}`;
-        
-        pdf.setFont("helvetica", "bold");
-        pdf.setFontSize(10);
-        pdf.setTextColor(17, 24, 39);
-        pdf.text(`${index + 1}. ${sanitizeForPdf(title)}:`, margin, yPos);
-        yPos += 5;
-        
-        pdf.setFont("helvetica", "normal");
-        pdf.setFontSize(9);
-        pdf.setTextColor(75, 85, 99);
-        yPos = addWrappedText(text, margin + 5, yPos, contentWidth - 5, 4.5);
-        yPos += 6;
-      });
-
-      // Risk Classification Banner
-      checkPageBreak(30);
-      yPos += 5;
-      pdf.setFillColor(risk.bgColor[0], risk.bgColor[1], risk.bgColor[2]);
-      pdf.roundedRect(margin, yPos, contentWidth, 25, 3, 3, "F");
-      pdf.setFillColor(risk.color[0], risk.color[1], risk.color[2]);
-      pdf.rect(margin, yPos, 5, 25, "F");
-      
-      pdf.setTextColor(risk.color[0], risk.color[1], risk.color[2]);
-      pdf.setFontSize(12);
-      pdf.setFont("helvetica", "bold");
-      pdf.text(`RISK CLASSIFICATION: ${risk.level}`, margin + 10, yPos + 10);
-      
-      pdf.setFontSize(9);
+      yPos = addSubsectionTitle("Measurement notes", yPos);
       pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(9);
       pdf.setTextColor(75, 85, 99);
-      const riskText = `${risk.description}. Continued monitoring recommended to track progression and inform intervention strategies.`;
-      pdf.text(pdf.splitTextToSize(riskText, contentWidth - 20)[0], margin + 10, yPos + 18);
-      yPos += 35;
+      yPos = addWrappedText(
+        "NDVI change is a vegetation-index measurement. It does not by itself identify deforestation, severity, environmental impact, or cause. No annualized rate or forecast is inferred in this report.",
+        margin,
+        yPos,
+        contentWidth,
+        4.5
+      );
 
       // ============= PROJECT OVERVIEW & OBJECTIVES =============
       if (!isSimple) {
@@ -1187,15 +1065,15 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         addPageHeader();
         yPos = 28;
 
-        yPos = addSectionTitle("PROJECT OVERVIEW & OBJECTIVES", yPos, sectionNum("project_overview"));
+        yPos = addSectionTitle("REQUEST PARAMETERS", yPos, sectionNum("project_overview"));
 
         yPos = addSubsectionTitle("Study Parameters", yPos);
         const overviewHeaders = ["PARAMETER", "VALUE"];
         const overviewRows: string[][] = [
           ["Region", regionName],
-          ["Event / Analysis Type", eventInfo.label],
-          ["Study Period", `${new Date(startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })} - ${new Date(endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`],
-          ["Area Analyzed", String(area)],
+          ["Requested category", requestedCategory],
+          ["Study Period", `${formatReportDate(startDate)} - ${formatReportDate(endDate)}`],
+          ["Area Analyzed", area],
         ];
         if (typeof lat === "number" && typeof lng === "number") {
           overviewRows.push(["Coordinates", `${lat.toFixed(4)}, ${lng.toFixed(4)}`]);
@@ -1203,27 +1081,21 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         yPos = addTableWithBorders(overviewHeaders, overviewRows, yPos, [70, 100]);
         yPos += 8;
 
-        yPos = addSubsectionTitle("Objectives", yPos);
-        const objectives = [
-          `Quantify the extent and rate of ${eventInfo.label.toLowerCase()} in ${regionName} over the study period.`,
-          `Assess the associated environmental risk and likely trajectory if current patterns continue.`,
-          `Provide specific, actionable recommendations for the responsible stakeholders identified in this report.`,
-        ];
+        yPos = addSubsectionTitle("Measurement and interpretation", yPos);
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(9.5);
         pdf.setTextColor(55, 65, 81);
-        objectives.forEach((obj, i) => {
-          checkPageBreak(15);
-          pdf.text(`${i + 1}.`, margin, yPos);
-          yPos = addWrappedText(obj, margin + 6, yPos, contentWidth - 6, 5);
-          yPos += 3;
-        });
+        yPos = addWrappedText(
+          "The reported change value is an NDVI measurement from the selected study period. The requested category is not validated by this measurement, and this report does not infer a cause, risk level, or future trajectory.",
+          margin,
+          yPos,
+          contentWidth,
+          5
+        );
         yPos += 5;
 
         yPos = addSubsectionTitle("Scope & Data Basis", yPos);
-        const scopeText = typeof lat === "number" && typeof lng === "number"
-          ? `This report's satellite imagery panels (Section ${sectionNum("satellite_imagery")}) use real Sentinel-2 imagery for the coordinates above. Numeric spectral/change statistics elsewhere in this report are AI-generated estimates rather than pixel-level measurements - see Section ${sectionNum("quality_assurance")} for a full accounting of what is real data versus modeled approximation in this specific report.`
-          : `No specific coordinates were available for this analysis, so satellite imagery panels could not be sourced from real imagery and numeric spectral/change statistics are AI-generated estimates rather than pixel-level measurements - see Section ${sectionNum("quality_assurance")} for a full accounting of what is real data versus modeled approximation in this specific report.`;
+        const scopeText = `The measured NDVI change was returned by ${analysisData?.fieldProvenance?.changePercent?.source || "the satellite analysis service"} using ${sensorName}. Any visual panels are separately sourced and identified in this report.`;
         pdf.setFontSize(9.5);
         yPos = addWrappedText(scopeText, margin, yPos, contentWidth, 5);
         yPos += 10;
@@ -1241,10 +1113,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(10);
         pdf.setTextColor(55, 65, 81);
-        const anyRealImagery = Object.values(lastDataSourcesRef.current).some((s) => /sentinel/i.test(s));
-        const imageryIntro = anyRealImagery
-          ? `The following panels include real Sentinel-2 L2A satellite imagery retrieved for this study area, alongside AI-generated illustrations for panel types not covered by real imagery retrieval. See Section ${sectionNum("quality_assurance")} for exactly which panels below are real versus AI-illustrated.`
-          : `Real satellite imagery could not be retrieved for this report (no verified location was available), so the panels below are AI-generated illustrations rather than actual imagery. See Section ${sectionNum("quality_assurance")} for details.`;
+        const imageryIntro = `Images are visual context only and are not the source of the numeric NDVI measurement. The retrieval source is shown for each available panel; panels with no source are omitted or marked unavailable.`;
         yPos = addWrappedText(imageryIntro, margin, yPos, contentWidth, 5);
         yPos += 10;
 
@@ -1265,7 +1134,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           pdf.setFontSize(9);
           pdf.setTextColor(107, 114, 128);
           pdf.setFont("helvetica", "italic");
-          pdf.text(`Figure: Study area location for ${regionName} (OpenStreetMap).`, margin, yPos);
+          pdf.text(`Map context for ${regionName}; this map is not the satellite measurement.`, margin, yPos);
           yPos += 10;
         }
 
@@ -1286,23 +1155,22 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             pdf.setTextColor(107, 114, 128);
             pdf.text("Satellite Imagery", margin + contentWidth / 2 - 25, yPos + 35);
             pdf.setFontSize(9);
-            pdf.text("True-color Sentinel-2 composite visualization", margin + contentWidth / 2 - 45, yPos + 45);
+            pdf.text(`Source: ${lastDataSourcesRef.current.landsat_truecolor || "Unavailable"}`, margin + 10, yPos + 45);
           }
         } else {
           // Placeholder when no image available
           pdf.setFontSize(12);
           pdf.setTextColor(107, 114, 128);
-          pdf.text("Satellite Imagery Panel", margin + contentWidth / 2 - 30, yPos + 30);
+          pdf.text("No image retrieved", margin + contentWidth / 2 - 25, yPos + 30);
           pdf.setFontSize(9);
-          pdf.text("True-color Sentinel-2 MSI composite", margin + contentWidth / 2 - 38, yPos + 40);
-          pdf.text(`Region: ${regionName}`, margin + contentWidth / 2 - 20, yPos + 50);
+          pdf.text("This panel is unavailable.", margin + contentWidth / 2 - 25, yPos + 40);
         }
         yPos += 80;
         
         pdf.setFontSize(9);
         pdf.setTextColor(107, 114, 128);
         pdf.setFont("helvetica", "italic");
-        pdf.text(`Figure 1: True-color satellite composite of ${regionName} showing study area extent and environmental conditions.`, margin, yPos);
+        pdf.text(`Image source: ${lastDataSourcesRef.current.landsat_truecolor || "Unavailable"}`, margin, yPos);
         yPos += 10;
 
         // Secondary images grid
@@ -1328,14 +1196,12 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         } else {
           pdf.setFontSize(10);
           pdf.setTextColor(107, 114, 128);
-          pdf.text("False Color Composite", margin + gridImageWidth / 2 - 28, yPos + 25);
-          pdf.setFontSize(8);
-          pdf.text("NIR-Red-Green bands", margin + gridImageWidth / 2 - 22, yPos + 35);
+          pdf.text("No image retrieved", margin + gridImageWidth / 2 - 25, yPos + 25);
         }
         pdf.setFontSize(8);
         pdf.setTextColor(75, 85, 99);
         pdf.setFont("helvetica", "bold");
-        pdf.text("False Color Composite", margin + 3, yPos + gridImageHeight + 8);
+        pdf.text(`False-color source: ${lastDataSourcesRef.current.landsat_falsecolor || "Unavailable"}`, margin + 3, yPos + gridImageHeight + 8);
         
         // NDVI panel
         const ndviX = margin + gridImageWidth + 8;
@@ -1354,60 +1220,47 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         } else {
           pdf.setFontSize(10);
           pdf.setTextColor(107, 114, 128);
-          pdf.text("NDVI Vegetation Index", ndviX + gridImageWidth / 2 - 28, yPos + 25);
-          pdf.setFontSize(8);
-          pdf.text("Vegetation health analysis", ndviX + gridImageWidth / 2 - 28, yPos + 35);
+          pdf.text("No image retrieved", ndviX + gridImageWidth / 2 - 25, yPos + 25);
         }
         pdf.setFontSize(8);
         pdf.setTextColor(75, 85, 99);
         pdf.setFont("helvetica", "bold");
-        pdf.text("NDVI Vegetation Index", ndviX + 3, yPos + gridImageHeight + 8);
+        pdf.text(`NDVI image source: ${lastDataSourcesRef.current.ndvi_map || "Unavailable"}`, ndviX + 3, yPos + gridImageHeight + 8);
         
         yPos += gridImageHeight + 18;
       }
 
-      // ============= KEY FINDINGS & TEMPORAL ANALYSIS =============
+      // ============= MEASURED VALUES =============
       pdf.addPage();
       addPageHeader();
       yPos = 28;
 
-      yPos = addSectionTitle("KEY FINDINGS & ANALYSIS", yPos, sectionNum("key_findings"));
+      yPos = addSectionTitle("MEASURED NDVI VALUES", yPos, sectionNum("key_findings"));
 
-      // Temporal Dynamics table — uses real per-period values from analysis when present,
-      // otherwise reports only the validated study-period total (no fabricated quarterly splits).
-      yPos = addSubsectionTitle("Temporal Dynamics", yPos);
-
-      const temporalHeaders = ["PERIOD", "CHANGE DETECTED", "RATE", "TREND"];
-      const periodsFromData = analysisData?.temporalBreakdown || analysisData?.temporal_breakdown;
-      let temporalRows: string[][];
-      if (Array.isArray(periodsFromData) && periodsFromData.length > 0) {
-        temporalRows = periodsFromData.map((p: any) => [
-          String(p.label || p.period || "Period"),
-          p.changePercent !== undefined ? `${parseFloat(p.changePercent).toFixed(1)}%` : "N/A",
-          p.rate || (p.changePercent !== undefined && p.months ? `${(parseFloat(p.changePercent) / parseFloat(p.months)).toFixed(2)}%/month` : "N/A"),
-          p.trend || (parseFloat(p.changePercent) > 5 ? "UP" : parseFloat(p.changePercent) < -5 ? "DOWN" : "FLAT"),
-        ]);
-      } else {
-        temporalRows = [
-          ["Full Study Period", `${changePercent.toFixed(1)}%`, "Cumulative", changePercent > 10 ? "STRONG UP" : changePercent > 0 ? "UP" : changePercent < 0 ? "DOWN" : "FLAT"],
-        ];
-      }
-      yPos = addTableWithBorders(temporalHeaders, temporalRows, yPos, [50, 45, 40, 35]);
+      yPos = addSubsectionTitle("Study-period result", yPos);
+      const periodsFromData = analysisData?.fieldProvenance?.temporalBreakdown?.origin === "measured"
+        ? readTemporalBreakdown(analysisData?.temporalBreakdown || analysisData?.temporal_breakdown)
+        : [];
+      const temporalRows = Array.isArray(periodsFromData) && periodsFromData.length > 0
+        ? periodsFromData.map((p) => [
+            String(p.label || p.period || "Period"),
+            `${p.changePercent.toFixed(1)}%`,
+          ])
+        : [[`${formatReportDate(startDate)} - ${formatReportDate(endDate)}`, `${changePercent.toFixed(1)}%`]];
+      yPos = addTableWithBorders(["PERIOD", "MEASURED NDVI CHANGE"], temporalRows, yPos, [85, 85]);
       yPos += 5;
 
       pdf.setFontSize(8);
       pdf.setTextColor(107, 114, 128);
       pdf.setFont("helvetica", "italic");
       pdf.text(Array.isArray(periodsFromData) && periodsFromData.length > 0
-        ? "Per-period values derived from satellite analysis output."
-        : "Sub-period breakdown not provided by analysis; cumulative total shown.", margin, yPos);
+        ? "Measured period values returned by the analysis service."
+        : "Only the measured study-period value is available; no sub-period breakdown was returned.", margin, yPos);
       yPos += 12;
 
-      // Trend chart - rendered directly from the report's own numbers (see
-      // renderTrendChartPng), not an AI illustration, so it always succeeds
-      // and always matches the table above.
+      // This chart visualizes returned measurements; it is not a forecast.
       checkPageBreak(75);
-      yPos = addSubsectionTitle("Trend Analysis Visualization", yPos);
+      yPos = addSubsectionTitle("Measured values visualization", yPos);
 
       pdf.setFillColor(249, 250, 251);
       pdf.roundedRect(margin, yPos, contentWidth, 60, 3, 3, "F");
@@ -1416,9 +1269,9 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       const chartImgHeight = 50;
 
       const chartPeriods = Array.isArray(periodsFromData) && periodsFromData.length > 0
-        ? periodsFromData.map((p: any) => ({
+        ? periodsFromData.map((p) => ({
             label: String(p.label || p.period || "Period"),
-            value: p.changePercent !== undefined ? parseFloat(p.changePercent) : 0,
+            value: p.changePercent,
           }))
         : [{ label: "Full Study Period", value: changePercent }];
       const chartImage = renderTrendChartPng(chartPeriods);
@@ -1437,151 +1290,29 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       pdf.setFontSize(9);
       pdf.setTextColor(107, 114, 128);
       pdf.setFont("helvetica", "italic");
-      pdf.text("Figure 2: Environmental change trend analysis showing temporal patterns over the study period.", margin, yPos);
+      pdf.text("Reported NDVI change values; no trend or cause is inferred.", margin, yPos);
       yPos += 12;
-
-      // ============= DRIVER ANALYSIS (only when the analysis actually returned driver data) =============
-      if (!isSimple && driverData) {
-        pdf.addPage();
-        addPageHeader();
-        yPos = 28;
-
-        yPos = addSectionTitle("DRIVER ANALYSIS", yPos, sectionNum("driver_analysis"));
-
-        pdf.setFont("helvetica", "normal");
-        pdf.setFontSize(9.5);
-        pdf.setTextColor(75, 85, 99);
-        yPos = addWrappedText(
-          "Contributing drivers identified for the detected change, as estimated by the analysis. These figures are AI-generated estimates, not measured attributions.",
-          margin, yPos, contentWidth, 5
-        );
-        yPos += 8;
-
-        const driverHeaders = ["DRIVER", "ESTIMATED CONTRIBUTION"];
-        const driverRows = driverData.map((d: any) => [
-          String(d.driver || d.name || "Unspecified"),
-          d.contribution_percent !== undefined ? `${parseFloat(d.contribution_percent).toFixed(1)}%` : "N/A",
-        ]);
-        yPos = addTableWithBorders(driverHeaders, driverRows, yPos, [110, 60]);
-        yPos += 8;
-
-        if (analysisData?.multiEventAnalysis?.interaction_effects) {
-          yPos = addSubsectionTitle("Interaction Effects", yPos);
-          pdf.setFontSize(9.5);
-          yPos = addWrappedText(String(analysisData.multiEventAnalysis.interaction_effects), margin, yPos, contentWidth, 5);
-          yPos += 8;
-        }
-      }
 
       // ============= PROFESSIONAL REPORT EXTRAS =============
       if (!isSimple) {
-        // RISK ASSESSMENT PAGE
         pdf.addPage();
         addPageHeader();
         yPos = 28;
 
-        yPos = addSectionTitle("RISK ASSESSMENT", yPos, sectionNum("risk_assessment"));
-
-        // Risk classification box
-        pdf.setFillColor(risk.bgColor[0], risk.bgColor[1], risk.bgColor[2]);
-        pdf.roundedRect(margin, yPos, contentWidth, 20, 3, 3, "F");
-        pdf.setTextColor(risk.color[0], risk.color[1], risk.color[2]);
-        pdf.setFontSize(11);
-        pdf.setFont("helvetica", "bold");
-        pdf.text(`CLASSIFICATION: ${risk.level} RISK`, margin + 8, yPos + 8);
-        pdf.setFontSize(9);
-        pdf.setFont("helvetica", "normal");
-        pdf.text(risk.description, margin + 8, yPos + 15);
-        yPos += 28;
-
-        // Risk Factor Matrix
-        yPos = addSubsectionTitle("Risk Factor Matrix", yPos);
-        
-        const riskHeaders = ["RISK FACTOR", "CURRENT STATUS", "SEVERITY", "5-YEAR PROJECTION"];
-        const riskRows = [
-          ["Change Rate", `${(changePercent / 2).toFixed(1)}% annually`, changePercent > 10 ? "HIGH" : "MODERATE", changePercent > 10 ? "CRITICAL" : "HIGH"],
-          ["Environmental Impact", "Detected in study area", changePercent > 15 ? "HIGH" : "MODERATE", "MODERATE-HIGH"],
-          ["Ecosystem Health", "Requires monitoring", "MODERATE", changePercent > 8 ? "HIGH" : "MODERATE"],
-          ["Resource Sustainability", "Under assessment", changePercent > 12 ? "HIGH" : "MODERATE", "MODERATE"],
-          ["Community Impact", "Potential effects identified", "MODERATE", "MODERATE-HIGH"],
+        yPos = addSectionTitle("INTERPRETATION & LIMITATIONS", yPos, sectionNum("risk_assessment"));
+        const interpretationLimits = [
+          `Requested category: ${requestedCategory}. NDVI change does not confirm this event.`,
+          "NDVI change measures vegetation-index variation; it does not establish cause, risk, damage, or recovery.",
+          `Sensor reported by the analysis service: ${sensorName}. Values from different sensors may not be directly comparable.`,
+          "No annualized rate, forecast, attribution, or intervention priority is inferred by this report.",
         ];
-        yPos = addTableWithBorders(riskHeaders, riskRows, yPos, [45, 50, 35, 40]);
-        yPos += 10;
-
-        // RECOMMENDATIONS PAGE
-        checkPageBreak(80);
-        yPos = addSectionTitle("RECOMMENDATIONS & IMPLEMENTATION ROADMAP", yPos, sectionNum("recommendations"));
-
-        // Real recommendations from the analysis, organized into a
-        // roadmap (priority/timeline/responsible are derived scaffolding
-        // around real content, not fabricated advice) - only falls back to
-        // generic placeholders when the analysis returned none at all.
-        const realRecommendationText: string[] = Array.isArray(analysisData?.recommendations)
-          ? analysisData.recommendations
-              .map((r: any) => (typeof r === "string" ? r : r?.detail || r?.action || null))
-              .filter((r: unknown): r is string => typeof r === "string" && r.trim().length > 0)
-          : [];
-
-        const timelineByIndex = (i: number) => ["Immediate", "30 days", "45 days", "60 days", "90 days"][i] || `${(i + 1) * 30} days`;
-        const responsibleRotation = ["Environmental Agency", "Field Operations", "Community Liaison", "Policy Team", "Analysis Team"];
-        const priorityByIndex = (i: number, total: number) => {
-          if (i < Math.ceil(total / 3)) return "HIGH";
-          if (i < Math.ceil((total * 2) / 3)) return "MEDIUM";
-          return "LOW";
-        };
-
-        const recommendations = realRecommendationText.length > 0
-          ? realRecommendationText.map((action, i) => ({
-              priority: priorityByIndex(i, realRecommendationText.length),
-              action,
-              timeline: timelineByIndex(i),
-              responsible: responsibleRotation[i % responsibleRotation.length],
-            }))
-          : [
-              { priority: "HIGH", action: "Establish continuous monitoring protocols for identified change hotspots", timeline: "Immediate", responsible: "Environmental Agency" },
-              { priority: "HIGH", action: "Deploy ground-truth verification teams to validate satellite findings", timeline: "30 days", responsible: "Field Operations" },
-              { priority: "MEDIUM", action: "Engage local stakeholders and authorities with preliminary findings", timeline: "45 days", responsible: "Community Liaison" },
-              { priority: "MEDIUM", action: "Develop intervention strategies based on driver analysis results", timeline: "60 days", responsible: "Policy Team" },
-              { priority: "LOW", action: "Schedule follow-up analysis to track progression of detected changes", timeline: "90 days", responsible: "Analysis Team" },
-            ];
-
-        recommendations.forEach((rec) => {
-          const priorityColors: Record<string, { bg: [number, number, number]; fg: [number, number, number] }> = {
-            HIGH: { bg: [254, 226, 226], fg: [220, 38, 38] },
-            MEDIUM: { bg: [254, 249, 195], fg: [161, 98, 7] },
-            LOW: { bg: [220, 252, 231], fg: [21, 128, 61] }
-          };
-
-          const colors = priorityColors[rec.priority];
-          const actionLines = pdf.splitTextToSize(sanitizeForPdf(rec.action), contentWidth - 30);
-          const boxHeight = 14 + actionLines.length * 4.5;
-          checkPageBreak(boxHeight + 4);
-
-          pdf.setFillColor(colors.bg[0], colors.bg[1], colors.bg[2]);
-          pdf.roundedRect(margin, yPos, contentWidth, boxHeight, 2, 2, "F");
-
-          // Priority badge
-          pdf.setFillColor(colors.fg[0], colors.fg[1], colors.fg[2]);
-          pdf.roundedRect(margin + 3, yPos + 3, 18, 6, 1, 1, "F");
-          pdf.setTextColor(255, 255, 255);
-          pdf.setFontSize(7);
-          pdf.setFont("helvetica", "bold");
-          pdf.text(rec.priority, margin + 5, yPos + 7);
-
-          // Action text (wrapped, not truncated to one line)
-          pdf.setTextColor(17, 24, 39);
-          pdf.setFontSize(9);
+        interpretationLimits.forEach((line) => {
+          checkPageBreak(14);
           pdf.setFont("helvetica", "normal");
-          pdf.text(actionLines, margin + 25, yPos + 8);
-
-          // Timeline
-          const metaY = yPos + 8 + actionLines.length * 4.5;
-          pdf.setTextColor(107, 114, 128);
-          pdf.setFontSize(8);
-          pdf.text(`Timeline: ${rec.timeline}`, margin + 25, metaY);
-          pdf.text(`Responsible: ${rec.responsible}`, pageWidth - margin - 50, metaY);
-
-          yPos += boxHeight + 4;
+          pdf.setFontSize(9);
+          pdf.setTextColor(75, 85, 99);
+          yPos = addWrappedText(`- ${line}`, margin, yPos, contentWidth, 4.5);
+          yPos += 4;
         });
 
         // ============= QUALITY ASSURANCE & LIMITATIONS =============
@@ -1595,7 +1326,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         pdf.setFontSize(9.5);
         pdf.setTextColor(75, 85, 99);
         yPos = addWrappedText(
-          "This section states plainly which parts of this specific report are real, measured data versus AI-generated estimates, so findings can be weighted appropriately.",
+          "The provenance below comes from the analysis response and visualization service. Unknown sources are reported as unavailable rather than inferred.",
           margin, yPos, contentWidth, 5
         );
         yPos += 8;
@@ -1604,26 +1335,25 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         const provenanceHeaders = ["REPORT ELEMENT", "BASIS"];
         const imageLabel = (key: string, label: string): string[] => {
           const source = lastDataSourcesRef.current[key];
-          if (!source) return [label, "Not generated for this report"];
-          const isReal = /sentinel/i.test(source);
-          return [label, isReal ? "Real Sentinel-2 satellite imagery" : "AI illustration (not real imagery)"];
+          return [label, source || "Unavailable"];
         };
+        const changeProvenance = analysisData?.fieldProvenance?.changePercent;
+        const spectralProvenance = analysisData?.fieldProvenance?.spectralIndices;
+        const coordinateProvenance = analysisData?.fieldProvenance?.coordinates;
         const provenanceRows: string[][] = [
-          ["Study area map", mapSnapshot ? "Real map screenshot (OpenStreetMap)" : "Not captured for this report"],
+          ["Study area map", mapSnapshot ? "Interactive map screenshot; visual context only" : "Not captured for this report"],
           imageLabel("landsat_truecolor", "True-color imagery panel"),
           imageLabel("landsat_falsecolor", "False-color imagery panel"),
           imageLabel("ndvi_map", "NDVI imagery panel"),
-          ["Trend chart", "Rendered directly from this report's own figures (not AI-generated)"],
-          ["Spectral indices / change %", hasMeasuredBasis
-            ? "Measured Sentinel-2 values; narrative text is model-generated"
-            : "Unavailable"],
-          ["Narrative summary and recommendations", "Groq-generated text; not a measurement"],
-          ["Location coordinates", analysisData?.locations?.[0]?.verified === false ? "AI-estimated, not geocoder-verified" : "Geocoded (OpenStreetMap/Nominatim) or user-selected"],
+          ["NDVI change", hasMeasuredBasis ? `${changeProvenance?.source || "Measured"}; sensor: ${sensorName}` : "Unavailable"],
+          ["Spectral indices", spectralProvenance?.origin === "measured" ? `${spectralProvenance.source}; sensor: ${spectralProvenance.sensor}` : "Unavailable"],
+          ["Narrative and recommendations", "Not included; not measured by this report"],
+          ["Location coordinates", coordinateProvenance?.source || "Unavailable"],
           ...selectedAdvancedViz
             .filter((id) => advancedImages[id])
             .map((id) => {
               const viz = ADVANCED_VIZ_TYPES.find((v) => v.id === id);
-              return [viz?.label || id, lastDataSourcesRef.current[id] || "Model-generated illustration"];
+              return [viz?.label || id, lastDataSourcesRef.current[id] || "Source unavailable"];
             }),
         ];
         yPos = addTableWithBorders(provenanceHeaders, provenanceRows, yPos, [70, 100]);
@@ -1641,10 +1371,10 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         pdf.setFontSize(9);
         pdf.setTextColor(75, 85, 99);
         const limitations = [
-          "Narrative text is model-generated and is not an independent measurement or ground-truth validation.",
-          "Real satellite imagery (where used) is subject to cloud cover and a multi-day revisit cycle, so the most recent clear scene may predate the report date.",
-          "AI interpretations are probabilistic and can vary between runs of the same query.",
-          "The numeric values in this report are measurements for the specified Sentinel-2 study area and time window; verify against field data before high-stakes decisions.",
+          "The requested category is not validated by the NDVI measurement and must not be interpreted as event attribution.",
+          "NDVI change does not independently establish severity, cause, damage, or future conditions.",
+          "Model-generated text, where present, is interpretation and not an independent measurement.",
+          "This report does not include independent ground-truth validation; verify high-impact decisions against authoritative records or field observations.",
         ];
         limitations.forEach((line) => {
           checkPageBreak(12);
@@ -1659,24 +1389,24 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         addPageHeader();
         yPos = 28;
 
-        yPos = addSectionTitle("GEOSPATIAL ANALYSIS METHODOLOGY", yPos, sectionNum("methodology"));
+        yPos = addSectionTitle("ANALYSIS METHOD & LIMITATIONS", yPos, sectionNum("methodology"));
 
         const methodology = [
           {
-            title: "Imagery Data Basis",
-            content: `Where coordinates are available, the true-color, false-color, and NDVI panels in this report use real Sentinel-2 L2A imagery retrieved via the Copernicus Data Space Ecosystem's Sentinel Hub API, least-cloud mosaicked over the preceding 90 days, with cloud pixels masked using the Sentinel-2 Scene Classification Layer. ${analysisData?.locations?.[0]?.verified === false || (typeof lat !== "number") ? "For this specific report, no verified location was available, so imagery panels could not be sourced from real satellite data - see the Quality Assurance section for confirmation of what was actually used." : "This applies to the imagery panels in this specific report."}`
+            title: "Measured NDVI change",
+            content: `The change value is marked measured by the analysis response. Recorded source: ${changeProvenance?.source || "Unavailable"}. Sensor: ${sensorName}.`,
           },
           {
-            title: "Numeric Analysis Generation",
-            content: "NDVI, NDWI, and NBR values, valid-pixel coverage, and the NDVI change percentage are computed from Sentinel-2 MSI L2A pixels through the Sentinel Hub Statistics API. Area is derived from the analysis bounding box. Groq generates narrative text only; classification, change matrices, and multi-event analysis are disabled."
+            title: "Visual panels",
+            content: "Optional imagery and map panels are context only. Their reported sources are listed in the provenance table; an image is not evidence that the requested event occurred.",
           },
           {
-            title: "Map & Chart Rendering",
-            content: "The study area map is a real screenshot of the interactive map (OpenStreetMap tiles plus the study-area marker/boundary), captured at report generation time. The trend chart is drawn directly from this report's own reported figures using on-device rendering - it is not AI-generated."
+            title: "Interpretation",
+            content: "NDVI change alone does not establish cause, event type, severity, or future conditions. The report does not calculate an annualized rate or forecast.",
           },
           {
-            title: "Validation Approach",
-            content: "This system does not perform independent ground-truth validation. Validate measured values against field data or authoritative sources such as USGS Earth Explorer or the Copernicus Browser before decisions with real consequences."
+            title: "Validation",
+            content: "This report does not include independent ground-truth validation. Verify high-impact decisions against authoritative records or field observations.",
           }
         ];
 
@@ -1703,9 +1433,9 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         
         const uncertaintyHeaders = ["ASPECT", "NOTE"];
         const uncertaintyRows: string[][] = [];
-        uncertaintyRows.push(["Model-generated narrative", "Interpretive text only; not a measured value or confidence estimate"]);
-        uncertaintyRows.push(["Real imagery geolocation (where used)", "Sentinel-2 L2A products are typically geolocated to within about 1 pixel (~10m) per ESA specifications"]);
-        uncertaintyRows.push(["Numeric spectral/change analysis", "Not independently validated by this system - see Validation Approach above"]);
+        uncertaintyRows.push(["Measured NDVI change", `${changeProvenance?.source || "Analysis response"}; not independently validated by this report`]);
+        uncertaintyRows.push(["Requested category", `${requestedCategory}; request metadata, not event attribution`]);
+        uncertaintyRows.push(["Narrative and recommendations", "Not included; this report contains measured values and provenance only"]);
         yPos = addTableWithBorders(uncertaintyHeaders, uncertaintyRows, yPos, [75, 95]);
 
         // DATA SOURCES PAGE
@@ -1717,14 +1447,10 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
 
         yPos = addSubsectionTitle("Data Sources Used In This Report", yPos);
 
-        const usedRealImagery = Object.values(lastDataSourcesRef.current).some((s) => /sentinel/i.test(s));
-        const usedRealStatistics = hasMeasuredBasis;
         const dataSources = [
-          "[1] Groq API. Generated narrative analysis, findings, and recommendations; this text is not a measurement.",
-          ...(usedRealImagery || usedRealStatistics ? [
-            `[2] European Space Agency (ESA) / Copernicus Data Space Ecosystem. Real Sentinel-2 L2A satellite ${[usedRealImagery && "imagery (true-color/false-color/NDVI panels)", usedRealStatistics && "pixel statistics (spectral index values and change %)"].filter(Boolean).join(" and ")} used in this report. https://dataspace.copernicus.eu`,
-          ] : []),
-          "[3] OpenStreetMap Contributors. Basemap tiles for the study area map, and/or place-name geocoding used to resolve this report's location. https://www.openstreetmap.org",
+          `NDVI change: ${changeProvenance?.source || "Unavailable"}; sensor: ${sensorName}`,
+          ...(spectralProvenance?.origin === "measured" ? [`Spectral indices: ${spectralProvenance.source}; sensor: ${spectralProvenance.sensor}`] : []),
+          ...Object.entries(lastDataSourcesRef.current).map(([panel, source]) => `${panel} visual: ${source}`),
         ];
 
         pdf.setFontSize(9);
@@ -1737,23 +1463,6 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           yPos += sourceLines.length * 5 + 3;
         });
 
-        yPos += 8;
-        yPos = addSubsectionTitle("Software Used to Produce This Report", yPos);
-
-        const tools = [
-          "jsPDF - client-side PDF document generation",
-          "MapLibre GL JS - interactive map rendering for the study area map panel",
-          "Supabase Edge Functions (Deno) - backend APIs for AI analysis and imagery retrieval",
-          ...(usedRealImagery ? ["Sentinel Hub Process API (Copernicus Data Space Ecosystem) - real satellite imagery retrieval"] : []),
-          ...(usedRealStatistics ? ["Sentinel Hub Statistics API (Copernicus Data Space Ecosystem) - real spectral index/change computation"] : []),
-          "Groq API - model-generated narrative text",
-        ];
-
-        tools.forEach((tool) => {
-          checkPageBreak(8);
-          pdf.text(`• ${tool}`, margin, yPos);
-          yPos += 6;
-        });
       }
 
       // ============= APPENDIX: IMAGERY PANELS =============
@@ -1779,7 +1488,13 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             pdf.setFontSize(8);
             pdf.setTextColor(107, 114, 128);
             pdf.setFont("helvetica", "italic");
-            pdf.text("Land cover classification showing different surface types within the study area.", margin, yPos);
+            yPos = addWrappedText(
+              `Visualization source: ${lastDataSourcesRef.current.classification_map || "Not supplied"}. Not independently validated.`,
+              margin,
+              yPos,
+              contentWidth,
+              4
+            );
             yPos += 12;
           } catch (e) {
             console.warn("Could not add classification image");
@@ -1798,7 +1513,13 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             pdf.setFontSize(8);
             pdf.setTextColor(107, 114, 128);
             pdf.setFont("helvetica", "italic");
-            pdf.text("Change detection highlighting areas of significant environmental change between analysis periods.", margin, yPos);
+            yPos = addWrappedText(
+              `Visualization source: ${lastDataSourcesRef.current.change_detection_map || "Not supplied"}. Not independently validated.`,
+              margin,
+              yPos,
+              contentWidth,
+              4
+            );
           } catch (e) {
             console.warn("Could not add change detection image");
           }
@@ -1806,12 +1527,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       }
 
       // ============= APPENDIX: ADVANCED VISUALIZATIONS =============
-      // Previously these were fetched (burning AI image-generation quota)
-      // but never actually embedded anywhere in the output - this is the
-      // step that was missing. Each panel is captioned with its real data
-      // source (or honestly labeled as an AI illustration) via
-      // lastDataSourcesRef, populated above for both the network-fetched
-      // and locally-rendered advanced visualization types.
+      // Include only returned visualizations and report their supplied source.
       const selectedWithImages = selectedAdvancedViz.filter((id) => advancedImages[id]);
       if (includeImages && !isSimple && selectedWithImages.length > 0) {
         pdf.addPage();
@@ -1837,12 +1553,17 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             pdf.addImage(image, "PNG", margin + 5, yPos + 5, contentWidth - 10, 60);
             yPos += 75;
 
-            const source = lastDataSourcesRef.current[vizId] || "Model-generated illustration";
             pdf.setFontSize(8);
             pdf.setTextColor(107, 114, 128);
             pdf.setFont("helvetica", "italic");
-            pdf.text(`Source: ${source}`, margin, yPos);
-            yPos += 12;
+            yPos = addWrappedText(
+              `Source: ${lastDataSourcesRef.current[vizId] || "Not supplied by visualization service"}. Context only; not event attribution.`,
+              margin,
+              yPos,
+              contentWidth,
+              4
+            );
+            yPos += 8;
           } catch (e) {
             console.warn(`Could not add ${vizId} image:`, e);
           }
@@ -1867,7 +1588,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       
       pdf.setFont("helvetica", "normal");
       pdf.setFontSize(9);
-      const disclaimer = "This report is generated using AI-assisted satellite imagery analysis. While every effort is made to ensure accuracy, results should be validated with ground-truth data before making critical decisions. GeoPulse Environmental Intelligence Platform is not liable for decisions made based solely on this analysis. Confidence scores and uncertainty ranges are provided to support informed interpretation.";
+      const disclaimer = "NDVI change is a vegetation-index measurement and does not establish event occurrence, cause, severity, or future conditions. The requested category is metadata. This report does not include independent ground-truth validation.";
       const disclaimerLines = pdf.splitTextToSize(disclaimer, contentWidth - 20);
       pdf.text(disclaimerLines, margin + 10, yPos + 18);
 
@@ -1877,9 +1598,8 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       
       pdf.setTextColor(255, 255, 255);
       pdf.setFontSize(9);
-      pdf.text("GeoPulse Environmental Intelligence Platform", margin, pageHeight - 10);
-      pdf.text("www.geopulse.ai | contact@geopulse.ai", pageWidth / 2 - 25, pageHeight - 10);
-      pdf.text(`© ${new Date().getFullYear()} All Rights Reserved`, pageWidth - margin - 40, pageHeight - 10);
+      pdf.text("GeoPulse Satellite Measurement Report", margin, pageHeight - 10);
+      pdf.text("NDVI change measurement; no event attribution", pageWidth / 2 - 25, pageHeight - 10);
 
       // Add page numbers to all pages
       const totalPages = pdf.getNumberOfPages();
@@ -1889,7 +1609,6 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           pdf.setFontSize(8);
           pdf.setTextColor(107, 114, 128);
           pdf.text(`Page ${i} of ${totalPages}`, pageWidth - margin - 20, pageHeight - 25);
-          pdf.text("CONFIDENTIAL - For authorized use only", margin, pageHeight - 25);
         }
       }
 
@@ -1932,7 +1651,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
                 <BarChart3 className="h-4 w-4 text-primary" />
                 <div className="text-left">
                   <div className="font-medium">Professional Report</div>
-                  <div className="text-xs text-muted-foreground">Full 15+ page analysis with methodology & appendices</div>
+                  <div className="text-xs text-muted-foreground">Detailed report with measurements, provenance, and optional visuals</div>
                 </div>
               </span>
             </SelectItem>
@@ -1941,7 +1660,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
                 <FileText className="h-4 w-4 text-muted-foreground" />
                 <div className="text-left">
                   <div className="font-medium">Summary Report</div>
-                  <div className="text-xs text-muted-foreground">Key findings and metrics overview (5 pages)</div>
+                  <div className="text-xs text-muted-foreground">Concise measured-values summary</div>
                 </div>
               </span>
             </SelectItem>
@@ -1953,8 +1672,8 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         <div className="flex items-center gap-2">
           <Image className="h-4 w-4 text-muted-foreground" />
           <div>
-            <span className="text-sm font-medium">Include AI Visualizations</span>
-            <p className="text-xs text-muted-foreground">Satellite imagery, NDVI maps & charts</p>
+            <span className="text-sm font-medium">Include Visual Panels</span>
+              <p className="text-xs text-muted-foreground">Optional imagery, index grids, and map context</p>
           </div>
         </div>
         <Button
@@ -2045,7 +1764,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
                       )}
                       <div className="p-3 bg-muted rounded-lg">
                         <h4 className="font-bold">Page 3: Executive Summary</h4>
-                        <p className="text-sm text-muted-foreground">Assessment overview, key findings, risk classification with citations [1-3]</p>
+                        <p className="text-sm text-muted-foreground">Measured NDVI change, sensor, area, and interpretation limits</p>
                       </div>
                       {includeImages && (
                         <div className="p-3 bg-muted rounded-lg">
@@ -2056,16 +1775,16 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
                       {reportType === "professional" && (
                         <>
                           <div className="p-3 bg-muted rounded-lg">
-                            <h4 className="font-bold">Page 6: Risk Assessment</h4>
-                            <p className="text-sm text-muted-foreground">Risk factor matrix, priority recommendations</p>
+                            <h4 className="font-bold">Interpretation & Limitations</h4>
+                            <p className="text-sm text-muted-foreground">Measurement caveats and event-attribution limits</p>
                           </div>
                           <div className="p-3 bg-muted rounded-lg">
                             <h4 className="font-bold">Page 7: Methodology</h4>
-                            <p className="text-sm text-muted-foreground">Data acquisition, processing pipeline, AI framework [6-10]</p>
+                            <p className="text-sm text-muted-foreground">Analysis source and measurement limitations</p>
                           </div>
                           <div className="p-3 bg-muted rounded-lg">
                             <h4 className="font-bold">Page 8: References</h4>
-                            <p className="text-sm text-muted-foreground">Numbered citations [1-10] linked throughout document</p>
+                            <p className="text-sm text-muted-foreground">Data provenance reported by the analysis and visualization services</p>
                           </div>
                           {selectedAdvancedViz.length > 0 && (
                             <div className="p-3 bg-cyan-500/10 rounded-lg">
@@ -2092,21 +1811,21 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
                           <Image className="h-4 w-4 text-primary" />
                           <span className="text-sm font-medium">True-Color Composite</span>
                         </div>
-                        <p className="text-xs text-muted-foreground">Sentinel-2 Bands 4-3-2 RGB</p>
+                        <p className="text-xs text-muted-foreground">Source provided with the retrieved visualization</p>
                       </div>
                       <div className="p-3 rounded-lg border bg-muted/30">
                         <div className="flex items-center gap-2 mb-2">
                           <Layers className="h-4 w-4 text-orange-500" />
                           <span className="text-sm font-medium">False-Color Composite</span>
                         </div>
-                        <p className="text-xs text-muted-foreground">Bands 8-4-3 NIR-R-G</p>
+                        <p className="text-xs text-muted-foreground">Source provided with the retrieved visualization</p>
                       </div>
                       <div className="p-3 rounded-lg border bg-muted/30">
                         <div className="flex items-center gap-2 mb-2">
                           <Leaf className="h-4 w-4 text-emerald-500" />
                           <span className="text-sm font-medium">NDVI Vegetation Map</span>
                         </div>
-                        <p className="text-xs text-muted-foreground">Vegetation health index</p>
+                        <p className="text-xs text-muted-foreground">NDVI visualization; not event attribution</p>
                       </div>
                       <div className="p-3 rounded-lg border bg-muted/30">
                         <div className="flex items-center gap-2 mb-2">
@@ -2145,7 +1864,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
                       <div className="text-center text-muted-foreground">
                         <Image className="h-16 w-16 mx-auto mb-4 opacity-30" />
                         <p className="text-sm">Click Preview to generate a sample visualization</p>
-                        <p className="text-xs mt-1">This will show a Sentinel-2 satellite image of your region</p>
+                        <p className="text-xs mt-1">A sample visualization may be available from the configured data service</p>
                       </div>
                     )}
                   </div>
@@ -2168,10 +1887,10 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             <Check className="h-3 w-3 text-emerald-500" /> Cover page with branding & metadata
           </li>
           <li className="flex items-center gap-2">
-            <Check className="h-3 w-3 text-emerald-500" /> Executive summary & risk assessment
+            <Check className="h-3 w-3 text-emerald-500" /> Measured values & interpretation limits
           </li>
           <li className="flex items-center gap-2">
-            <Check className="h-3 w-3 text-emerald-500" /> Key metrics tables & findings
+            <Check className="h-3 w-3 text-emerald-500" /> Provenance-backed metrics
           </li>
           {includeImages && (
             <li className="flex items-center gap-2">
@@ -2181,10 +1900,10 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
           {reportType === "professional" && (
             <>
               <li className="flex items-center gap-2">
-                <Check className="h-3 w-3 text-emerald-500" /> Table of contents with citations [1-10]
+                <Check className="h-3 w-3 text-emerald-500" /> Table of contents and provenance
               </li>
               <li className="flex items-center gap-2">
-                <Check className="h-3 w-3 text-emerald-500" /> Risk factor matrix & recommendations
+                <Check className="h-3 w-3 text-emerald-500" /> Analysis limitations
               </li>
               <li className="flex items-center gap-2">
                 <Check className="h-3 w-3 text-emerald-500" /> Methodology & data sources

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import {
   Play, GitCompare, Clock, FileType, Upload, Star, MousePointer, Loader2,
   AlertTriangle, ChevronDown, Satellite,
@@ -12,11 +12,8 @@ import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 
 import LocationSearch from "@/components/LocationSearch";
-import ReportGenerator from "@/components/ReportGenerator";
 import FileUploadAnalysis from "@/components/FileUploadAnalysis";
 import SavedLocations from "@/components/SavedLocations";
-import ComparisonMode from "@/components/ComparisonMode";
-import TimeLapseAnimation from "@/components/TimeLapseAnimation";
 import GISExportButton from "@/components/GISExportButton";
 import ShapefileImport from "@/components/ShapefileImport";
 import CloudCoverageDisplay from "@/components/CloudCoverageDisplay";
@@ -28,6 +25,11 @@ import RealTimeRegionalStatus from "@/components/RealTimeRegionalStatus";
 import { useMapContext } from "@/contexts/MapContext";
 import { useAnalysisHistory } from "@/hooks/useAnalysisHistory";
 import { AnalysisFeature } from "@/lib/gis-export";
+import type { BoundaryGeometry, GeocodeBounds, GeocodedPlace } from "@/types/geospatial";
+
+const ReportGenerator = lazy(() => import("@/components/ReportGenerator"));
+const ComparisonMode = lazy(() => import("@/components/ComparisonMode"));
+const TimeLapseAnimation = lazy(() => import("@/components/TimeLapseAnimation"));
 
 // Ported verbatim from the old GeoWitness.tsx page.
 const eventTypes = [
@@ -171,25 +173,55 @@ const TOOLS: { id: Tool; label: string; icon: typeof Play }[] = [
   { id: "watchlist", label: "Watchlist", icon: Star },
 ];
 
-export function GeoWitnessPanel() {
+export function GeoWitnessPanel({ initialLocation }: { initialLocation?: GeocodedPlace }) {
   const mapCtx = useMapContext();
   const { saveAnalysis } = useAnalysisHistory();
   const [tool, setTool] = useState<Tool>("analysis");
 
   const [eventType, setEventType] = useState("deforestation");
-  const [region, setRegion] = useState("");
+  const [region, setRegion] = useState(initialLocation?.name ?? "");
   const [startDate, setStartDate] = useState("2022-01-01");
   const [endDate, setEndDate] = useState("2024-01-01");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [results, setResults] = useState<any>(null);
-  const [selectedLocation, setSelectedLocation] = useState<{ lat: number; lng: number; name: string } | null>(null);
+  const [selectedLocation, setSelectedLocation] = useState<{
+    lat: number;
+    lng: number;
+    name: string;
+    bounds?: GeocodeBounds;
+    geometry?: BoundaryGeometry;
+  } | null>(() => initialLocation ? {
+    lat: initialLocation.lat,
+    lng: initialLocation.lng,
+    name: initialLocation.name,
+    bounds: initialLocation.bounds,
+    geometry: initialLocation.geometry,
+  } : null);
   const [importedFeatures, setImportedFeatures] = useState<AnalysisFeature[]>([]);
 
-  const handleLocationSelect = (location: { name: string; lat: number; lng: number }) => {
+  const handleLocationSelect = (location: {
+    name: string;
+    lat: number;
+    lng: number;
+    bounds?: GeocodeBounds;
+    geometry?: BoundaryGeometry;
+  }) => {
     setRegion(location.name);
-    setSelectedLocation({ lat: location.lat, lng: location.lng, name: location.name });
-    mapCtx.setSelectedArea({ lat: location.lat, lng: location.lng });
-    mapCtx.setView([location.lat, location.lng], 10);
+    setSelectedLocation({
+      lat: location.lat,
+      lng: location.lng,
+      name: location.name,
+      bounds: location.bounds,
+      geometry: location.geometry,
+    });
+    mapCtx.setSelectedBoundary(location.geometry ?? null);
+    mapCtx.setSelectedArea(null);
+    if (location.bounds) {
+      const [[south, west], [north, east]] = location.bounds;
+      mapCtx.flyToBounds({ north, south, east, west });
+    } else {
+      mapCtx.setView([location.lat, location.lng], 10);
+    }
     mapCtx.setSelectionMode(false);
   };
 
@@ -200,6 +232,7 @@ export function GeoWitnessPanel() {
     mapCtx.setOnLocationSelect((location) => {
       setSelectedLocation(location);
       setRegion(location.name);
+      mapCtx.setSelectedBoundary(null);
       mapCtx.setSelectedArea({ lat: location.lat, lng: location.lng });
       mapCtx.setSelectionMode(false);
       toast.success(`Selected: ${location.name}`);
@@ -239,37 +272,35 @@ export function GeoWitnessPanel() {
         label: `${region || selectedLocation?.name} - ${eventType}`,
         color: data.changePercent > 50 ? "#ef4444" : "#f97316",
       }]);
-      const boundarySize = 0.15;
-      const changePercent = typeof data.changePercent === "number" ? data.changePercent : null;
-      mapCtx.setPolygons([{
-        coordinates: [
-          [coordinates.lng - boundarySize, coordinates.lat + boundarySize],
-          [coordinates.lng + boundarySize, coordinates.lat + boundarySize],
-          [coordinates.lng + boundarySize, coordinates.lat - boundarySize],
-          [coordinates.lng - boundarySize, coordinates.lat - boundarySize],
-          [coordinates.lng - boundarySize, coordinates.lat + boundarySize],
-        ],
-        label: changePercent === null
-          ? `${eventType.replace(/_/g, " ")} analysis — change not measured`
-          : `${changePercent.toFixed(1)}% ${eventType.replace(/_/g, " ")} change measured`,
-        color: changePercent === null ? "#6b7280" : changePercent > 50 ? "#ef4444" : changePercent > 25 ? "#f97316" : "#22c55e",
-        fillOpacity: 0.3,
-      }]);
-      mapCtx.setView([coordinates.lat, coordinates.lng], 10);
-      mapCtx.highlightRegion({
-        north: coordinates.lat + boundarySize, south: coordinates.lat - boundarySize,
-        east: coordinates.lng + boundarySize, west: coordinates.lng - boundarySize,
-      });
+      mapCtx.setPolygons([]);
+      mapCtx.setSelectedBoundary(selectedLocation.geometry ?? null);
+      if (selectedLocation.bounds) {
+        const [[south, west], [north, east]] = selectedLocation.bounds;
+        mapCtx.flyToBounds({ north, south, east, west });
+      } else {
+        mapCtx.setView([coordinates.lat, coordinates.lng], 10);
+      }
+
+      const regionBounds = selectedLocation.bounds
+        ? {
+          north: selectedLocation.bounds[1][0],
+          south: selectedLocation.bounds[0][0],
+          east: selectedLocation.bounds[1][1],
+          west: selectedLocation.bounds[0][1],
+        }
+        : {
+          north: coordinates.lat + 0.05,
+          south: coordinates.lat - 0.05,
+          east: coordinates.lng + 0.05,
+          west: coordinates.lng - 0.05,
+        };
 
       if (!data?.fallback) {
         saveAnalysis({
           type: "geowitness",
           eventType: eventTypesToAnalyze[0],
           regionName: targetRegionName,
-          regionBounds: {
-            north: coordinates.lat + boundarySize, south: coordinates.lat - boundarySize,
-            east: coordinates.lng + boundarySize, west: coordinates.lng - boundarySize,
-          },
+          regionBounds,
           dateRange: { start: startDate, end: endDate },
           resultPayload: data,
         });
@@ -295,6 +326,7 @@ export function GeoWitnessPanel() {
             body: JSON.stringify({
               eventTypes: eventTypesToAnalyze, eventType: eventTypesToAnalyze[0],
               region: targetRegionName, startDate, endDate, coordinates,
+              geometry: selectedLocation.geometry,
             }),
             signal: controller.signal,
           }
@@ -393,7 +425,17 @@ export function GeoWitnessPanel() {
 
             <div>
               <label className="text-[13px] font-medium mb-2 block text-gray-900 dark:text-v2-primary">Search Location</label>
-              <LocationSearch onLocationSelect={handleLocationSelect} onInputChange={(val) => setRegion(val)} placeholder="Search any place in Africa..." defaultValue={region} />
+              <LocationSearch
+                onLocationSelect={handleLocationSelect}
+                onInputChange={(value) => {
+                  setRegion(value);
+                  setSelectedLocation(null);
+                  mapCtx.setSelectedBoundary(null);
+                  mapCtx.setSelectedArea(null);
+                }}
+                placeholder="Search countries, regions, towns, or basins..."
+                defaultValue={region}
+              />
             </div>
 
             <Button
@@ -410,6 +452,11 @@ export function GeoWitnessPanel() {
                 <p className="text-[13px] font-medium text-brand">Selected Location:</p>
                 <p className="text-[13px] truncate text-gray-700 dark:text-v2-secondary">{selectedLocation.name}</p>
                 <p className="text-[11px] text-gray-400 dark:text-v2-muted">{selectedLocation.lat.toFixed(4)}, {selectedLocation.lng.toFixed(4)}</p>
+                <p className="text-[11px] text-gray-500 dark:text-v2-muted mt-1">
+                  {selectedLocation.geometry
+                    ? "Satellite analysis will use the returned boundary."
+                    : "No boundary available; satellite analysis will use a point-based area."}
+                </p>
               </div>
             )}
 
@@ -527,7 +574,9 @@ export function GeoWitnessPanel() {
                   <div>
                     <div className="flex items-center gap-2 mb-1">
                       <p className="text-[11px] text-gray-400 dark:text-v2-muted">Detailed Analysis</p>
-                      <Badge variant="outline" className="text-[10px]">Model-generated text</Badge>
+                      <Badge variant="outline" className="text-[10px]">
+                        {results.fieldProvenance?.fullAnalysis?.origin === "model_generated" ? "Model-generated text" : "Unavailable"}
+                      </Badge>
                     </div>
                     <div className="text-[13px] leading-relaxed bg-gray-50 dark:bg-surface-2 p-3 rounded-lg text-gray-700 dark:text-v2-secondary">{results.fullAnalysis}</div>
                   </div>
@@ -537,7 +586,9 @@ export function GeoWitnessPanel() {
                   <div>
                     <div className="flex items-center gap-2 mb-2">
                       <p className="text-[11px] text-gray-400 dark:text-v2-muted font-medium">Recommendations</p>
-                      <Badge variant="outline" className="text-[10px]">Model-generated text</Badge>
+                      <Badge variant="outline" className="text-[10px]">
+                        {results.fieldProvenance?.recommendations?.origin === "model_generated" ? "Model-generated text" : "Unavailable"}
+                      </Badge>
                     </div>
                     <div className="space-y-2">
                       {results.recommendations.map((rec: any, idx: number) => (
@@ -551,14 +602,16 @@ export function GeoWitnessPanel() {
                 )}
 
                 <div className="flex flex-wrap gap-2">
-                  <ReportGenerator
-                    analysisData={results}
-                    eventType={results.isMultiEvent ? results.eventTypes?.join(", ") : eventType}
-                    region={region || selectedLocation?.name}
-                    lat={results?.coordinates?.lat}
-                    lng={results?.coordinates?.lng}
-                    onCaptureMap={() => mapCtx.captureSnapshot()}
-                  />
+                  <Suspense fallback={<span className="text-xs text-muted-foreground">Loading report tools...</span>}>
+                    <ReportGenerator
+                      analysisData={results}
+                      eventType={results.isMultiEvent ? results.eventTypes?.join(", ") : eventType}
+                      region={region || selectedLocation?.name}
+                      lat={results?.coordinates?.lat}
+                      lng={results?.coordinates?.lng}
+                      onCaptureMap={() => mapCtx.captureSnapshot()}
+                    />
+                  </Suspense>
                   <GISExportButton
                     features={[{
                       id: results.id || crypto.randomUUID(),
@@ -580,11 +633,15 @@ export function GeoWitnessPanel() {
         )}
 
         {tool === "compare" && (
-          <ComparisonMode onComparisonComplete={(result) => { if (result?.location) toast.success("Comparison analysis displayed"); }} />
+          <Suspense fallback={<div className="text-sm text-muted-foreground">Loading comparison tools...</div>}>
+            <ComparisonMode onComparisonComplete={(result) => { if (result?.location) toast.success("Comparison analysis displayed"); }} />
+          </Suspense>
         )}
 
         {tool === "timelapse" && (
-          <TimeLapseAnimation onFrameChange={() => {}} mapCenter={mapCtx.center} />
+          <Suspense fallback={<div className="text-sm text-muted-foreground">Loading time-lapse tools...</div>}>
+            <TimeLapseAnimation onFrameChange={() => {}} mapCenter={mapCtx.center} />
+          </Suspense>
         )}
 
         {tool === "import" && (

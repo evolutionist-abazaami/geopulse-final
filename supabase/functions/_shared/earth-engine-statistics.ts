@@ -4,6 +4,7 @@ import {
 } from "./analysis-constants.ts";
 import type { SpectralStatsResult } from "./sentinel-statistics.ts";
 import type { SpectralBandStats } from "./satellite-analysis.ts";
+import type { AoiBounds, AoiGeometry } from "./geojson.ts";
 
 export interface LandsatStatsSource {
   type: string;
@@ -70,6 +71,7 @@ interface EarthEngineClient {
     project?: string,
   ): void;
   Geometry: {
+    (geoJson: unknown): unknown;
     Rectangle(coordinates: number[], crs?: string, geodesic?: boolean): unknown;
   };
   Image: {
@@ -247,15 +249,19 @@ export async function fetchLandsatStatistics(
   from: Date,
   to: Date,
   source: LandsatStatsSource,
+  geometry?: AoiGeometry,
+  geometryBounds?: AoiBounds,
 ): Promise<SpectralStatsResult | null> {
   try {
     const ee = await initializeEarthEngine();
 
-    const west = lng - AOI_HALF_WIDTH_DEGREES;
-    const south = lat - AOI_HALF_WIDTH_DEGREES;
-    const east = lng + AOI_HALF_WIDTH_DEGREES;
-    const north = lat + AOI_HALF_WIDTH_DEGREES;
-    const region = ee.Geometry.Rectangle([west, south, east, north], "EPSG:4326", false);
+    const west = geometryBounds?.west ?? lng - AOI_HALF_WIDTH_DEGREES;
+    const south = geometryBounds?.south ?? lat - AOI_HALF_WIDTH_DEGREES;
+    const east = geometryBounds?.east ?? lng + AOI_HALF_WIDTH_DEGREES;
+    const north = geometryBounds?.north ?? lat + AOI_HALF_WIDTH_DEGREES;
+    const region = geometry
+      ? ee.Geometry(geometry)
+      : ee.Geometry.Rectangle([west, south, east, north], "EPSG:4326", false);
     const collection = source.collectionIds
       .map((id) => new ee.ImageCollection(id))
       .reduce((combined, next) => combined.merge(next))
@@ -263,7 +269,10 @@ export async function fetchLandsatStatistics(
       .filterBounds(region)
       .map(maskAndCalculateIndices(source));
     const composite = collection.median();
-    const metresPerPixel = (2 * AOI_HALF_WIDTH_DEGREES * 111_320) / STATISTICS_GRID_SIZE;
+    const centerLatitude = (south + north) / 2;
+    const widthMeters = (east - west) * 111_320 * Math.cos(centerLatitude * Math.PI / 180);
+    const heightMeters = (north - south) * 111_320;
+    const metresPerPixel = Math.max(widthMeters, heightMeters) / STATISTICS_GRID_SIZE;
     const reducerOptions = {
       geometry: region,
       scale: metresPerPixel,

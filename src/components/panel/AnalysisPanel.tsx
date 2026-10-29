@@ -20,24 +20,30 @@ export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const payload = data.result_payload || {};
+  const analysisMethod = payload.analysisMethod ?? payload.dataProvenance?.analysisMethod;
+  const isMeasuredField = (field: string) => {
+    const origin = payload.fieldProvenance?.[field]?.origin;
+    return origin === "measured"
+      || (!origin && ["measured", "real_sentinel_statistics"].includes(analysisMethod));
+  };
 
   const metrics: { label: string; formatted: string; sentiment: "negative" | "warning" | "positive" | "neutral" }[] = [];
-  if (typeof payload.changePercent === "number" || typeof payload.change_percent === "number") {
+  if (isMeasuredField("changePercent") && (typeof payload.changePercent === "number" || typeof payload.change_percent === "number")) {
     const val = payload.changePercent ?? payload.change_percent;
-    metrics.push({ label: "Change", formatted: `${Number(val).toFixed(1)}%`, sentiment: val > 25 ? "negative" : val > 10 ? "warning" : "positive" });
+    metrics.push({ label: "Measured change", formatted: `${Number(val).toFixed(1)}%`, sentiment: val > 25 ? "negative" : val > 10 ? "warning" : "positive" });
   }
-  if (typeof payload.confidenceLevel === "number") {
+  if (payload.confidenceLevelOrigin === "model_generated" && typeof payload.confidenceLevel === "number") {
     const val = payload.confidenceLevel;
     metrics.push({
-      label: payload.confidenceLevelOrigin === "model_generated" ? "Model-generated confidence" : "Confidence",
+      label: "Model-generated confidence",
       formatted: `${Math.round(val)}%`,
       sentiment: "neutral",
     });
   }
-  if (payload.area) {
-    metrics.push({ label: "Area", formatted: String(payload.area), sentiment: "neutral" });
+  if (isMeasuredField("area") && payload.area) {
+    metrics.push({ label: "AOI area", formatted: String(payload.area), sentiment: "neutral" });
   }
-  if (payload.severity) {
+  if (isMeasuredField("severity") && payload.severity) {
     metrics.push({ label: "Severity", formatted: String(payload.severity), sentiment: payload.severity === "critical" || payload.severity === "high" ? "negative" : "neutral" });
   }
 
@@ -48,13 +54,22 @@ export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
     neutral: "text-gray-900 dark:text-v2-primary",
   };
 
-  const summary = payload.summary || payload.interpretation || payload.fullAnalysis;
-  // Only surface fullAnalysis here if it says something summary doesn't -
-  // for GeoSearch rows both fall back to the same `interpretation` text.
+  const summary = payload.fieldProvenance?.summary?.origin === "model_generated"
+    && typeof payload.summary === "string"
+    ? payload.summary
+    : null;
   const fullAnalysisText: string | undefined =
-    payload.fullAnalysis && payload.fullAnalysis !== summary ? payload.fullAnalysis : undefined;
-  const findings: string[] = Array.isArray(payload.findings) ? payload.findings : [];
-  const recommendations: string[] = Array.isArray(payload.recommendations)
+    payload.fieldProvenance?.fullAnalysis?.origin === "model_generated"
+      && typeof payload.fullAnalysis === "string"
+      && payload.fullAnalysis !== summary
+      ? payload.fullAnalysis
+      : undefined;
+  const findings: string[] = payload.fieldProvenance?.findings?.origin === "model_generated"
+    && Array.isArray(payload.findings)
+    ? payload.findings.filter((finding: unknown): finding is string => typeof finding === "string")
+    : [];
+  const recommendations: string[] = payload.fieldProvenance?.recommendations?.origin === "model_generated"
+    && Array.isArray(payload.recommendations)
     ? payload.recommendations.map(normalizeRecommendation)
     : [];
   const hasResponseContent = Boolean(fullAnalysisText) || findings.length > 0 || recommendations.length > 0;
@@ -94,12 +109,12 @@ export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
           <div className="rounded-md border border-brand-border bg-brand-dim/30 p-3">
             <div className="flex items-center gap-1.5 mb-2">
               <Sparkles className="w-3.5 h-3.5 text-brand" />
-              <span className="text-[11px] font-medium text-brand">AI interpretation</span>
+              <span className="text-[11px] font-medium text-brand">Model-generated summary</span>
             </div>
             {summary ? (
               <p className="text-[13px] text-gray-700 dark:text-v2-secondary leading-relaxed">{summary}</p>
             ) : (
-              <p className="text-[13px] text-gray-400 dark:text-v2-muted">No summary available for this analysis.</p>
+              <p className="text-[13px] text-gray-400 dark:text-v2-muted">No provenance-tagged summary is available for this analysis.</p>
             )}
           </div>
 
@@ -132,7 +147,7 @@ export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
         <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden scrollbar-thin p-3.5 space-y-4">
           {fullAnalysisText && (
             <div>
-              <p className="text-[11px] text-gray-400 dark:text-v2-muted mb-1.5">Detailed analysis</p>
+              <p className="text-[11px] text-gray-400 dark:text-v2-muted mb-1.5">Model-generated detailed analysis</p>
               <div className="text-[13px] leading-relaxed bg-gray-50 dark:bg-surface-2 border border-gray-200 dark:border-border-subtle p-3 rounded-lg text-gray-700 dark:text-v2-secondary">
                 {fullAnalysisText}
               </div>
@@ -142,7 +157,7 @@ export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
           {findings.length > 0 && (
             <div>
               <p className="text-[11px] font-medium text-gray-900 dark:text-v2-primary mb-2 flex items-center gap-1.5">
-                <ListChecks className="w-3.5 h-3.5 text-brand" /> Findings
+                <ListChecks className="w-3.5 h-3.5 text-brand" /> Model-generated findings
               </p>
               <div className="space-y-2">
                 {findings.map((f, i) => (
@@ -157,7 +172,7 @@ export function AnalysisPanel({ data }: { data: AnalysisHistoryRow }) {
 
           {recommendations.length > 0 && (
             <div>
-              <p className="text-[11px] font-medium text-gray-900 dark:text-v2-primary mb-2">Recommendations</p>
+              <p className="text-[11px] font-medium text-gray-900 dark:text-v2-primary mb-2">Model-generated recommendations</p>
               <div className="space-y-2">
                 {recommendations.map((rec, i) => (
                   <div key={i} className="flex items-start gap-2">

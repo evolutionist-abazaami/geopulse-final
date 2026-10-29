@@ -35,6 +35,12 @@ import {
 } from "../_shared/earth-engine-statistics.ts";
 import type { LandsatStatsSource } from "../_shared/earth-engine-statistics.ts";
 import type { SpectralStatsResult } from "../_shared/sentinel-statistics.ts";
+import {
+  getAoiAreaKm2,
+  getAoiBounds,
+  validateAoiGeometry,
+} from "../_shared/geojson.ts";
+import type { AoiBounds, AoiGeometry } from "../_shared/geojson.ts";
 import { groqChatCompletion } from "../_shared/groq-client.ts";
 import {
   buildDeterministicSummary,
@@ -159,11 +165,17 @@ function getAnalysisSensorInfo(
   lng: number | null,
   sources: (LandsatStatsSource | null | undefined)[] = [],
   historicalAnalysis = false,
+  geometryBounds: AoiBounds | null = null,
 ) {
-  const widthMeters = lat === null
+  const widthMeters = geometryBounds
+    ? (geometryBounds.east - geometryBounds.west) * 111_320
+      * Math.cos(((geometryBounds.north + geometryBounds.south) / 2) * Math.PI / 180)
+    : lat === null
     ? null
     : 2 * AOI_HALF_WIDTH_DEGREES * 111_320 * Math.cos((lat * Math.PI) / 180);
-  const heightMeters = 2 * AOI_HALF_WIDTH_DEGREES * 111_320;
+  const heightMeters = geometryBounds
+    ? (geometryBounds.north - geometryBounds.south) * 111_320
+    : 2 * AOI_HALF_WIDTH_DEGREES * 111_320;
   const metresPerCell = widthMeters === null
     ? null
     : { x: widthMeters / STATISTICS_GRID_SIZE, y: heightMeters / STATISTICS_GRID_SIZE };
@@ -187,7 +199,8 @@ function getAnalysisSensorInfo(
     statistics_grid: `${STATISTICS_GRID_SIZE}x${STATISTICS_GRID_SIZE}`,
     metres_per_cell: metresPerCell,
     native_band_resolutions_m: bandResolutions,
-    aoi_half_width_degrees: AOI_HALF_WIDTH_DEGREES,
+    aoi_half_width_degrees: geometryBounds ? null : AOI_HALF_WIDTH_DEGREES,
+    aoi_bounds: geometryBounds,
     center: lat !== null && lng !== null ? { lat, lng } : null,
     processing_level: resolvedSources.length || historicalAnalysis ? "Collection 2 Level-2" : "Level-2A",
   };
@@ -224,6 +237,8 @@ function buildFallbackAnalysis(params: {
   providerStatus: number;
   providerMessage: string;
   historicalAnalysis?: boolean;
+  geometryBounds?: AoiBounds | null;
+  geometry?: AoiGeometry | null;
 }) {
   const {
     eventTypes,
@@ -235,6 +250,8 @@ function buildFallbackAnalysis(params: {
     providerStatus,
     providerMessage,
     historicalAnalysis = false,
+    geometryBounds = null,
+    geometry = null,
   } = params;
 
   const result = {
@@ -257,7 +274,16 @@ function buildFallbackAnalysis(params: {
     dataSources: [],
     cloudCoverage: null,
     dataQuality: null,
-    sensorInfo: getAnalysisSensorInfo(coordinates?.lat ?? null, coordinates?.lng ?? null, [], historicalAnalysis),
+    sensorInfo: getAnalysisSensorInfo(
+      coordinates?.lat ?? null,
+      coordinates?.lng ?? null,
+      [],
+      historicalAnalysis,
+      geometryBounds,
+    ),
+    areaOfInterest: geometry
+      ? { geometryType: geometry.type, bounds: geometryBounds, areaKm2: getAoiAreaKm2(geometry) }
+      : { geometryType: "point-buffer", bounds: null, areaKm2: null },
     spectralIndices: null,
     classificationResults: null,
     classificationType: null,
@@ -414,7 +440,17 @@ serve(async (req) => {
     const region = validateString(body.region, 'region', 200);
     const startDate = validateDate(body.startDate, 'startDate');
     const endDate = validateDate(body.endDate, 'endDate');
-    const coordinates = validateCoordinates(body.coordinates);
+    const suppliedCoordinates = validateCoordinates(body.coordinates);
+    const geometry: AoiGeometry | null = body.geometry === undefined || body.geometry === null
+      ? null
+      : validateAoiGeometry(body.geometry);
+    const geometryBounds = geometry ? getAoiBounds(geometry) : null;
+    const coordinates = suppliedCoordinates ?? (geometryBounds
+      ? {
+        lat: (geometryBounds.south + geometryBounds.north) / 2,
+        lng: (geometryBounds.west + geometryBounds.east) / 2,
+      }
+      : null);
     const classificationType = ENABLE_UNVERIFIED_MODEL_FEATURES
       ? validateClassificationType(body.classificationType)
       : null;
@@ -470,10 +506,19 @@ serve(async (req) => {
         source: LandsatStatsSource | null | undefined,
       ) => historicalAnalysis
         ? source
-          ? fetchLandsatStatistics(coordinates.lat, coordinates.lng, from, to, source)
+          ? fetchLandsatStatistics(coordinates.lat, coordinates.lng, from, to, source, geometry ?? undefined, geometryBounds ?? undefined)
           : Promise.resolve(null)
         : satelliteToken
-          ? fetchSpectralStatistics(satelliteToken, coordinates.lat, coordinates.lng, from, to)
+          ? fetchSpectralStatistics(
+            satelliteToken,
+            coordinates.lat,
+            coordinates.lng,
+            from,
+            to,
+            fetch,
+            geometry ?? undefined,
+            geometryBounds ?? undefined,
+          )
           : Promise.resolve(null);
       if (canFetchStatistics) {
         fallbackReason = "SENTINEL_API_ERROR";
@@ -507,7 +552,7 @@ serve(async (req) => {
             && beforeStats.validPixelRatio > MIN_VALID_PIXEL_RATIO
             && afterStats.validPixelRatio > MIN_VALID_PIXEL_RATIO) {
             realStats = { before: beforeStats, after: afterStats };
-            if (!historicalAnalysis && satelliteToken) {
+            if (!historicalAnalysis && satelliteToken && !geometry) {
               const [beforeSceneCount, afterSceneCount] = await Promise.all([
                 fetchSentinelSceneCount(satelliteToken, coordinates.lat, coordinates.lng, studyStart, beforeTo),
                 fetchSentinelSceneCount(satelliteToken, coordinates.lat, coordinates.lng, afterFrom, studyEnd),
@@ -621,9 +666,13 @@ serve(async (req) => {
 
     let realAreaKm2: number | null = null;
     if (realStats && coordinates) {
-      const widthMeters = 2 * AOI_HALF_WIDTH_DEGREES * 111_320 * Math.cos((coordinates.lat * Math.PI) / 180);
-      const heightMeters = 2 * AOI_HALF_WIDTH_DEGREES * 111_320;
-      realAreaKm2 = Math.round((widthMeters * heightMeters / 1_000_000) * 100) / 100;
+      if (geometry) {
+        realAreaKm2 = Math.round(getAoiAreaKm2(geometry) * 100) / 100;
+      } else {
+        const widthMeters = 2 * AOI_HALF_WIDTH_DEGREES * 111_320 * Math.cos((coordinates.lat * Math.PI) / 180);
+        const heightMeters = 2 * AOI_HALF_WIDTH_DEGREES * 111_320;
+        realAreaKm2 = Math.round((widthMeters * heightMeters / 1_000_000) * 100) / 100;
+      }
     }
 
     const requestParams = {
@@ -729,6 +778,8 @@ serve(async (req) => {
           providerStatus: status,
           providerMessage: lastErrorText || "Groq is temporarily overloaded. Please try again in a minute.",
           historicalAnalysis: new Date(startDate) < SENTINEL_2_START_DATE,
+          geometryBounds,
+          geometry,
         });
 
         return new Response(
@@ -965,7 +1016,16 @@ serve(async (req) => {
             windowLengthDays: realWindowLengthDays,
           }
         : null,
-      sensorInfo: getAnalysisSensorInfo(coordinates?.lat ?? null, coordinates?.lng ?? null, statsSources, historicalAnalysis),
+      sensorInfo: getAnalysisSensorInfo(
+        coordinates?.lat ?? null,
+        coordinates?.lng ?? null,
+        statsSources,
+        historicalAnalysis,
+        geometryBounds,
+      ),
+      areaOfInterest: geometry
+        ? { geometryType: geometry.type, bounds: geometryBounds, areaKm2: realAreaKm2 }
+        : { geometryType: "point-buffer", bounds: null, areaKm2: realAreaKm2 },
       classificationResults: null,
       classificationType,
       changeDetection: null,

@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import type { BoundaryGeometry } from "@/types/geospatial";
+import { MAP_STYLE_URL, TERRAIN_TILE_URL } from "@/utils/mapConfig";
+import { reverseLookup } from "@/utils/locationSearch";
 
 export interface MapLibreMapHandle {
   /** Snapshot of exactly what's on screen right now (real OSM tiles + markers/polygons), as a PNG data URL. */
@@ -63,6 +66,7 @@ interface MapLibreMapProps {
   onLocationSelect?: (location: { lat: number; lng: number; name: string }) => void;
   selectionMode?: boolean;
   selectedArea?: { lat: number; lng: number; radius?: number } | null;
+  selectedBoundary?: BoundaryGeometry | null;
   is3DEnabled?: boolean;
   activeHeatmapLayer?: HeatmapLayerType;
   showFullscreenControl?: boolean;
@@ -79,6 +83,7 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
   onLocationSelect,
   selectionMode = false,
   selectedArea = null,
+  selectedBoundary = null,
   is3DEnabled = false,
   activeHeatmapLayer = "none",
   showFullscreenControl = false,
@@ -99,22 +104,14 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
 
   // Reverse geocode to get location name
   const reverseGeocode = async (lat: number, lng: number): Promise<string> => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12_000);
     try {
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=10`,
-        {
-          headers: {
-            "Accept-Language": "en",
-            "User-Agent": "GeoPulse Environmental Analysis App",
-          },
-        }
-      );
-      if (response.ok) {
-        const data = await response.json();
-        return data.display_name?.split(",").slice(0, 3).join(", ") || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-      }
+      return await reverseLookup(lat, lng, controller.signal);
     } catch (error) {
       console.error("Reverse geocode error:", error);
+    } finally {
+      clearTimeout(timeoutId);
     }
     return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
   };
@@ -125,33 +122,14 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
 
     const map = new maplibregl.Map({
       container: mapRef.current,
-      style: {
-        version: 8,
-        sources: {
-          osm: {
-            type: "raster",
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-            tileSize: 256,
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-          },
-        },
-        layers: [
-          {
-            id: "osm-tiles",
-            type: "raster",
-            source: "osm",
-            minzoom: 0,
-            maxzoom: 19,
-          },
-        ],
-      },
+      style: MAP_STYLE_URL,
       center: [center[1], center[0]], // MapLibre uses [lng, lat]
       zoom: zoom,
       pitch: 0,
       bearing: 0,
       maxPitch: 85,
       interactive: true,
-      preserveDrawingBuffer: true, // required so getCanvas().toDataURL() works for report snapshots
+      canvasContextAttributes: { preserveDrawingBuffer: true },
     });
 
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
@@ -207,34 +185,25 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
     const map = mapInstanceRef.current;
     if (!map || !mapLoaded) return;
 
-    const enable3D = async () => {
+    const enable3D = () => {
       try {
         // Add terrain sources if not present
         if (!map.getSource("terrainSource")) {
           map.addSource("terrainSource", {
             type: "raster-dem",
-            tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+            tiles: [TERRAIN_TILE_URL],
             encoding: "terrarium",
             tileSize: 256,
             maxzoom: 14, // Limit max zoom to avoid DEM range errors
+            attribution: "Elevation tiles: AWS Open Data Registry / Terrarium",
           });
         }
-        if (!map.getSource("hillshadeSource")) {
-          map.addSource("hillshadeSource", {
-            type: "raster-dem",
-            tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
-            encoding: "terrarium",
-            tileSize: 256,
-            maxzoom: 14,
-          });
-        }
-        
         // Add hillshade layer if not present
         if (!map.getLayer("hillshade")) {
           map.addLayer({
             id: "hillshade",
             type: "hillshade",
-            source: "hillshadeSource",
+            source: "terrainSource",
             paint: {
               "hillshade-shadow-color": "#473B24",
               "hillshade-illumination-anchor": "viewport",
@@ -243,16 +212,7 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
           });
         }
         
-        // Wait for terrain tiles to load before enabling
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // Enable terrain with error handling
-        try {
-          map.setTerrain({ source: "terrainSource", exaggeration: 1.5 });
-        } catch (terrainError) {
-          console.warn("Terrain setup failed, continuing without 3D:", terrainError);
-          return;
-        }
+        map.setTerrain({ source: "terrainSource", exaggeration: 1.5 });
         
         map.easeTo({
           pitch: 60,
@@ -297,30 +257,11 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
     if (!map) return;
     
     try {
-      // Temporarily disable terrain during navigation to avoid DEM range errors
-      const hadTerrain = !!map.getTerrain();
-      if (hadTerrain) {
-        map.setTerrain(null);
-      }
-      
       map.easeTo({
         center: [center[1], center[0]],
         zoom: zoom,
         duration: 500,
       });
-      
-      // Re-enable terrain after navigation completes
-      if (hadTerrain && is3DEnabled) {
-        setTimeout(() => {
-          try {
-            if (map.getSource("terrainSource")) {
-              map.setTerrain({ source: "terrainSource", exaggeration: 1.5 });
-            }
-          } catch (e) {
-            console.warn("Could not re-enable terrain:", e);
-          }
-        }, 600);
-      }
     } catch (error) {
       console.warn("Error updating map center:", error);
     }
@@ -407,35 +348,33 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
       try {
         const el = document.createElement("div");
         el.className = "custom-marker";
-        el.innerHTML = `
-          <div style="
-            background: linear-gradient(135deg, ${marker.color || "#0891b2"}, ${marker.color || "#0891b2"}dd);
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            border: 3px solid white;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-          ">
-            <div style="
-              width: 8px;
-              height: 8px;
-              background: white;
-              border-radius: 50%;
-            "></div>
-          </div>
-        `;
+        const dot = document.createElement("div");
+        dot.style.cssText = [
+          `background:${marker.color || "#0891b2"}`,
+          "width:28px",
+          "height:28px",
+          "border-radius:50%",
+          "border:3px solid white",
+          "box-shadow:0 4px 12px rgba(0,0,0,0.3)",
+          "display:flex",
+          "align-items:center",
+          "justify-content:center",
+        ].join(";");
+        const centerDot = document.createElement("span");
+        centerDot.style.cssText = "width:8px;height:8px;background:white;border-radius:50%";
+        dot.appendChild(centerDot);
+        el.appendChild(dot);
 
-        const popup = new maplibregl.Popup({ offset: 25 }).setHTML(`
-          <div style="padding: 8px;">
-            <strong style="font-size: 14px;">${marker.label}</strong>
-            <p style="margin: 4px 0 0; font-size: 12px; color: #666;">
-              ${marker.lat.toFixed(4)}, ${marker.lng.toFixed(4)}
-            </p>
-          </div>
-        `);
+        const popupContent = document.createElement("div");
+        popupContent.style.padding = "8px";
+        const label = document.createElement("strong");
+        label.style.fontSize = "14px";
+        label.textContent = marker.label;
+        const coordinates = document.createElement("p");
+        coordinates.style.cssText = "margin:4px 0 0;font-size:12px;color:#666";
+        coordinates.textContent = `${marker.lat.toFixed(4)}, ${marker.lng.toFixed(4)}`;
+        popupContent.append(label, coordinates);
+        const popup = new maplibregl.Popup({ offset: 25 }).setDOMContent(popupContent);
 
         const mapMarker = new maplibregl.Marker(el)
           .setLngLat([marker.lng, marker.lat])
@@ -449,7 +388,7 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
     });
 
     // Fit bounds if markers exist - with DEM-safe handling
-    if (markers.length > 0 && markers.length < 10) {
+    if (markers.length > 1 && markers.length < 10) {
       try {
         // Temporarily disable terrain during fitBounds to avoid DEM range errors
         const hadTerrain = !!map.getTerrain();
@@ -578,89 +517,93 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
     }
   }, [selectedArea, mapLoaded]);
 
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !mapLoaded) return;
+
+    const sourceId = "selected-boundary-source";
+    const boundaryFeature = selectedBoundary
+      ? {
+        type: "Feature" as const,
+        properties: {},
+        geometry: selectedBoundary,
+      }
+      : null;
+    const data = {
+      type: "FeatureCollection" as const,
+      features: boundaryFeature ? [boundaryFeature] : [],
+    };
+
+    const source = map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
+    if (source) {
+      source.setData(data);
+    } else {
+      map.addSource(sourceId, { type: "geojson", data });
+      map.addLayer({
+        id: "selected-boundary-fill",
+        type: "fill",
+        source: sourceId,
+        paint: { "fill-color": "#0891b2", "fill-opacity": 0.14 },
+      });
+      map.addLayer({
+        id: "selected-boundary-outline",
+        type: "line",
+        source: sourceId,
+        paint: { "line-color": "#0891b2", "line-width": 2.5, "line-opacity": 0.95 },
+      });
+    }
+  }, [selectedBoundary, mapLoaded]);
+
   // Update polygons
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || !mapLoaded) return;
 
     try {
-      // Remove existing polygon layers
-      for (let i = 0; i < 20; i++) {
-        if (map.getLayer(`polygon-${i}`)) {
-          map.removeLayer(`polygon-${i}`);
-        }
-        if (map.getLayer(`polygon-outline-${i}`)) {
-          map.removeLayer(`polygon-outline-${i}`);
-        }
-        if (map.getSource(`polygon-source-${i}`)) {
-          map.removeSource(`polygon-source-${i}`);
-        }
+      const sourceId = "drawn-polygons-source";
+      const features = polygons
+        .filter((polygon) => polygon.coordinates.length >= 3)
+        .map((polygon) => {
+          const ring = polygon.coordinates.map(([lng, lat]) => [lng, lat] as [number, number]);
+          const first = ring[0];
+          const last = ring[ring.length - 1];
+          if (first[0] !== last[0] || first[1] !== last[1]) ring.push(first);
+          return {
+            type: "Feature" as const,
+            properties: {
+              color: polygon.color || "#0891b2",
+              fillOpacity: polygon.fillOpacity ?? 0.3,
+              label: polygon.label,
+            },
+            geometry: { type: "Polygon" as const, coordinates: [ring] },
+          };
+        });
+      const data = { type: "FeatureCollection" as const, features };
+      const source = map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
+      if (source) {
+        source.setData(data);
+        return;
       }
 
-      if (polygons.length === 0) return;
-
-      console.log("Adding polygons:", polygons);
-
-      // Add new polygons
-      polygons.forEach((polygon, index) => {
-        if (!polygon.coordinates || polygon.coordinates.length < 3) {
-          console.warn(`Polygon ${index} has insufficient coordinates`);
-          return;
-        }
-
-        // Coordinates should already be in [lng, lat] format for MapLibre GeoJSON
-        const coordinates = polygon.coordinates.map(coord => {
-          // coord is [lng, lat] - use as is
-          return [coord[0], coord[1]] as [number, number];
-        });
-
-        console.log(`Polygon ${index} coordinates:`, coordinates);
-        
-        map.addSource(`polygon-source-${index}`, {
-          type: "geojson",
-          data: {
-            type: "Feature",
-            properties: { label: polygon.label },
-            geometry: {
-              type: "Polygon",
-              coordinates: [coordinates],
-            },
-          },
-        });
-
-        map.addLayer({
-          id: `polygon-${index}`,
-          type: "fill",
-          source: `polygon-source-${index}`,
-          paint: {
-            "fill-color": polygon.color || "#0891b2",
-            "fill-opacity": polygon.fillOpacity || 0.3,
-          },
-        });
-
-        map.addLayer({
-          id: `polygon-outline-${index}`,
-          type: "line",
-          source: `polygon-source-${index}`,
-          paint: {
-            "line-color": polygon.color || "#0891b2",
-            "line-width": 3,
-            "line-dasharray": [2, 1],
-          },
-        });
-
-        // Add label popup at center
-        const centerLng = coordinates.reduce((sum, c) => sum + c[0], 0) / coordinates.length;
-        const centerLat = coordinates.reduce((sum, c) => sum + c[1], 0) / coordinates.length;
-        
-        const popup = new maplibregl.Popup({
-          closeButton: false,
-          closeOnClick: false,
-          className: "polygon-label-popup",
-        })
-          .setLngLat([centerLng, centerLat])
-          .setHTML(`<div style="padding: 4px 8px; font-weight: bold; font-size: 12px;">${polygon.label}</div>`)
-          .addTo(map);
+      map.addSource(sourceId, { type: "geojson", data });
+      map.addLayer({
+        id: "drawn-polygons-fill",
+        type: "fill",
+        source: sourceId,
+        paint: {
+          "fill-color": ["get", "color"],
+          "fill-opacity": ["get", "fillOpacity"],
+        },
+      });
+      map.addLayer({
+        id: "drawn-polygons-outline",
+        type: "line",
+        source: sourceId,
+        paint: {
+          "line-color": ["get", "color"],
+          "line-width": 2,
+          "line-dasharray": [2, 1],
+        },
       });
     } catch (error) {
       console.error("Error updating polygons:", error);
@@ -740,6 +683,10 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
           color: hsl(var(--card-foreground));
           border-radius: 8px;
           box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        .custom-marker {
+          width: 28px;
+          height: 28px;
         }
       `}</style>
     </div>

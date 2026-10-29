@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import maplibregl from "maplibre-gl";
 import type { HeatmapLayerType, MapLibreMapHandle } from "@/components/MapLibreMap";
+import type { BoundaryGeometry } from "@/types/geospatial";
 
 export interface RegionBounds {
   north: number;
@@ -45,6 +46,8 @@ interface MapContextValue {
   setSelectionMode: (v: boolean) => void;
   selectedArea: { lat: number; lng: number; radius?: number } | null;
   setSelectedArea: (v: { lat: number; lng: number; radius?: number } | null) => void;
+  selectedBoundary: BoundaryGeometry | null;
+  setSelectedBoundary: (geometry: BoundaryGeometry | null) => void;
 
   onLocationSelect: LocationSelectHandler | undefined;
   setOnLocationSelect: (fn: LocationSelectHandler | undefined) => void;
@@ -55,15 +58,12 @@ interface MapContextValue {
   setActiveHeatmapLayer: (v: HeatmapLayerType) => void;
 
   flyToBounds: (bounds: RegionBounds, options?: maplibregl.FitBoundsOptions) => void;
-  highlightRegion: (bounds: RegionBounds | null) => void;
 }
 
 const MapContext = createContext<MapContextValue | null>(null);
 
 const DEFAULT_CENTER: [number, number] = [5.5, 20.0];
 const DEFAULT_ZOOM = 4;
-
-const SELECTED_REGION_SOURCE = "selected-region";
 
 export function MapProvider({ children }: { children: ReactNode }) {
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -76,6 +76,7 @@ export function MapProvider({ children }: { children: ReactNode }) {
   const [polygons, setPolygons] = useState<MapPolygon[]>([]);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedArea, setSelectedArea] = useState<{ lat: number; lng: number; radius?: number } | null>(null);
+  const [selectedBoundary, setSelectedBoundary] = useState<BoundaryGeometry | null>(null);
   const [onLocationSelect, setOnLocationSelectState] = useState<LocationSelectHandler | undefined>(undefined);
   const [is3DEnabled, setIs3DEnabled] = useState(false);
   const [activeHeatmapLayer, setActiveHeatmapLayer] = useState<HeatmapLayerType>("none");
@@ -93,31 +94,10 @@ export function MapProvider({ children }: { children: ReactNode }) {
     setOnLocationSelectState(() => fn);
   }, []);
 
-  const ensureRegionLayers = useCallback((map: maplibregl.Map) => {
-    if (map.getSource(SELECTED_REGION_SOURCE)) return;
-    map.addSource(SELECTED_REGION_SOURCE, {
-      type: "geojson",
-      data: { type: "FeatureCollection", features: [] },
-    });
-    map.addLayer({
-      id: "selected-region-fill",
-      type: "fill",
-      source: SELECTED_REGION_SOURCE,
-      paint: { "fill-color": "#3b82f6", "fill-opacity": 0.08 },
-    });
-    map.addLayer({
-      id: "selected-region-outline",
-      type: "line",
-      source: SELECTED_REGION_SOURCE,
-      paint: { "line-color": "#3b82f6", "line-width": 1.5, "line-opacity": 0.8, "line-dasharray": [4, 3] },
-    });
-  }, []);
-
   const registerMap = useCallback((map: maplibregl.Map) => {
     mapRef.current = map;
-    ensureRegionLayers(map);
     setMapReady(true);
-  }, [ensureRegionLayers]);
+  }, []);
 
   const registerMapHandle = useCallback((handle: MapLibreMapHandle | null) => {
     mapHandleRef.current = handle;
@@ -134,32 +114,10 @@ export function MapProvider({ children }: { children: ReactNode }) {
       [[bounds.west, bounds.south], [bounds.east, bounds.north]],
       { padding: 60, duration: 800, ...options }
     );
-  }, []);
-
-  const highlightRegion = useCallback((bounds: RegionBounds | null) => {
-    const map = mapRef.current;
-    if (!map) return;
-    const source = map.getSource(SELECTED_REGION_SOURCE) as maplibregl.GeoJSONSource | undefined;
-    if (!source) return;
-
-    if (!bounds) {
-      source.setData({ type: "FeatureCollection", features: [] });
-      return;
-    }
-
-    source.setData({
-      type: "Feature",
-      geometry: {
-        type: "Polygon",
-        coordinates: [[
-          [bounds.west, bounds.south],
-          [bounds.east, bounds.south],
-          [bounds.east, bounds.north],
-          [bounds.west, bounds.north],
-          [bounds.west, bounds.south],
-        ]],
-      },
-      properties: {},
+    map.once("moveend", () => {
+      const currentCenter = map.getCenter();
+      setCenter([currentCenter.lat, currentCenter.lng]);
+      setZoom(map.getZoom());
     });
   }, []);
 
@@ -180,6 +138,8 @@ export function MapProvider({ children }: { children: ReactNode }) {
     setSelectionMode,
     selectedArea,
     setSelectedArea,
+    selectedBoundary,
+    setSelectedBoundary,
     onLocationSelect,
     setOnLocationSelect,
     is3DEnabled,
@@ -187,11 +147,10 @@ export function MapProvider({ children }: { children: ReactNode }) {
     activeHeatmapLayer,
     setActiveHeatmapLayer,
     flyToBounds,
-    highlightRegion,
   }), [
     mapReady, registerMap, registerMapHandle, captureSnapshot, center, zoom, setView, markers, polygons,
-    selectionMode, selectedArea, onLocationSelect, is3DEnabled, activeHeatmapLayer,
-    flyToBounds, highlightRegion,
+    selectionMode, selectedArea, selectedBoundary, onLocationSelect, setOnLocationSelect, is3DEnabled,
+    activeHeatmapLayer, flyToBounds,
   ]);
 
   return <MapContext.Provider value={value}>{children}</MapContext.Provider>;

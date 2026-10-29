@@ -7,30 +7,37 @@ import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import jsPDF from "jspdf";
 
-interface ComparisonReportGeneratorProps {
-  comparisonResult: {
-    location: string;
-    eventType: string;
-    period1: {
-      range: string;
-      changePercent: number;
-      area: string;
-      summary: string;
-    };
-    period2: {
-      range: string;
-      changePercent: number;
-      area: string;
-      summary: string;
-    };
-    comparison: {
-      trend: string;
-      difference: string;
-      insight: string;
-    };
-    chartData?: any[];
+export interface ComparisonResult {
+  location: string;
+  eventType: string;
+  period1: {
+    range: string;
+    changePercent: number;
+    area: string;
+    sensor: string;
   };
+  period2: {
+    range: string;
+    changePercent: number;
+    area: string;
+    sensor: string;
+  };
+  comparison: {
+    trend: "higher" | "lower" | "similar";
+    difference: string;
+    insight: string;
+  };
+  chartData: { name: string; before: number; after: number }[];
 }
+
+interface ComparisonReportGeneratorProps {
+  comparisonResult: ComparisonResult;
+}
+
+const formatRequestedCategory = (eventType: string): string =>
+  eventType
+    ? eventType.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+    : "Unavailable";
 
 const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGeneratorProps) => {
   const [isGenerating, setIsGenerating] = useState(false);
@@ -38,48 +45,6 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
-
-  const getEventTypeInfo = (type: string) => {
-    const types: Record<string, { label: string; icon: string; category: string }> = {
-      deforestation: { label: "Deforestation Analysis", icon: "🌳", category: "Land Cover Change" },
-      vegetation_loss: { label: "Vegetation Loss Analysis", icon: "🍃", category: "Land Cover Change" },
-      flood: { label: "Flood Impact Assessment", icon: "🌊", category: "Natural Disaster" },
-      drought: { label: "Drought Conditions Analysis", icon: "🏜️", category: "Climate Impact" },
-      urbanization: { label: "Urban Expansion Analysis", icon: "🏙️", category: "Land Use Change" },
-      wildfire: { label: "Wildfire Damage Assessment", icon: "🔥", category: "Natural Disaster" },
-    };
-    return types[type?.toLowerCase()] || { label: type || "Environmental Analysis", icon: "📊", category: "Comparative Assessment" };
-  };
-
-  const getRiskLevel = (changePercent: number): { level: string; color: [number, number, number]; bgColor: [number, number, number]; description: string } => {
-    const absChange = Math.abs(changePercent);
-    if (absChange >= 25) return { level: "CRITICAL", color: [220, 38, 38], bgColor: [254, 226, 226], description: "Immediate intervention required" };
-    if (absChange >= 15) return { level: "HIGH", color: [234, 88, 12], bgColor: [255, 237, 213], description: "Urgent attention recommended" };
-    if (absChange >= 8) return { level: "MODERATE", color: [202, 138, 4], bgColor: [254, 249, 195], description: "Monitoring and assessment needed" };
-    if (absChange >= 3) return { level: "LOW", color: [22, 163, 74], bgColor: [220, 252, 231], description: "Within acceptable parameters" };
-    return { level: "MINIMAL", color: [59, 130, 246], bgColor: [219, 234, 254], description: "No significant concern" };
-  };
-
-  const getTrendAnalysis = (trend: string, difference: string, p1: number, p2: number): { status: string; color: [number, number, number]; interpretation: string } => {
-    if (trend === "increasing") {
-      return {
-        status: "ESCALATING",
-        color: [220, 38, 38],
-        interpretation: `Environmental impact has increased by ${difference}% between the two periods, indicating deteriorating conditions that require attention.`
-      };
-    } else if (trend === "decreasing") {
-      return {
-        status: "IMPROVING",
-        color: [22, 163, 74],
-        interpretation: `Environmental impact has decreased by ${difference}% between the two periods, suggesting recovery or successful intervention measures.`
-      };
-    }
-    return {
-      status: "STABLE",
-      color: [59, 130, 246],
-      interpretation: `Environmental conditions have remained relatively stable between the two periods with minimal change detected.`
-    };
-  };
 
   const generateComparisonPDF = async () => {
     if (!comparisonResult) {
@@ -106,15 +71,17 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
 
       const reportDate = new Date();
       const reportId = `GP-CMP-${reportDate.getFullYear()}${String(reportDate.getMonth() + 1).padStart(2, '0')}${String(reportDate.getDate()).padStart(2, '0')}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-      const eventInfo = getEventTypeInfo(comparisonResult.eventType);
-      const period1Risk = getRiskLevel(comparisonResult.period1.changePercent);
-      const period2Risk = getRiskLevel(comparisonResult.period2.changePercent);
-      const trendAnalysis = getTrendAnalysis(
-        comparisonResult.comparison.trend,
-        comparisonResult.comparison.difference,
-        comparisonResult.period1.changePercent,
-        comparisonResult.period2.changePercent
-      );
+      const periodDifference = comparisonResult.period2.changePercent - comparisonResult.period1.changePercent;
+      if (!Number.isFinite(comparisonResult.period1.changePercent) || !Number.isFinite(comparisonResult.period2.changePercent)) {
+        toast.error("The comparison report requires finite measured NDVI values for both periods.");
+        return;
+      }
+      const difference = Math.abs(periodDifference).toFixed(1);
+      const trendLabel = periodDifference > 0 ? "higher" : periodDifference < 0 ? "lower" : "equal";
+      const requestedCategory = formatRequestedCategory(comparisonResult.eventType);
+      const comparisonPhrase = trendLabel === "equal"
+        ? "equal to period 1"
+        : `${trendLabel} than period 1`;
 
       // Helper functions
       const addWrappedText = (text: string, x: number, y: number, maxWidth: number, lineHeight: number = 4.5): number => {
@@ -164,7 +131,7 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       
       pdf.setFontSize(10);
       pdf.setFont("helvetica", "normal");
-      pdf.text("Environmental Intelligence Platform", margin, 42);
+      pdf.text("Satellite Measurement Report", margin, 42);
 
       // Report type badge
       pdf.setFillColor(255, 255, 255);
@@ -186,13 +153,13 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       pdf.setTextColor(17, 24, 39);
       pdf.setFontSize(18);
       pdf.setFont("helvetica", "bold");
-      pdf.text("Before & After Environmental Analysis", margin, yPos);
+      pdf.text("Before & After NDVI Change Comparison", margin, yPos);
       yPos += 8;
 
       pdf.setFontSize(11);
       pdf.setTextColor(107, 114, 128);
       pdf.setFont("helvetica", "normal");
-      const eventLabel = pdf.splitTextToSize(`${eventInfo.label} • ${eventInfo.category}`, contentWidth)[0];
+      const eventLabel = pdf.splitTextToSize(`Requested category: ${requestedCategory}`, contentWidth)[0];
       pdf.text(eventLabel, margin, yPos);
       yPos += 15;
 
@@ -220,21 +187,21 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
 
       yPos += 28;
 
-      // Trend Status Banner
-      pdf.setFillColor(trendAnalysis.color[0], trendAnalysis.color[1], trendAnalysis.color[2]);
+      // The banner reports direction only; NDVI change is not an event-risk rating.
+      pdf.setFillColor(8, 145, 178);
       pdf.roundedRect(margin, yPos, contentWidth, 18, 3, 3, "F");
       
       pdf.setTextColor(255, 255, 255);
       pdf.setFontSize(8);
       pdf.setFont("helvetica", "bold");
-      pdf.text("TREND STATUS", margin + 6, yPos + 7);
+      pdf.text("MEASURED NDVI CHANGE", margin + 6, yPos + 7);
       
       pdf.setFontSize(12);
-      pdf.text(trendAnalysis.status, margin + 45, yPos + 7);
+      pdf.text(`PERIOD 2 ${trendLabel.toUpperCase()}`, margin + 52, yPos + 7);
       
       pdf.setFontSize(8);
       pdf.setFont("helvetica", "normal");
-      pdf.text(`${comparisonResult.comparison.difference}% change between periods`, margin + 6, yPos + 14);
+      pdf.text(`${difference} percentage-point difference`, margin + 6, yPos + 14);
 
       yPos += 25;
 
@@ -243,10 +210,10 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       const boxHeight = 48;
 
       // Period 1 Box (Before)
-      pdf.setFillColor(period1Risk.bgColor[0], period1Risk.bgColor[1], period1Risk.bgColor[2]);
+      pdf.setFillColor(243, 244, 246);
       pdf.roundedRect(margin, yPos, boxWidth, boxHeight, 3, 3, "F");
       
-      pdf.setFillColor(period1Risk.color[0], period1Risk.color[1], period1Risk.color[2]);
+      pdf.setFillColor(8, 145, 178);
       pdf.roundedRect(margin, yPos, boxWidth, 10, 3, 3, "F");
       pdf.rect(margin, yPos + 5, boxWidth, 5, "F");
       
@@ -255,7 +222,7 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       pdf.setFont("helvetica", "bold");
       pdf.text("PERIOD 1 • BEFORE", margin + 4, yPos + 7);
 
-      pdf.setTextColor(period1Risk.color[0], period1Risk.color[1], period1Risk.color[2]);
+      pdf.setTextColor(17, 24, 39);
       pdf.setFontSize(8);
       pdf.setFont("helvetica", "normal");
       const period1Range = pdf.splitTextToSize(comparisonResult.period1.range, boxWidth - 8)[0];
@@ -267,13 +234,13 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
 
       pdf.setFontSize(8);
       pdf.setFont("helvetica", "normal");
-      pdf.text(`Risk: ${period1Risk.level}`, margin + 4, yPos + 43);
+      pdf.text(`Sensor: ${comparisonResult.period1.sensor}`, margin + 4, yPos + 43);
 
       // Period 2 Box (After)
-      pdf.setFillColor(period2Risk.bgColor[0], period2Risk.bgColor[1], period2Risk.bgColor[2]);
+      pdf.setFillColor(243, 244, 246);
       pdf.roundedRect(margin + boxWidth + 6, yPos, boxWidth, boxHeight, 3, 3, "F");
       
-      pdf.setFillColor(period2Risk.color[0], period2Risk.color[1], period2Risk.color[2]);
+      pdf.setFillColor(8, 145, 178);
       pdf.roundedRect(margin + boxWidth + 6, yPos, boxWidth, 10, 3, 3, "F");
       pdf.rect(margin + boxWidth + 6, yPos + 5, boxWidth, 5, "F");
       
@@ -282,7 +249,7 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       pdf.setFont("helvetica", "bold");
       pdf.text("PERIOD 2 • AFTER", margin + boxWidth + 10, yPos + 7);
 
-      pdf.setTextColor(period2Risk.color[0], period2Risk.color[1], period2Risk.color[2]);
+      pdf.setTextColor(17, 24, 39);
       pdf.setFontSize(8);
       pdf.setFont("helvetica", "normal");
       const period2Range = pdf.splitTextToSize(comparisonResult.period2.range, boxWidth - 8)[0];
@@ -294,7 +261,7 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
 
       pdf.setFontSize(8);
       pdf.setFont("helvetica", "normal");
-      pdf.text(`Risk: ${period2Risk.level}`, margin + boxWidth + 10, yPos + 43);
+      pdf.text(`Sensor: ${comparisonResult.period2.sensor}`, margin + boxWidth + 10, yPos + 43);
 
       yPos += boxHeight + 10;
 
@@ -315,32 +282,32 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       pdf.setFontSize(9);
       pdf.setTextColor(55, 65, 81);
       
-      const executiveSummary = 
-        `This comparative analysis examines ${eventInfo.label.toLowerCase()} at ${comparisonResult.location}. ` +
-        `Period 1 (${comparisonResult.period1.range}) measured ${comparisonResult.period1.changePercent.toFixed(1)}%. ` +
-        `Period 2 (${comparisonResult.period2.range}) changed to ${comparisonResult.period2.changePercent.toFixed(1)}%, a ${comparisonResult.comparison.difference}% ${comparisonResult.comparison.trend === "increasing" ? "increase" : comparisonResult.comparison.trend === "decreasing" ? "decrease" : "variation"}. ` +
-        `Overall trend: ${trendAnalysis.status}.`;
+      const executiveSummary =
+        `This report compares measured NDVI change at ${comparisonResult.location}. ` +
+        `Period 1 (${comparisonResult.period1.range}): ${comparisonResult.period1.changePercent.toFixed(1)}%. ` +
+        `Period 2 (${comparisonResult.period2.range}): ${comparisonResult.period2.changePercent.toFixed(1)}%. ` +
+        `The period 2 value is ${comparisonPhrase}, with an absolute difference of ${difference} percentage points. ` +
+        `The requested category (${requestedCategory}) is not validated by these measurements.`;
       
       yPos = addWrappedText(executiveSummary, margin, yPos, contentWidth, 4.5);
       yPos += 12;
 
       // Comparative Insight
-      yPos = addSectionTitle("TREND INTERPRETATION", yPos);
+      yPos = addSectionTitle("MEASURED COMPARISON", yPos);
       
       pdf.setFillColor(249, 250, 251);
       pdf.roundedRect(margin, yPos - 2, contentWidth, 22, 3, 3, "F");
       
       pdf.setTextColor(55, 65, 81);
       pdf.setFontSize(9);
-      yPos = addWrappedText(trendAnalysis.interpretation, margin + 4, yPos + 4, contentWidth - 8, 4.5);
-      yPos += 8;
-
-      pdf.setTextColor(107, 114, 128);
-      pdf.setFontSize(8);
-      pdf.setFont("helvetica", "italic");
-      const insightText = pdf.splitTextToSize(comparisonResult.comparison.insight, contentWidth - 8);
-      pdf.text(insightText.slice(0, 2), margin + 4, yPos);
-      yPos += (Math.min(insightText.length, 2) * 4) + 10;
+      yPos = addWrappedText(
+        `Period 2 is ${comparisonPhrase}; the absolute difference is ${difference} percentage points.`,
+        margin + 4,
+        yPos + 4,
+        contentWidth - 8,
+        4.5
+      );
+      yPos += 12;
 
       // Detailed Period Analysis
       yPos = addSectionTitle("PERIOD 1 ANALYSIS (BEFORE)", yPos);
@@ -349,9 +316,9 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       pdf.setFontSize(9);
       pdf.setTextColor(55, 65, 81);
       
-      const period1Summary = comparisonResult.period1.summary || 
-        `During ${comparisonResult.period1.range}, satellite analysis detected ${comparisonResult.period1.changePercent.toFixed(1)}% change. ` +
-        `Area: ${comparisonResult.period1.area || "designated region"}. Baseline for comparison.`;
+      const period1Summary =
+        `Measured NDVI change: ${comparisonResult.period1.changePercent.toFixed(1)}%. ` +
+        `Sensor: ${comparisonResult.period1.sensor}.`;
       
       yPos = addWrappedText(period1Summary, margin, yPos, contentWidth, 4.5);
       yPos += 10;
@@ -359,9 +326,9 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       checkPageBreak(40);
       yPos = addSectionTitle("PERIOD 2 ANALYSIS (AFTER)", yPos);
       
-      const period2Summary = comparisonResult.period2.summary || 
-        `During ${comparisonResult.period2.range}, satellite analysis detected ${comparisonResult.period2.changePercent.toFixed(1)}% change. ` +
-        `Area: ${comparisonResult.period2.area || "designated region"}. Trend: ${comparisonResult.comparison.trend}.`;
+      const period2Summary =
+        `Measured NDVI change: ${comparisonResult.period2.changePercent.toFixed(1)}%. ` +
+        `Sensor: ${comparisonResult.period2.sensor}.`;
       
       yPos = addWrappedText(period2Summary, margin, yPos, contentWidth, 4.5);
       yPos += 12;
@@ -371,26 +338,9 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       yPos = addSectionTitle("KEY FINDINGS", yPos);
 
       const findings = [
-        {
-          type: "CHANGE",
-          detail: `Absolute change: ${comparisonResult.comparison.difference}% (${parseFloat(comparisonResult.comparison.difference) > 10 ? "significant" : "moderate"} variation).`
-        },
-        {
-          type: "TREND",
-          detail: `Impact is ${comparisonResult.comparison.trend}. Period 2 shows ${comparisonResult.comparison.trend === "increasing" ? "higher" : comparisonResult.comparison.trend === "decreasing" ? "lower" : "similar"} levels.`
-        },
-        {
-          type: "RISK",
-          detail: `Period 1: ${period1Risk.level}. Period 2: ${period2Risk.level}.`
-        },
-        {
-          type: "ACTION",
-          detail: comparisonResult.comparison.trend === "decreasing" 
-            ? "Positive trend - continue current measures."
-            : comparisonResult.comparison.trend === "increasing"
-            ? "Escalating - intervention needed."
-            : "Stable - maintain current approach."
-        }
+        { type: "PERIOD 1", detail: `${comparisonResult.period1.changePercent.toFixed(1)}% measured NDVI change (${comparisonResult.period1.range}); sensor: ${comparisonResult.period1.sensor}.` },
+        { type: "PERIOD 2", detail: `${comparisonResult.period2.changePercent.toFixed(1)}% measured NDVI change (${comparisonResult.period2.range}); sensor: ${comparisonResult.period2.sensor}.` },
+        { type: "DIFFERENCE", detail: `${difference} percentage points; period 2 is ${comparisonPhrase}.` },
       ];
 
       findings.forEach((finding, index) => {
@@ -420,7 +370,7 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
         yPos += 18;
       });
 
-      // ============= PAGE 3 - RECOMMENDATIONS =============
+      // ============= PAGE 3 - LIMITATIONS =============
       pdf.addPage();
       yPos = margin;
       
@@ -430,58 +380,22 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       pdf.text(`Page ${pdf.getNumberOfPages()}`, pageWidth - margin - 12, 10);
       yPos = 20;
 
-      yPos = addSectionTitle("RECOMMENDATIONS", yPos);
-
-      const recommendations = comparisonResult.comparison.trend === "increasing" ? [
-        { priority: "HIGH", action: "Implement monitoring protocols", timeline: "2 weeks" },
-        { priority: "HIGH", action: "Ground-truth verification", timeline: "1 month" },
-        { priority: "MEDIUM", action: "Develop intervention strategy", timeline: "2 months" },
-        { priority: "LOW", action: "Follow-up comparative analysis", timeline: "Quarterly" }
-      ] : comparisonResult.comparison.trend === "decreasing" ? [
-        { priority: "MEDIUM", action: "Document successful strategies", timeline: "1 month" },
-        { priority: "MEDIUM", action: "Continue current practices", timeline: "Ongoing" },
-        { priority: "LOW", action: "Analyze contributing factors", timeline: "2 months" },
-        { priority: "LOW", action: "Plan sustainability assessment", timeline: "6 months" }
-      ] : [
-        { priority: "MEDIUM", action: "Maintain monitoring frequency", timeline: "Ongoing" },
-        { priority: "LOW", action: "Review management protocols", timeline: "3 months" },
-        { priority: "LOW", action: "Periodic assessments", timeline: "Semi-annually" }
+      yPos = addSectionTitle("INTERPRETATION LIMITS", yPos);
+      const limitations = [
+        "NDVI change is a vegetation-index metric and is not, by itself, proof of deforestation or another selected event.",
+        "A higher or lower percentage is a numerical comparison, not a severity, risk, or recovery classification.",
+        "Values from different sensors may not be directly comparable. The sensor used for each period is listed below.",
+        "Satellite measurements are area aggregates; they do not identify exact affected pixels or establish cause.",
       ];
-
-      recommendations.forEach((rec, index) => {
+      limitations.forEach((limitation) => {
         checkPageBreak(18);
-        
-        const priorityColors: Record<string, [number, number, number]> = {
-          "HIGH": [220, 38, 38],
-          "MEDIUM": [234, 179, 8],
-          "LOW": [59, 130, 246]
-        };
-        
-        pdf.setFillColor(249, 250, 251);
-        pdf.roundedRect(margin, yPos - 2, contentWidth, 14, 2, 2, "F");
-        
-        pdf.setFillColor(...priorityColors[rec.priority]);
-        pdf.roundedRect(margin + 3, yPos, 20, 5, 1, 1, "F");
-        pdf.setTextColor(255, 255, 255);
-        pdf.setFontSize(6);
-        pdf.setFont("helvetica", "bold");
-        pdf.text(rec.priority, margin + 5, yPos + 3.5);
-        
-        pdf.setTextColor(17, 24, 39);
-        pdf.setFontSize(8);
-        pdf.setFont("helvetica", "bold");
-        const actionText = pdf.splitTextToSize(rec.action, contentWidth - 70)[0];
-        pdf.text(actionText, margin + 28, yPos + 3.5);
-        
-        pdf.setTextColor(107, 114, 128);
-        pdf.setFontSize(7);
         pdf.setFont("helvetica", "normal");
-        pdf.text(rec.timeline, margin + 28, yPos + 9);
-        
-        yPos += 16;
+        pdf.setFontSize(9);
+        pdf.setTextColor(55, 65, 81);
+        yPos = addWrappedText(`• ${limitation}`, margin, yPos, contentWidth, 4.5);
+        yPos += 5;
       });
-
-      yPos += 8;
+      yPos += 5;
 
       // Data Sources
       checkPageBreak(45);
@@ -491,17 +405,17 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       pdf.setFontSize(8);
       pdf.setTextColor(75, 85, 99);
       
-      const methodology = 
-        "Comparative analysis uses multi-spectral satellite imagery with advanced change detection. " +
-        "Environmental indicators derived from NDVI, NDWI, and thermal analysis. AI-powered pattern recognition with 85%+ confidence.";
+      const methodology =
+        "The comparison subtracts the period 1 NDVI change percentage from the period 2 value. " +
+        "The difference is expressed in percentage points. No event attribution, thermal analysis, risk rating, or confidence score is inferred by this report.";
       
       yPos = addWrappedText(methodology, margin, yPos, contentWidth, 4);
       yPos += 8;
 
       const sources = [
-        "• Sentinel-2 Multi-Spectral Imagery",
-        "• MODIS Terra/Aqua Products",
-        "• GeoPulse AI Engine v2.0"
+        `• Period 1 sensor: ${comparisonResult.period1.sensor}`,
+        `• Period 2 sensor: ${comparisonResult.period2.sensor}`,
+        "• Analysis metric: satellite-derived NDVI change",
       ];
 
       sources.forEach(source => {
@@ -518,11 +432,11 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
       pdf.setTextColor(255, 255, 255);
       pdf.setFontSize(7);
       pdf.setFont("helvetica", "normal");
-      pdf.text("GeoPulse Environmental Intelligence Platform", margin, pageHeight - 9);
+      pdf.text("GeoPulse — satellite measurement comparison", margin, pageHeight - 9);
       pdf.text(`Generated: ${reportDate.toISOString().split('T')[0]}`, margin, pageHeight - 5);
       
       pdf.setFont("helvetica", "bold");
-      pdf.text("www.geopulse.ai", pageWidth - margin - 28, pageHeight - 7);
+      pdf.text("GeoPulse", pageWidth - margin - 16, pageHeight - 7);
 
       // Save PDF
       const filename = `GeoPulse_Comparison_${comparisonResult.location.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 20)}_${reportDate.toISOString().split("T")[0]}.pdf`;
@@ -550,8 +464,7 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
         return;
       }
 
-      const eventInfo = getEventTypeInfo(comparisonResult.eventType);
-      const title = `${eventInfo.label} - ${comparisonResult.location}`;
+      const title = `NDVI measurement comparison - ${comparisonResult.location}`;
 
       const { data, error } = await supabase
         .from("shared_reports")
@@ -560,7 +473,14 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
           title,
           location_name: comparisonResult.location,
           event_type: comparisonResult.eventType,
-          report_data: comparisonResult,
+          report_data: {
+            location: comparisonResult.location,
+            eventType: comparisonResult.eventType,
+            period1: { ...comparisonResult.period1 },
+            period2: { ...comparisonResult.period2 },
+            comparison: { ...comparisonResult.comparison },
+            chartData: comparisonResult.chartData.map((item) => ({ ...item })),
+          },
           created_by: session.user.id,
         })
         .select("share_id")
@@ -632,7 +552,7 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
               Share Comparison Report
             </DialogTitle>
             <DialogDescription>
-              Generate a public link to share this comparison analysis with stakeholders.
+              Generate a public link to share these measured NDVI values.
             </DialogDescription>
           </DialogHeader>
 
@@ -645,7 +565,7 @@ const ComparisonReportGenerator = ({ comparisonResult }: ComparisonReportGenerat
                 <div className="bg-muted rounded-lg p-4 mb-4">
                   <p className="font-semibold">{comparisonResult.location}</p>
                   <p className="text-sm text-muted-foreground">
-                    {getEventTypeInfo(comparisonResult.eventType).label}
+                    Requested category: {formatRequestedCategory(comparisonResult.eventType)}
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
                     {comparisonResult.period1.range} vs {comparisonResult.period2.range}

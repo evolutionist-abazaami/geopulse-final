@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import LocationSearch from "./LocationSearch";
 import { TrendChart } from "./charts/TrendChart";
+import type { GeocodedPlace } from "@/types/geospatial";
 
 interface TimeLapseAnimationProps {
   onFrameChange?: (frame: TimeFrame) => void;
@@ -17,10 +18,15 @@ interface TimeLapseAnimationProps {
 interface TimeFrame {
   date: string;
   label: string;
-  value: number;
-  data?: any;
-  /** True when `value` is a locally-generated placeholder, not a real measurement. */
-  isSimulated?: boolean;
+  value: number | null;
+  data?: AnalysisResult;
+}
+
+interface AnalysisResult extends Record<string, unknown> {
+  fallback?: boolean;
+  analysisMethod?: string;
+  fallbackReason?: string;
+  changePercent?: number | null;
 }
 
 const eventTypes = [
@@ -30,11 +36,39 @@ const eventTypes = [
   { value: "urbanization", label: "Urbanization", icon: "🏙️" },
 ];
 
-const isFallbackAnalysis = (data: any) => Boolean(data?.fallback || data?.fallbackReason === "SERVICE_UNAVAILABLE");
+function isAnalysisResult(value: unknown): value is AnalysisResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  return (result.fallback === undefined || typeof result.fallback === "boolean")
+    && (result.analysisMethod === undefined || typeof result.analysisMethod === "string")
+    && (result.fallbackReason === undefined || typeof result.fallbackReason === "string")
+    && (result.changePercent === undefined || result.changePercent === null || typeof result.changePercent === "number");
+}
+
+const isFallbackAnalysis = (data: AnalysisResult) => Boolean(
+  data?.fallback || data?.analysisMethod !== "measured" || data?.fallbackReason === "SERVICE_UNAVAILABLE",
+);
+
+async function mapWithConcurrency<T, R>(
+  values: T[],
+  concurrency: number,
+  worker: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (nextIndex < values.length) {
+      const index = nextIndex++;
+      results[index] = await worker(values[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 const TimeLapseAnimation = ({ onFrameChange, mapCenter }: TimeLapseAnimationProps) => {
   const [eventType, setEventType] = useState("deforestation");
-  const [selectedLocation, setSelectedLocation] = useState<{ lat: number; lng: number; name: string } | null>(null);
+  const [selectedLocation, setSelectedLocation] = useState<GeocodedPlace | null>(null);
   const [startYear, setStartYear] = useState(2018);
   const [endYear, setEndYear] = useState(2024);
   const [frames, setFrames] = useState<TimeFrame[]>([]);
@@ -50,7 +84,7 @@ const TimeLapseAnimation = ({ onFrameChange, mapCenter }: TimeLapseAnimationProp
       newFrames.push({
         date: `${year}-01-01`,
         label: year.toString(),
-        value: 0,
+        value: null,
       });
     }
     return newFrames;
@@ -59,6 +93,14 @@ const TimeLapseAnimation = ({ onFrameChange, mapCenter }: TimeLapseAnimationProp
   const loadTimelapseData = async () => {
     if (!selectedLocation) {
       toast.error("Please select a location first");
+      return;
+    }
+    if (endYear < startYear) {
+      toast.error("The end year must be the same as or later than the start year.");
+      return;
+    }
+    if (endYear - startYear >= 10) {
+      toast.error("Select a range of no more than 10 years to limit analysis requests.");
       return;
     }
 
@@ -70,10 +112,8 @@ const TimeLapseAnimation = ({ onFrameChange, mapCenter }: TimeLapseAnimationProp
       const { data: { session } } = await supabase.auth.getSession();
       const authToken = session?.access_token || (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "").trim();
 
-      const frameRequests = generateTimeFrames().map(async (frame, index) => {
-        // Stagger requests to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, index * 200));
-        
+      const sourceFrames = generateTimeFrames();
+      const loadedFrames = await mapWithConcurrency(sourceFrames, 2, async (frame) => {
         const endDate = `${parseInt(frame.label)}-12-31`;
         
         try {
@@ -89,45 +129,36 @@ const TimeLapseAnimation = ({ onFrameChange, mapCenter }: TimeLapseAnimationProp
               startDate: frame.date,
               endDate,
               coordinates: { lat: selectedLocation.lat, lng: selectedLocation.lng },
+              geometry: selectedLocation.geometry,
             }),
           });
 
           if (response.ok) {
-            const data = await response.json();
-            if (isFallbackAnalysis(data)) {
-              return {
-                ...frame,
-                value: 0,
-                data,
-              };
-            }
-            if (typeof data.changePercent === "number") {
-              return {
-                ...frame,
-                value: data.changePercent,
-                data,
-              };
-            }
+            const payload: unknown = await response.json();
+            if (!isAnalysisResult(payload)) throw new Error("Analysis service returned an invalid response.");
+            const data = payload;
+            return {
+              ...frame,
+              value: !isFallbackAnalysis(data) && typeof data.changePercent === "number"
+                ? data.changePercent
+                : null,
+              data,
+            };
+          } else {
+            console.error(`Time-lapse frame ${frame.label} failed with status ${response.status}.`);
           }
         } catch (error) {
           console.error(`Error loading frame ${frame.label}:`, error);
         }
 
-        // No real measurement available for this frame - placeholder value,
-        // not a result. Marked isSimulated so the UI doesn't present it as real.
-        return {
-          ...frame,
-          value: Math.random() * 60 + 20,
-          isSimulated: true,
-        };
+        return { ...frame, value: null };
       });
 
-      const loadedFrames = await Promise.all(frameRequests);
       setFrames(loadedFrames);
       setCurrentFrameIndex(0);
-      const simulatedCount = loadedFrames.filter((f) => f.isSimulated).length;
-      if (simulatedCount > 0) {
-        toast.warning(`Loaded ${loadedFrames.length} time frames - ${simulatedCount} could not be measured and are simulated placeholders.`);
+      const unavailableCount = loadedFrames.filter((frame) => frame.value === null).length;
+      if (unavailableCount > 0) {
+        toast.warning(`${loadedFrames.length - unavailableCount} of ${loadedFrames.length} time frames had measurements. Unavailable frames are left blank.`);
       } else {
         toast.success(`Loaded ${loadedFrames.length} time frames`);
       }
@@ -230,6 +261,7 @@ const TimeLapseAnimation = ({ onFrameChange, mapCenter }: TimeLapseAnimationProp
           <label className="text-sm font-medium mb-2 block">Location</label>
           <LocationSearch
             onLocationSelect={(loc) => setSelectedLocation(loc)}
+            onInputChange={() => setSelectedLocation(null)}
             placeholder="Search location..."
             defaultValue={selectedLocation?.name}
           />
@@ -314,13 +346,13 @@ const TimeLapseAnimation = ({ onFrameChange, mapCenter }: TimeLapseAnimationProp
           </div>
 
           {currentFrame && (
-            <div className={currentFrame.isSimulated ? "p-3 rounded-lg bg-warning-dim border border-warning/30" : "p-3 rounded-lg bg-muted/50"}>
+            <div className={currentFrame.value === null ? "p-3 rounded-lg bg-warning-dim border border-warning/30" : "p-3 rounded-lg bg-muted/50"}>
               <p className="text-sm">
-                <span className="font-medium">{eventType}</span>: {currentFrame.value.toFixed(1)}% change {currentFrame.isSimulated ? "(simulated placeholder)" : "detected"}
+                <span className="font-medium">{eventType}</span>: {currentFrame.value === null ? "No measured value available" : `${currentFrame.value.toFixed(1)}% measured NDVI change`}
               </p>
-              {currentFrame.isSimulated && (
+              {currentFrame.value === null && (
                 <p className="text-[11px] text-muted-foreground mt-1">
-                  No real measurement available for {currentFrame.label} - this value isn't from satellite imagery.
+                  No valid satellite measurement was returned for {currentFrame.label}.
                 </p>
               )}
             </div>

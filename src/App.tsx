@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -9,16 +9,17 @@ import { supabase } from "@/integrations/supabase/client";
 import { MapProvider } from "@/contexts/MapContext";
 import { RightPanelProvider } from "@/contexts/RightPanelContext";
 import { AppShell } from "@/layouts/AppShell";
-import DemoRecorder from "./components/DemoRecorder";
-import Home from "./pages/Home";
-import MapView from "./pages/MapView";
-import ReportsPage from "./pages/ReportsPage";
-import SettingsPage from "./pages/SettingsPage";
-import EarlyWarningPage from "./pages/EarlyWarningPage";
-import Auth from "./pages/Auth";
-import ResetPassword from "./pages/ResetPassword";
-import SharedReport from "./pages/SharedReport";
-import NotFound from "./pages/NotFound";
+
+const DemoRecorder = lazy(() => import("./components/DemoRecorder"));
+const Home = lazy(() => import("./pages/Home"));
+const MapView = lazy(() => import("./pages/MapView"));
+const ReportsPage = lazy(() => import("./pages/ReportsPage"));
+const SettingsPage = lazy(() => import("./pages/SettingsPage"));
+const EarlyWarningPage = lazy(() => import("./pages/EarlyWarningPage"));
+const Auth = lazy(() => import("./pages/Auth"));
+const ResetPassword = lazy(() => import("./pages/ResetPassword"));
+const SharedReport = lazy(() => import("./pages/SharedReport"));
+const NotFound = lazy(() => import("./pages/NotFound"));
 
 const queryClient = new QueryClient();
 
@@ -66,29 +67,33 @@ const App = () => (
       <BrowserRouter>
         <MapProvider>
           <RightPanelProvider>
-            <Routes>
-              {/* Public routes - no shell */}
-              <Route path="/shared/:shareId" element={<SharedReport />} />
-              <Route path="/auth" element={<Auth />} />
-              <Route path="/reset-password" element={<ResetPassword />} />
+            <Suspense fallback={
+              <div className="h-screen flex items-center justify-center bg-background">
+                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              </div>
+            }>
+              <Routes>
+                {/* Public routes - no shell */}
+                <Route path="/shared/:shareId" element={<SharedReport />} />
+                <Route path="/auth" element={<Auth />} />
+                <Route path="/reset-password" element={<ResetPassword />} />
 
-              {/* Map-centric shell */}
-              <Route path="/" element={<RootRoute />} />
-              <Route path="/reports" element={<AppShell><ReportsPage /></AppShell>} />
-              <Route path="/settings" element={<AppShell><SettingsPage /></AppShell>} />
-              <Route path="/early-warning" element={<AppShell><EarlyWarningPage /></AppShell>} />
+                {/* Map-centric shell */}
+                <Route path="/" element={<RootRoute />} />
+                <Route path="/reports" element={<AppShell><ReportsPage /></AppShell>} />
+                <Route path="/settings" element={<AppShell><SettingsPage /></AppShell>} />
+                <Route path="/early-warning" element={<AppShell><EarlyWarningPage /></AppShell>} />
 
-              {/* Retired routes - redirect so bookmarks don't 404 */}
-              <Route path="/dashboard" element={<Navigate to="/" replace />} />
-              <Route path="/analytics" element={<Navigate to="/" replace />} />
-              <Route path="/geowitness" element={<Navigate to="/" replace />} />
-              <Route path="/geosearch" element={<Navigate to="/" replace />} />
+                {/* Retired routes - redirect so bookmarks don't 404 */}
+                <Route path="/dashboard" element={<Navigate to="/" replace />} />
+                <Route path="/analytics" element={<Navigate to="/" replace />} />
+                <Route path="/geowitness" element={<Navigate to="/" replace />} />
+                <Route path="/geosearch" element={<Navigate to="/" replace />} />
 
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-            {/* Internal sales/marketing screen-capture tool, not a monitoring
-                feature - opt-in only so real users don't see it. */}
-            {import.meta.env.VITE_ENABLE_DEMO_RECORDER === "true" && <DemoRecorder />}
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+              {import.meta.env.VITE_ENABLE_DEMO_RECORDER === "true" && <DemoRecorder />}
+            </Suspense>
           </RightPanelProvider>
         </MapProvider>
       </BrowserRouter>
