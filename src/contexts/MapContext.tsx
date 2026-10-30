@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useMemo, useRef, useState, type
 import maplibregl from "maplibre-gl";
 import type { HeatmapLayerType, MapLibreMapHandle } from "@/components/MapLibreMap";
 import type { BoundaryGeometry } from "@/types/geospatial";
-import type { ImportedGeoJSON } from "@/types/importedGeoJSON";
+import type { ImportedGeoJSON, ImportedRasterOverlay } from "@/types/importedGeoJSON";
 
 export interface RegionBounds {
   north: number;
@@ -45,6 +45,8 @@ interface MapContextValue {
   setPolygons: (polygons: MapPolygon[]) => void;
   importedGeoJSON: ImportedGeoJSON | null;
   setImportedGeoJSON: (geoJSON: ImportedGeoJSON | null) => void;
+  importedRaster: ImportedRasterOverlay | null;
+  setImportedRaster: (raster: ImportedRasterOverlay | null) => void;
 
   selectionMode: boolean;
   setSelectionMode: (v: boolean) => void;
@@ -79,6 +81,7 @@ export function MapProvider({ children }: { children: ReactNode }) {
   const [markers, setMarkers] = useState<MapMarker[]>([]);
   const [polygons, setPolygons] = useState<MapPolygon[]>([]);
   const [importedGeoJSON, setImportedGeoJSON] = useState<ImportedGeoJSON | null>(null);
+  const [importedRaster, setImportedRaster] = useState<ImportedRasterOverlay | null>(null);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedArea, setSelectedArea] = useState<{ lat: number; lng: number; radius?: number } | null>(null);
   const [selectedBoundary, setSelectedBoundary] = useState<BoundaryGeometry | null>(null);
@@ -146,6 +149,8 @@ export function MapProvider({ children }: { children: ReactNode }) {
     setPolygons,
     importedGeoJSON,
     setImportedGeoJSON,
+    importedRaster,
+    setImportedRaster,
     selectionMode,
     setSelectionMode,
     selectedArea,
@@ -160,7 +165,7 @@ export function MapProvider({ children }: { children: ReactNode }) {
     setActiveHeatmapLayer,
     flyToBounds,
   }), [
-    mapReady, registerMap, registerMapHandle, captureSnapshot, captureGeoTIFFFrame, center, zoom, setView, markers, polygons, importedGeoJSON,
+    mapReady, registerMap, registerMapHandle, captureSnapshot, captureGeoTIFFFrame, center, zoom, setView, markers, polygons, importedGeoJSON, importedRaster,
     selectionMode, selectedArea, selectedBoundary, onLocationSelect, setOnLocationSelect, is3DEnabled,
     activeHeatmapLayer, flyToBounds,
   ]);

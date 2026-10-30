@@ -1,57 +1,28 @@
 import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
-import { FileUp, MapPin, Loader2, CheckCircle2, AlertCircle, X, FileType } from "lucide-react";
+import { FileUp, MapPin, Loader2, CheckCircle2, X, FileType } from "lucide-react";
 import { toast } from "sonner";
 import {
+  extractKMLFromKMZ,
   extractShapefileArchive,
   parseShapefile,
   readFileAsArrayBuffer,
   ShapefileImportResult,
 } from "@/lib/shapefile-utils";
 import { AnalysisFeature } from "@/lib/gis-export";
-import type { ImportedGeoJSON } from "@/types/importedGeoJSON";
+import { parseCSVText, parseGeoJSONText, parseGeoTIFFFile, parseKMLText } from "@/lib/gis-import";
+import type { ImportedGeoJSON, ImportedRasterOverlay } from "@/types/importedGeoJSON";
 
 interface ShapefileImportProps {
   onImport: (
     features: AnalysisFeature[],
     bounds: ShapefileImportResult['bounds'],
-    geoJSON: ImportedGeoJSON
+    geoJSON: ImportedGeoJSON,
+    raster?: ImportedRasterOverlay
   ) => void;
-}
-
-type ImportedFeature = ImportedGeoJSON["features"][number];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isImportedFeature(value: unknown): value is ImportedFeature {
-  if (!isRecord(value) || value.type !== "Feature" || !isRecord(value.geometry)) return false;
-  const geometryType = value.geometry.type;
-  return (
-    typeof geometryType === "string" &&
-    ["Point", "MultiPoint", "LineString", "MultiLineString", "Polygon", "MultiPolygon"].includes(geometryType) &&
-    Array.isArray(value.geometry.coordinates)
-  );
-}
-
-function collectPositions(coordinates: unknown, positions: number[][]): void {
-  if (!Array.isArray(coordinates)) return;
-  if (
-    coordinates.length >= 2 &&
-    typeof coordinates[0] === "number" &&
-    typeof coordinates[1] === "number" &&
-    Number.isFinite(coordinates[0]) &&
-    Number.isFinite(coordinates[1])
-  ) {
-    positions.push([coordinates[0], coordinates[1]]);
-    return;
-  }
-  coordinates.forEach(coordinate => collectPositions(coordinate, positions));
 }
 
 const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
@@ -70,13 +41,18 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
         extension === 'shx' ||
         extension === 'prj' ||
         extension === 'zip' ||
+        extension === 'kmz' ||
         extension === 'geojson' ||
-        extension === 'json';
+        extension === 'json' ||
+        extension === 'kml' ||
+        extension === 'csv' ||
+        extension === 'tif' ||
+        extension === 'tiff';
     }
     );
     
     if (validFiles.length === 0) {
-      toast.error("Please select valid GIS files (.shp, .dbf, .geojson)");
+      toast.error("Please select a supported GIS file: Shapefile, GeoJSON, KML/KMZ, CSV, or GeoTIFF");
       return;
     }
     
@@ -97,8 +73,12 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
 
     try {
       const archiveFile = selectedFiles.find(file => /\.zip$/i.test(file.name));
+      const kmzFile = selectedFiles.find(file => /\.kmz$/i.test(file.name));
       const geoJsonFile = selectedFiles.find(f => /\.(geojson|json)$/i.test(f.name));
-      
+      const kmlFile = selectedFiles.find(file => /\.kml$/i.test(file.name));
+      const csvFile = selectedFiles.find(file => /\.csv$/i.test(file.name));
+      const tiffFile = selectedFiles.find(file => /\.tiff?$/i.test(file.name));
+
       if (archiveFile) {
         setProgress(30);
         const archive = extractShapefileArchive(await readFileAsArrayBuffer(archiveFile));
@@ -107,77 +87,51 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
         setProgress(100);
         setImportResult(result);
         toast.success(`Imported ${result.features.length} features from Shapefile archive`);
+      } else if (kmzFile) {
+        setProgress(30);
+        const kmlText = extractKMLFromKMZ(await readFileAsArrayBuffer(kmzFile));
+        const result = parseKMLText(kmlText);
+        setProgress(100);
+        setImportResult(result);
+        toast.success(`Imported ${result.features.length} features from KMZ`);
       } else if (geoJsonFile) {
         setProgress(30);
-        const text = await geoJsonFile.text();
-        const geoJSON: unknown = JSON.parse(text);
-        
-        setProgress(60);
-        const features: AnalysisFeature[] = [];
-        let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
-        
-        let candidateFeatures: unknown[];
-        if (isRecord(geoJSON) && geoJSON.type === "FeatureCollection" && Array.isArray(geoJSON.features)) {
-          candidateFeatures = geoJSON.features;
-        } else if (isImportedFeature(geoJSON)) {
-          candidateFeatures = [geoJSON];
-        } else {
-          throw new Error("GeoJSON must be a FeatureCollection or Feature");
-        }
-
-        const validGeoFeatures: ImportedGeoJSON["features"] = [];
-        const importedGeoJSON: ImportedGeoJSON = {
-          type: 'FeatureCollection',
-          features: validGeoFeatures,
-        };
-        candidateFeatures.forEach((candidate, index) => {
-          if (!isImportedFeature(candidate) || candidate.geometry.type === "GeometryCollection") return;
-          const positions: number[][] = [];
-          collectPositions(candidate.geometry.coordinates, positions);
-          if (positions.length === 0) return;
-          validGeoFeatures.push(candidate);
-
-          const lng = positions.reduce((sum, point) => sum + point[0], 0) / positions.length;
-          const lat = positions.reduce((sum, point) => sum + point[1], 0) / positions.length;
-          positions.forEach(([positionLng, positionLat]) => {
-            minLat = Math.min(minLat, positionLat);
-            maxLat = Math.max(maxLat, positionLat);
-            minLng = Math.min(minLng, positionLng);
-            maxLng = Math.max(maxLng, positionLng);
-          });
-
-          const props = candidate.properties ?? {};
-          const eventType = props.event_type ?? props.type;
-          const changePercent = Number(props.change_percent);
-          features.push({
-            id: `geo_${index}_${Date.now()}`,
-            name: String(props.name ?? props.NAME ?? `Feature ${index + 1}`),
-            coordinates: { lat, lng },
-            eventType: String(eventType ?? 'environmental_change'),
-            changePercent: Number.isFinite(changePercent) ? changePercent : undefined,
-            startDate: String(props.start_date ?? new Date().toISOString().split('T')[0]),
-            endDate: String(props.end_date ?? new Date().toISOString().split('T')[0]),
-            summary: props.summary === undefined && props.description === undefined
-              ? undefined
-              : String(props.summary ?? props.description),
-            areaAnalyzed: props.area === undefined ? undefined : String(props.area),
-            createdAt: new Date().toISOString(),
-          });
-        });
-
-        if (features.length === 0) {
-          throw new Error("No valid geometries were found in the selected file");
-        }
+        const result = parseGeoJSONText(await geoJsonFile.text());
         setProgress(100);
-        const result: ShapefileImportResult = {
-          features,
-          properties: validGeoFeatures.map(feature => feature.properties ?? {}),
-          geoJSON: importedGeoJSON,
-          bounds: { minLat, maxLat, minLng, maxLng },
-        };
-        
         setImportResult(result);
-        toast.success(`Imported ${features.length} features from GeoJSON`);
+        toast.success(`Imported ${result.features.length} features from GeoJSON`);
+      } else if (kmlFile) {
+        setProgress(30);
+        const result = parseKMLText(await kmlFile.text());
+        setProgress(100);
+        setImportResult(result);
+        toast.success(`Imported ${result.features.length} features from KML`);
+      } else if (csvFile) {
+        setProgress(30);
+        const result = parseCSVText(await csvFile.text());
+        setProgress(100);
+        setImportResult(result);
+        toast.success(`Imported ${result.features.length} features from CSV`);
+      } else if (tiffFile) {
+        setProgress(30);
+        const raster = await parseGeoTIFFFile(tiffFile);
+        const longitudes = raster.coordinates.map(([lng]) => lng);
+        const latitudes = raster.coordinates.map(([, lat]) => lat);
+        const result: ShapefileImportResult = {
+          features: [],
+          properties: [],
+          geoJSON: { type: "FeatureCollection", features: [] },
+          raster,
+          bounds: {
+            minLat: Math.min(...latitudes),
+            maxLat: Math.max(...latitudes),
+            minLng: Math.min(...longitudes),
+            maxLng: Math.max(...longitudes),
+          },
+        };
+        setProgress(100);
+        setImportResult(result);
+        toast.success(`Raster ready to display: ${raster.name}`);
       } else {
         // Process Shapefile
         const shpFile = selectedFiles.find(f => /\.shp$/i.test(f.name));
@@ -215,8 +169,8 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
 
   const confirmImport = () => {
     if (importResult) {
-      onImport(importResult.features, importResult.bounds, importResult.geoJSON);
-      toast.success("Features loaded to map");
+      onImport(importResult.features, importResult.bounds, importResult.geoJSON, importResult.raster);
+      toast.success(importResult.raster ? "Raster loaded to map" : "Features loaded to map");
       setSelectedFiles([]);
       setImportResult(null);
     }
@@ -237,7 +191,7 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
         ref={fileInputRef}
         type="file"
         multiple
-        accept=".shp,.dbf,.shx,.prj,.zip,.geojson,.json"
+        accept=".shp,.dbf,.shx,.prj,.zip,.geojson,.json,.kml,.kmz,.csv,.tif,.tiff"
         onChange={handleFileSelect}
         className="hidden"
       />
@@ -249,8 +203,8 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
           onClick={() => fileInputRef.current?.click()}
         >
           <FileUp className="h-6 w-6" />
-          <span className="text-sm">Select Shapefile, ZIP, or GeoJSON</span>
-          <span className="text-xs text-muted-foreground">.zip (recommended), .shp components, .geojson</span>
+          <span className="text-sm">Select GIS data</span>
+          <span className="text-xs text-muted-foreground">Shapefile ZIP, GeoJSON, KML/KMZ, CSV, GeoTIFF</span>
         </Button>
       ) : (
         <div className="space-y-3">
@@ -293,16 +247,23 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
               </div>
               <div className="grid grid-cols-2 gap-2 text-xs">
                 <div>
-                  <span className="text-muted-foreground">Features:</span>{" "}
-                  <span className="font-medium">{importResult.features.length}</span>
+                  <span className="text-muted-foreground">{importResult.raster ? "Layer:" : "Features:"}</span>{" "}
+                  <span className="font-medium">
+                    {importResult.raster ? "Raster overlay" : importResult.features.length}
+                  </span>
                 </div>
                 <div>
-                  <span className="text-muted-foreground">Types:</span>{" "}
+                  <span className="text-muted-foreground">{importResult.raster ? "Format:" : "Types:"}</span>{" "}
                   <span className="font-medium">
-                    {[...new Set(importResult.features.map(f => f.eventType))].length}
+                    {importResult.raster
+                      ? "GeoTIFF"
+                      : [...new Set(importResult.features.map(f => f.eventType))].length}
                   </span>
                 </div>
               </div>
+              {importResult.raster && (
+                <p className="text-xs text-muted-foreground truncate">{importResult.raster.name}</p>
+              )}
               {importResult.features.slice(0, 3).map((f, i) => (
                 <div key={i} className="flex items-center gap-2 text-xs text-muted-foreground">
                   <MapPin className="h-3 w-3" />

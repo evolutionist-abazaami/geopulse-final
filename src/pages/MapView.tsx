@@ -28,6 +28,7 @@ export default function MapView() {
           markers={mapCtx.markers}
           polygons={mapCtx.polygons}
           importedGeoJSON={mapCtx.importedGeoJSON}
+          importedRaster={mapCtx.importedRaster}
           selectionMode={mapCtx.selectionMode}
           onLocationSelect={mapCtx.onLocationSelect}
           selectedArea={mapCtx.selectedArea}

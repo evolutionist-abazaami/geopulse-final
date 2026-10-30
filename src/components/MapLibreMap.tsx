@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from "re
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { BoundaryGeometry } from "@/types/geospatial";
-import type { ImportedGeoJSON } from "@/types/importedGeoJSON";
+import type { ImportedGeoJSON, ImportedRasterOverlay } from "@/types/importedGeoJSON";
 import { MAP_STYLE_URL, TERRAIN_TILE_URL } from "@/utils/mapConfig";
 import { reverseLookup } from "@/utils/locationSearch";
 
@@ -69,6 +69,7 @@ interface MapLibreMapProps {
   markers?: MapMarker[];
   polygons?: MapPolygon[];
   importedGeoJSON?: ImportedGeoJSON | null;
+  importedRaster?: ImportedRasterOverlay | null;
   onLocationSelect?: (location: { lat: number; lng: number; name: string }) => void;
   selectionMode?: boolean;
   selectedArea?: { lat: number; lng: number; radius?: number } | null;
@@ -87,6 +88,7 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
   markers = [],
   polygons = [],
   importedGeoJSON = null,
+  importedRaster = null,
   onLocationSelect,
   selectionMode = false,
   selectedArea = null,
@@ -616,6 +618,33 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
       console.error("Error updating polygons:", error);
     }
   }, [polygons, mapLoaded]);
+
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !mapLoaded) return;
+
+    const sourceId = "imported-raster-source";
+    const layerId = "imported-raster-layer";
+    if (map.getLayer(layerId)) map.removeLayer(layerId);
+    if (map.getSource(sourceId)) map.removeSource(sourceId);
+    if (!importedRaster) return;
+
+    try {
+      map.addSource(sourceId, {
+        type: "image",
+        url: importedRaster.imageDataUrl,
+        coordinates: importedRaster.coordinates,
+      });
+      map.addLayer({
+        id: layerId,
+        type: "raster",
+        source: sourceId,
+        paint: { "raster-opacity": 0.82 },
+      }, map.getLayer("imported-gis-fill") ? "imported-gis-fill" : undefined);
+    } catch (error) {
+      console.error("Error displaying imported GeoTIFF:", error);
+    }
+  }, [importedRaster, mapLoaded]);
 
   useEffect(() => {
     const map = mapInstanceRef.current;

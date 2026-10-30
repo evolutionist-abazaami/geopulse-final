@@ -57,14 +57,22 @@ not a completed sentence-by-sentence manuscript audit.
 
 ## GIS import and export
 
-The map's Import GIS Data tool accepts a zipped Shapefile (one `.shp` per
-archive), individual Shapefile components, and GeoJSON. Include the matching
-`.dbf` and `.prj` files with the `.shp`; the projection file is required for
-projected source coordinates. Imported points, lines, and polygons are
-rendered on the map. The GeoTIFF button exports the current flat, north-up map
-view as a standards-readable, georeferenced EPSG:3857 RGB raster. It can be
-added as a raster layer in QGIS, ArcGIS, and other GIS software. Vector feature
-exports remain available separately as Shapefile, GeoJSON, or KML.
+The map's Import GIS Data tool supports the following formats:
+
+| Format | Import | Export | Notes |
+|---|---|---|---|
+| Shapefile (`.zip` or `.shp` plus sidecars) | Yes | Yes, as ZIP | ZIP archives must contain one `.shp`. Include matching `.dbf` and `.prj` files; `.prj` is required for projected coordinates. |
+| GeoJSON (`.geojson`, `.json`) | Yes | Yes | Imported point, line, and polygon geometries are retained and displayed. |
+| KML / KMZ (`.kml`, `.kmz`) | Yes | KML | KMZ import reads a KML document from the archive. |
+| CSV | Yes | Yes | Import needs latitude/longitude columns or a WKT geometry column. |
+| GeoTIFF (`.tif`, `.tiff`) | Yes | Yes, map export | Imported supported rasters are displayed as map overlays. Browser import currently supports EPSG:4326, EPSG:3857, EPSG:4269, and WGS84 UTM rasters; unsupported CRS or pixel formats produce an error. |
+
+The GeoTIFF export captures the current flat, north-up map view as a
+georeferenced EPSG:3857 RGB raster, suitable for adding as a raster layer in
+QGIS, ArcGIS, and other GIS software. GeoTIFF import is for map visualization;
+it converts raster pixels to an image overlay and does not expose pixel values
+for analysis. GeoPackage, Esri File Geodatabase, CAD formats, and remote GIS
+services are not currently supported as direct file imports or exports.
 
 ## Environment variables
 

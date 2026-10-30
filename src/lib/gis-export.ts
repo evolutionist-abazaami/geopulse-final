@@ -1,3 +1,6 @@
+import type { Geometry } from "geojson";
+import type { ImportedGeoJSON } from "@/types/importedGeoJSON";
+
 /**
  * GIS Export Utilities
  * Convert analysis data to GeoJSON and KML formats for use in QGIS and other GIS software
@@ -28,12 +31,6 @@ export interface GeoJSONFeature {
 export interface GeoJSONCollection {
   type: "FeatureCollection";
   name: string;
-  crs: {
-    type: "name";
-    properties: {
-      name: string;
-    };
-  };
   features: GeoJSONFeature[];
 }
 
@@ -112,14 +109,121 @@ export function toGeoJSON(
   return {
     type: "FeatureCollection",
     name: collectionName,
-    crs: {
-      type: "name",
-      properties: {
-        name: "urn:ogc:def:crs:OGC:1.3:CRS84", // WGS84
-      },
-    },
     features: geoJSONFeatures,
   };
+}
+
+function coordinatesToKML(coordinates: number[][]): string {
+  return coordinates.map(position => position.join(",")).join(" ");
+}
+
+function geometryToKML(geometry: Geometry): string {
+  switch (geometry.type) {
+    case "Point":
+      return `<Point><coordinates>${geometry.coordinates.join(",")}</coordinates></Point>`;
+    case "MultiPoint":
+      return `<MultiGeometry>${geometry.coordinates.map(position =>
+        `<Point><coordinates>${position.join(",")}</coordinates></Point>`
+      ).join("")}</MultiGeometry>`;
+    case "LineString":
+      return `<LineString><coordinates>${coordinatesToKML(geometry.coordinates)}</coordinates></LineString>`;
+    case "MultiLineString":
+      return `<MultiGeometry>${geometry.coordinates.map(coordinates =>
+        `<LineString><coordinates>${coordinatesToKML(coordinates)}</coordinates></LineString>`
+      ).join("")}</MultiGeometry>`;
+    case "Polygon":
+      return `<Polygon>${geometry.coordinates.map((ring, index) =>
+        `<${index === 0 ? "outer" : "inner"}BoundaryIs><LinearRing><coordinates>${coordinatesToKML(ring)}</coordinates></LinearRing></${index === 0 ? "outer" : "inner"}BoundaryIs>`
+      ).join("")}</Polygon>`;
+    case "MultiPolygon":
+      return `<MultiGeometry>${geometry.coordinates.map(coordinates =>
+        geometryToKML({ type: "Polygon", coordinates })
+      ).join("")}</MultiGeometry>`;
+    case "GeometryCollection":
+      return `<MultiGeometry>${geometry.geometries.map(geometryToKML).join("")}</MultiGeometry>`;
+  }
+}
+
+function toKMLFromGeoJSON(collection: ImportedGeoJSON, documentName: string): string {
+  const placemarks = collection.features.flatMap((feature, index) => {
+    if (!feature.geometry) return [];
+    const properties = feature.properties ?? {};
+    const name = String(properties.name ?? properties.NAME ?? `Feature ${index + 1}`);
+    const data = Object.entries(properties)
+      .filter(([, value]) => value !== null && value !== undefined)
+      .map(([key, value]) => `<Data name="${escapeXML(key)}"><value>${escapeXML(String(value))}</value></Data>`)
+      .join("");
+    return [`<Placemark><name>${escapeXML(name)}</name><ExtendedData>${data}</ExtendedData>${geometryToKML(feature.geometry)}</Placemark>`];
+  }).join("");
+  return `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>${escapeXML(documentName)}</name>${placemarks}</Document></kml>`;
+}
+
+function geometryToWKT(geometry: Geometry): string {
+  const pointList = (positions: number[][]) => positions.map(position => position.join(" ")).join(", ");
+  switch (geometry.type) {
+    case "Point":
+      return `POINT (${geometry.coordinates.join(" ")})`;
+    case "MultiPoint":
+      return `MULTIPOINT (${pointList(geometry.coordinates)})`;
+    case "LineString":
+      return `LINESTRING (${pointList(geometry.coordinates)})`;
+    case "MultiLineString":
+      return `MULTILINESTRING (${geometry.coordinates.map(line => `(${pointList(line)})`).join(", ")})`;
+    case "Polygon":
+      return `POLYGON (${geometry.coordinates.map(ring => `(${pointList(ring)})`).join(", ")})`;
+    case "MultiPolygon":
+      return `MULTIPOLYGON (${geometry.coordinates.map(polygon =>
+        `(${polygon.map(ring => `(${pointList(ring)})`).join(", ")})`
+      ).join(", ")})`;
+    case "GeometryCollection":
+      return `GEOMETRYCOLLECTION (${geometry.geometries.map(geometryToWKT).join(", ")})`;
+  }
+}
+
+function csvCell(value: unknown): string {
+  const text = value === null || value === undefined ? "" : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+export function exportAsCSV(
+  features: AnalysisFeature[],
+  filename = "geopulse-export",
+  importedGeoJSON?: ImportedGeoJSON
+): void {
+  const rows = importedGeoJSON
+    ? importedGeoJSON.features.flatMap((feature, index) => feature.geometry ? [{
+      id: String(feature.id ?? feature.properties?.id ?? index + 1),
+      name: String(feature.properties?.name ?? feature.properties?.NAME ?? `Feature ${index + 1}`),
+      eventType: String(feature.properties?.event_type ?? feature.properties?.type ?? ""),
+      changePercent: feature.properties?.change_percent ?? "",
+      startDate: String(feature.properties?.start_date ?? ""),
+      endDate: String(feature.properties?.end_date ?? ""),
+      longitude: "",
+      latitude: "",
+      wkt: geometryToWKT(feature.geometry),
+      properties: JSON.stringify(feature.properties ?? {}),
+    }] : [])
+    : features.map(feature => ({
+      id: feature.id,
+      name: feature.name,
+      eventType: feature.eventType,
+      changePercent: feature.changePercent ?? "",
+      startDate: feature.startDate,
+      endDate: feature.endDate,
+      longitude: feature.coordinates.lng,
+      latitude: feature.coordinates.lat,
+      wkt: `POINT (${feature.coordinates.lng} ${feature.coordinates.lat})`,
+      properties: "",
+    }));
+  const headers = ["id", "name", "event_type", "change_percent", "start_date", "end_date", "longitude", "latitude", "wkt", "properties"];
+  const csv = [
+    headers.map(csvCell).join(","),
+    ...rows.map(row => [
+      row.id, row.name, row.eventType, row.changePercent, row.startDate,
+      row.endDate, row.longitude, row.latitude, row.wkt, row.properties,
+    ].map(csvCell).join(",")),
+  ].join("\r\n");
+  downloadFile(csv, `${filename}.csv`, "text/csv;charset=utf-8");
 }
 
 /**
@@ -250,9 +354,10 @@ export function downloadFile(
  */
 export function exportAsGeoJSON(
   features: AnalysisFeature[],
-  filename: string = "geopulse-export"
+  filename: string = "geopulse-export",
+  importedGeoJSON?: ImportedGeoJSON
 ): void {
-  const geoJSON = toGeoJSON(features);
+  const geoJSON = importedGeoJSON ?? toGeoJSON(features);
   downloadFile(
     JSON.stringify(geoJSON, null, 2),
     `${filename}.geojson`,
@@ -265,9 +370,12 @@ export function exportAsGeoJSON(
  */
 export function exportAsKML(
   features: AnalysisFeature[],
-  filename: string = "geopulse-export"
+  filename: string = "geopulse-export",
+  importedGeoJSON?: ImportedGeoJSON
 ): void {
-  const kml = toKML(features);
+  const kml = importedGeoJSON
+    ? toKMLFromGeoJSON(importedGeoJSON, filename)
+    : toKML(features);
   downloadFile(kml, `${filename}.kml`, "application/vnd.google-earth.kml+xml");
 }
 
@@ -279,11 +387,12 @@ export function exportAsKML(
  */
 export async function exportAsShapefileZip(
   features: AnalysisFeature[],
-  filename: string = "geopulse-export"
+  filename: string = "geopulse-export",
+  importedGeoJSON?: ImportedGeoJSON
 ): Promise<void> {
   // Dynamic import keeps initial bundle slim
   const shpwrite = (await import("@mapbox/shp-write")).default || (await import("@mapbox/shp-write"));
-  const geoJSON = toGeoJSON(features);
+  const geoJSON = importedGeoJSON ?? toGeoJSON(features);
 
   // WGS84 / EPSG:4326 — standard projection for the bundled .prj
   const prj =

@@ -8,12 +8,14 @@ import proj4 from 'proj4';
 import { unzipSync } from 'fflate';
 import { AnalysisFeature, toGeoJSON, downloadFile } from './gis-export';
 import type { ImportedGeoJSON } from '@/types/importedGeoJSON';
+import type { ImportedRasterOverlay } from '@/types/importedGeoJSON';
 import type { Geometry } from 'geojson';
 
 export interface ShapefileImportResult {
   features: AnalysisFeature[];
   properties: Record<string, unknown>[];
   geoJSON: ImportedGeoJSON;
+  raster?: ImportedRasterOverlay;
   bounds: {
     minLat: number;
     maxLat: number;
@@ -66,6 +68,15 @@ export function extractShapefileArchive(archiveBuffer: ArrayBuffer): ShapefileAr
     dbfBuffer: dbf ? toArrayBuffer(dbf.data) : undefined,
     prjText: prj ? new TextDecoder().decode(prj.data).replace(/^\uFEFF/, '') : undefined,
   };
+}
+
+export function extractKMLFromKMZ(archiveBuffer: ArrayBuffer): string {
+  const entries = unzipSync(new Uint8Array(archiveBuffer));
+  const kmlEntries = Object.entries(entries).filter(([name]) => /\.kml$/i.test(name));
+  if (!kmlEntries.length) throw new Error("The KMZ archive does not contain a KML document");
+  const selected = kmlEntries.find(([name]) => name.split(/[\\/]/).pop()?.toLowerCase() === "doc.kml") ??
+    kmlEntries[0];
+  return new TextDecoder().decode(selected[1]).replace(/^\uFEFF/, "");
 }
 
 /**

@@ -25,7 +25,7 @@ import RealTimeRegionalStatus from "@/components/RealTimeRegionalStatus";
 import { useMapContext } from "@/contexts/MapContext";
 import { useAnalysisHistory } from "@/hooks/useAnalysisHistory";
 import { AnalysisFeature } from "@/lib/gis-export";
-import type { ImportedGeoJSON } from "@/types/importedGeoJSON";
+import type { ImportedGeoJSON, ImportedRasterOverlay } from "@/types/importedGeoJSON";
 import type { BoundaryGeometry, GeocodeBounds, GeocodedPlace } from "@/types/geospatial";
 
 const ReportGenerator = lazy(() => import("@/components/ReportGenerator"));
@@ -199,6 +199,7 @@ export function GeoWitnessPanel({ initialLocation }: { initialLocation?: Geocode
     geometry: initialLocation.geometry,
   } : null);
   const [importedFeatures, setImportedFeatures] = useState<AnalysisFeature[]>([]);
+  const [importedGeoJSON, setImportedGeoJSON] = useState<ImportedGeoJSON | null>(null);
 
   const handleLocationSelect = (location: {
     name: string;
@@ -245,10 +246,13 @@ export function GeoWitnessPanel({ initialLocation }: { initialLocation?: Geocode
   const handleShapefileImport = (
     features: AnalysisFeature[],
     bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number },
-    geoJSON: ImportedGeoJSON
+    geoJSON: ImportedGeoJSON,
+    raster?: ImportedRasterOverlay
   ) => {
     setImportedFeatures(features);
+    setImportedGeoJSON(geoJSON);
     mapCtx.setImportedGeoJSON(geoJSON);
+    mapCtx.setImportedRaster(raster ?? null);
     mapCtx.setMarkers([]);
     if (bounds.minLat === bounds.maxLat && bounds.minLng === bounds.maxLng) {
       mapCtx.setView([bounds.minLat, bounds.minLng], 10);
@@ -262,7 +266,7 @@ export function GeoWitnessPanel({ initialLocation }: { initialLocation?: Geocode
         west: bounds.minLng - longitudePadding,
       });
     }
-    toast.success(`Loaded ${features.length} features from GIS file`);
+    toast.success(raster ? `Loaded raster ${raster.name} to map` : `Loaded ${features.length} features from GIS file`);
   };
 
   const runAnalysis = async () => {
@@ -661,13 +665,23 @@ export function GeoWitnessPanel({ initialLocation }: { initialLocation?: Geocode
         {tool === "import" && (
           <div className="space-y-4">
             <p className="text-[13px] text-gray-500 dark:text-v2-muted">
-              Import a Shapefile ZIP (recommended), its .shp/.dbf/.prj components, or GeoJSON. ZIP archives must contain one shapefile.
+              Import Shapefile ZIP/components, GeoJSON, KML/KMZ, CSV coordinates or WKT, and GeoTIFF raster files.
             </p>
             <ShapefileImport onImport={handleShapefileImport} />
-            {importedFeatures.length > 0 && (
+            {(importedFeatures.length > 0 || mapCtx.importedRaster) && (
               <div className="p-3 bg-brand-dim border border-brand-border rounded-lg">
-                <p className="text-[13px] font-medium text-brand mb-2">{importedFeatures.length} features loaded</p>
-                <GISExportButton features={importedFeatures} filename="geopulse-imported" />
+                <p className="text-[13px] font-medium text-brand mb-2">
+                  {mapCtx.importedRaster
+                    ? `${mapCtx.importedRaster.name} raster loaded`
+                    : `${importedFeatures.length} features loaded`}
+                </p>
+                {importedFeatures.length > 0 && (
+                  <GISExportButton
+                    features={importedFeatures}
+                    importedGeoJSON={importedGeoJSON}
+                    filename="geopulse-imported"
+                  />
+                )}
               </div>
             )}
           </div>
