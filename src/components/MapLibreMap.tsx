@@ -2,12 +2,17 @@ import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from "re
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { BoundaryGeometry } from "@/types/geospatial";
+import type { ImportedGeoJSON } from "@/types/importedGeoJSON";
 import { MAP_STYLE_URL, TERRAIN_TILE_URL } from "@/utils/mapConfig";
 import { reverseLookup } from "@/utils/locationSearch";
 
 export interface MapLibreMapHandle {
   /** Snapshot of exactly what's on screen right now (real OSM tiles + markers/polygons), as a PNG data URL. */
   captureSnapshot: () => Promise<string | null>;
+  captureGeoTIFFFrame: () => Promise<{
+    image: string;
+    bounds: { north: number; south: number; east: number; west: number };
+  } | null>;
 }
 
 interface MapMarker {
@@ -63,6 +68,7 @@ interface MapLibreMapProps {
   className?: string;
   markers?: MapMarker[];
   polygons?: MapPolygon[];
+  importedGeoJSON?: ImportedGeoJSON | null;
   onLocationSelect?: (location: { lat: number; lng: number; name: string }) => void;
   selectionMode?: boolean;
   selectedArea?: { lat: number; lng: number; radius?: number } | null;
@@ -80,6 +86,7 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
   className = "",
   markers = [],
   polygons = [],
+  importedGeoJSON = null,
   onLocationSelect,
   selectionMode = false,
   selectedArea = null,
@@ -610,6 +617,49 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
     }
   }, [polygons, mapLoaded]);
 
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !mapLoaded) return;
+
+    const sourceId = "imported-gis-source";
+    const source = map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
+    if (source) {
+      source.setData(importedGeoJSON ?? { type: "FeatureCollection", features: [] });
+      return;
+    }
+
+    map.addSource(sourceId, {
+      type: "geojson",
+      data: importedGeoJSON ?? { type: "FeatureCollection", features: [] },
+    });
+    map.addLayer({
+      id: "imported-gis-fill",
+      type: "fill",
+      source: sourceId,
+      filter: ["match", ["geometry-type"], ["Polygon", "MultiPolygon"], true, false],
+      paint: { "fill-color": "#2563eb", "fill-opacity": 0.28 },
+    });
+    map.addLayer({
+      id: "imported-gis-line",
+      type: "line",
+      source: sourceId,
+      filter: ["match", ["geometry-type"], ["LineString", "MultiLineString", "Polygon", "MultiPolygon"], true, false],
+      paint: { "line-color": "#1d4ed8", "line-width": 2.5 },
+    });
+    map.addLayer({
+      id: "imported-gis-point",
+      type: "circle",
+      source: sourceId,
+      filter: ["match", ["geometry-type"], ["Point", "MultiPoint"], true, false],
+      paint: {
+        "circle-radius": 7,
+        "circle-color": "#2563eb",
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": 2,
+      },
+    });
+  }, [importedGeoJSON, mapLoaded]);
+
   useImperativeHandle(ref, () => ({
     // Returns the cached last-known-good rendered frame (see the 'idle'
     // listener above) rather than forcing a fresh synchronous read of the
@@ -634,6 +684,90 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
         const onIdle = () => {
           clearTimeout(timeout);
           finish();
+        };
+        map.once("idle", onIdle);
+      }
+    }),
+    captureGeoTIFFFrame: () => new Promise((resolve, reject) => {
+      const map = mapInstanceRef.current;
+      if (!map) {
+        resolve(null);
+        return;
+      }
+
+      const finish = async () => {
+        const bounds = map.getBounds();
+        const snapshot = lastSnapshotRef.current;
+        if (!snapshot) {
+          resolve({
+            image: "",
+            bounds: {
+              north: bounds.getNorth(),
+              south: bounds.getSouth(),
+              east: bounds.getEast(),
+              west: bounds.getWest(),
+            },
+          });
+          return;
+        }
+
+        const image = new Image();
+        try {
+          await new Promise<void>((imageResolve, imageReject) => {
+            image.onload = () => imageResolve();
+            image.onerror = () => imageReject(new Error("Could not read the current map image"));
+            image.src = snapshot;
+          });
+          const canvas = document.createElement("canvas");
+          canvas.width = image.naturalWidth;
+          canvas.height = image.naturalHeight;
+          const context = canvas.getContext("2d");
+          if (!context) throw new Error("Could not create an image canvas for GeoTIFF export");
+          context.drawImage(image, 0, 0);
+
+          const containerWidth = map.getContainer().clientWidth;
+          if (containerWidth === 0) throw new Error("The map is not visible yet");
+          const pixelRatio = canvas.width / containerWidth;
+          markersRef.current.forEach((marker) => {
+            const position = map.project(marker.getLngLat());
+            const x = position.x * pixelRatio;
+            const y = position.y * pixelRatio;
+            context.beginPath();
+            context.arc(x, y, 14 * pixelRatio, 0, Math.PI * 2);
+            context.fillStyle = "#3b82f6";
+            context.fill();
+            context.lineWidth = 3 * pixelRatio;
+            context.strokeStyle = "#ffffff";
+            context.stroke();
+          });
+
+          resolve({
+            image: canvas.toDataURL("image/png"),
+            bounds: {
+              north: bounds.getNorth(),
+              south: bounds.getSouth(),
+              east: bounds.getEast(),
+              west: bounds.getWest(),
+            },
+          });
+        } catch (error) {
+          reject(error);
+        }
+      };
+
+      if (map.getPitch() !== 0 || map.getBearing() !== 0) {
+        reject(new Error("Reset the map to a flat, north-up view before exporting GeoTIFF"));
+      } else if (map.loaded() && !map.isMoving() && !map.isEasing()) {
+        void finish();
+      } else {
+        const timeout = setTimeout(() => {
+          map.off("idle", onIdle);
+          reject(new Error("The map did not finish rendering in time for GeoTIFF export"));
+        }, 8000);
+        const onIdle = () => {
+          clearTimeout(timeout);
+          map.off("idle", onIdle);
+          void finish();
         };
         map.once("idle", onIdle);
       }

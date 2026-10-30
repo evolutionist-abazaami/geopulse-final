@@ -25,6 +25,7 @@ import RealTimeRegionalStatus from "@/components/RealTimeRegionalStatus";
 import { useMapContext } from "@/contexts/MapContext";
 import { useAnalysisHistory } from "@/hooks/useAnalysisHistory";
 import { AnalysisFeature } from "@/lib/gis-export";
+import type { ImportedGeoJSON } from "@/types/importedGeoJSON";
 import type { BoundaryGeometry, GeocodeBounds, GeocodedPlace } from "@/types/geospatial";
 
 const ReportGenerator = lazy(() => import("@/components/ReportGenerator"));
@@ -243,11 +244,24 @@ export function GeoWitnessPanel({ initialLocation }: { initialLocation?: Geocode
 
   const handleShapefileImport = (
     features: AnalysisFeature[],
-    bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number }
+    bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number },
+    geoJSON: ImportedGeoJSON
   ) => {
     setImportedFeatures(features);
-    mapCtx.setMarkers(features.map((f) => ({ lat: f.coordinates.lat, lng: f.coordinates.lng, label: f.name, color: "#3b82f6" })));
-    mapCtx.setView([(bounds.minLat + bounds.maxLat) / 2, (bounds.minLng + bounds.maxLng) / 2], 8);
+    mapCtx.setImportedGeoJSON(geoJSON);
+    mapCtx.setMarkers([]);
+    if (bounds.minLat === bounds.maxLat && bounds.minLng === bounds.maxLng) {
+      mapCtx.setView([bounds.minLat, bounds.minLng], 10);
+    } else {
+      const latitudePadding = bounds.minLat === bounds.maxLat ? 0.01 : 0;
+      const longitudePadding = bounds.minLng === bounds.maxLng ? 0.01 : 0;
+      mapCtx.flyToBounds({
+        north: bounds.maxLat + latitudePadding,
+        south: bounds.minLat - latitudePadding,
+        east: bounds.maxLng + longitudePadding,
+        west: bounds.minLng - longitudePadding,
+      });
+    }
     toast.success(`Loaded ${features.length} features from GIS file`);
   };
 

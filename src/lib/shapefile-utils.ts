@@ -4,11 +4,15 @@
  */
 
 import * as shapefile from 'shapefile';
+import proj4 from 'proj4';
 import { AnalysisFeature, toGeoJSON, downloadFile } from './gis-export';
+import type { ImportedGeoJSON } from '@/types/importedGeoJSON';
+import type { Geometry } from 'geojson';
 
 export interface ShapefileImportResult {
   features: AnalysisFeature[];
   properties: Record<string, any>[];
+  geoJSON: ImportedGeoJSON;
   bounds: {
     minLat: number;
     maxLat: number;
@@ -23,14 +27,19 @@ export interface ShapefileImportResult {
  */
 export async function parseShapefile(
   shpBuffer: ArrayBuffer,
-  dbfBuffer?: ArrayBuffer
+  dbfBuffer?: ArrayBuffer,
+  prjText?: string
 ): Promise<ShapefileImportResult> {
   const features: AnalysisFeature[] = [];
   const properties: Record<string, any>[] = [];
+  const geoJSONFeatures: ImportedGeoJSON['features'] = [];
   let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
 
   try {
     const source = await shapefile.open(shpBuffer, dbfBuffer);
+    const projection = prjText?.trim()
+      ? proj4(prjText.trim(), 'EPSG:4326')
+      : null;
     
     let result = await source.read();
     let index = 0;
@@ -39,44 +48,38 @@ export async function parseShapefile(
       const feature = result.value;
       
       if (feature && feature.geometry) {
-        let lat: number, lng: number;
-        
-        // Extract centroid based on geometry type
-        switch (feature.geometry.type) {
-          case 'Point':
-            lng = feature.geometry.coordinates[0];
-            lat = feature.geometry.coordinates[1];
-            break;
-          case 'Polygon':
-          case 'MultiPolygon':
-            // Calculate centroid
-            const coords = feature.geometry.type === 'Polygon'
-              ? feature.geometry.coordinates[0]
-              : feature.geometry.coordinates[0][0];
-            const centroid = calculateCentroid(coords as [number, number][]);
-            lng = centroid[0];
-            lat = centroid[1];
-            break;
-          case 'LineString':
-          case 'MultiLineString':
-            // Use midpoint of line
-            const lineCoords = feature.geometry.type === 'LineString'
-              ? feature.geometry.coordinates
-              : feature.geometry.coordinates[0];
-            const midIndex = Math.floor(lineCoords.length / 2);
-            lng = lineCoords[midIndex][0];
-            lat = lineCoords[midIndex][1];
-            break;
-          default:
-            result = await source.read();
-            continue;
+        const geometry = projection
+          ? {
+            ...feature.geometry,
+            coordinates: transformCoordinates(feature.geometry.coordinates, (x, y) => {
+              const projected = projection.forward([x, y]);
+              return [projected[0], projected[1]];
+            }),
+          } as Geometry
+          : feature.geometry;
+        const positions: [number, number][] = [];
+        collectPositions(geometry.coordinates, positions);
+        if (positions.length === 0) {
+          result = await source.read();
+          index++;
+          continue;
         }
 
+        geoJSONFeatures.push({
+          type: 'Feature',
+          properties: feature.properties || {},
+          geometry,
+        });
+        const lng = positions.reduce((sum, point) => sum + point[0], 0) / positions.length;
+        const lat = positions.reduce((sum, point) => sum + point[1], 0) / positions.length;
+
         // Update bounds
-        minLat = Math.min(minLat, lat);
-        maxLat = Math.max(maxLat, lat);
-        minLng = Math.min(minLng, lng);
-        maxLng = Math.max(maxLng, lng);
+        positions.forEach(([positionLng, positionLat]) => {
+          minLat = Math.min(minLat, positionLat);
+          maxLat = Math.max(maxLat, positionLat);
+          minLng = Math.min(minLng, positionLng);
+          maxLng = Math.max(maxLng, positionLng);
+        });
 
         // Extract properties
         const props = feature.properties || {};
@@ -101,10 +104,19 @@ export async function parseShapefile(
       index++;
     }
 
+    if (features.length === 0) {
+      throw new Error('No supported geometries were found in the shapefile');
+    }
+
     return {
       features,
       properties,
+      geoJSON: {
+        type: 'FeatureCollection',
+        features: geoJSONFeatures,
+      },
       bounds: { minLat, maxLat, minLng, maxLng },
+      crs: 'EPSG:4326',
     };
   } catch (error) {
     console.error('Error parsing shapefile:', error);
@@ -112,19 +124,35 @@ export async function parseShapefile(
   }
 }
 
-/**
- * Calculate centroid of a polygon
- */
-function calculateCentroid(coords: [number, number][]): [number, number] {
-  let sumLng = 0, sumLat = 0;
-  const n = coords.length - 1; // Exclude closing point
-  
-  for (let i = 0; i < n; i++) {
-    sumLng += coords[i][0];
-    sumLat += coords[i][1];
+function transformCoordinates(
+  coordinates: unknown,
+  transform: (x: number, y: number) => [number, number]
+): unknown {
+  if (!Array.isArray(coordinates)) return coordinates;
+  if (
+    coordinates.length >= 2 &&
+    typeof coordinates[0] === 'number' &&
+    typeof coordinates[1] === 'number'
+  ) {
+    const [lng, lat] = transform(coordinates[0], coordinates[1]);
+    return [lng, lat, ...coordinates.slice(2)];
   }
-  
-  return [sumLng / n, sumLat / n];
+  return coordinates.map(coordinate => transformCoordinates(coordinate, transform));
+}
+
+function collectPositions(coordinates: unknown, positions: [number, number][]): void {
+  if (!Array.isArray(coordinates)) return;
+  if (
+    coordinates.length >= 2 &&
+    typeof coordinates[0] === 'number' &&
+    typeof coordinates[1] === 'number' &&
+    Number.isFinite(coordinates[0]) &&
+    Number.isFinite(coordinates[1])
+  ) {
+    positions.push([coordinates[0], coordinates[1]]);
+    return;
+  }
+  coordinates.forEach((coordinate) => collectPositions(coordinate, positions));
 }
 
 /**

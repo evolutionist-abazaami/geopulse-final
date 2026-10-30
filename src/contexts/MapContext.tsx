@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useMemo, useRef, useState, type
 import maplibregl from "maplibre-gl";
 import type { HeatmapLayerType, MapLibreMapHandle } from "@/components/MapLibreMap";
 import type { BoundaryGeometry } from "@/types/geospatial";
+import type { ImportedGeoJSON } from "@/types/importedGeoJSON";
 
 export interface RegionBounds {
   north: number;
@@ -32,6 +33,7 @@ interface MapContextValue {
   registerMap: (map: maplibregl.Map) => void;
   registerMapHandle: (handle: MapLibreMapHandle | null) => void;
   captureSnapshot: () => Promise<string | null>;
+  captureGeoTIFFFrame: () => ReturnType<MapLibreMapHandle["captureGeoTIFFFrame"]>;
 
   center: [number, number];
   zoom: number;
@@ -41,6 +43,8 @@ interface MapContextValue {
   setMarkers: (markers: MapMarker[]) => void;
   polygons: MapPolygon[];
   setPolygons: (polygons: MapPolygon[]) => void;
+  importedGeoJSON: ImportedGeoJSON | null;
+  setImportedGeoJSON: (geoJSON: ImportedGeoJSON | null) => void;
 
   selectionMode: boolean;
   setSelectionMode: (v: boolean) => void;
@@ -74,6 +78,7 @@ export function MapProvider({ children }: { children: ReactNode }) {
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const [markers, setMarkers] = useState<MapMarker[]>([]);
   const [polygons, setPolygons] = useState<MapPolygon[]>([]);
+  const [importedGeoJSON, setImportedGeoJSON] = useState<ImportedGeoJSON | null>(null);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedArea, setSelectedArea] = useState<{ lat: number; lng: number; radius?: number } | null>(null);
   const [selectedBoundary, setSelectedBoundary] = useState<BoundaryGeometry | null>(null);
@@ -107,6 +112,10 @@ export function MapProvider({ children }: { children: ReactNode }) {
     return mapHandleRef.current?.captureSnapshot() ?? Promise.resolve(null);
   }, []);
 
+  const captureGeoTIFFFrame = useCallback(() => {
+    return mapHandleRef.current?.captureGeoTIFFFrame() ?? Promise.resolve(null);
+  }, []);
+
   const flyToBounds = useCallback((bounds: RegionBounds, options?: maplibregl.FitBoundsOptions) => {
     const map = mapRef.current;
     if (!map) return;
@@ -127,6 +136,7 @@ export function MapProvider({ children }: { children: ReactNode }) {
     registerMap,
     registerMapHandle,
     captureSnapshot,
+    captureGeoTIFFFrame,
     center,
     zoom,
     setView,
@@ -134,6 +144,8 @@ export function MapProvider({ children }: { children: ReactNode }) {
     setMarkers,
     polygons,
     setPolygons,
+    importedGeoJSON,
+    setImportedGeoJSON,
     selectionMode,
     setSelectionMode,
     selectedArea,
@@ -148,7 +160,7 @@ export function MapProvider({ children }: { children: ReactNode }) {
     setActiveHeatmapLayer,
     flyToBounds,
   }), [
-    mapReady, registerMap, registerMapHandle, captureSnapshot, center, zoom, setView, markers, polygons,
+    mapReady, registerMap, registerMapHandle, captureSnapshot, captureGeoTIFFFrame, center, zoom, setView, markers, polygons, importedGeoJSON,
     selectionMode, selectedArea, selectedBoundary, onLocationSelect, setOnLocationSelect, is3DEnabled,
     activeHeatmapLayer, flyToBounds,
   ]);

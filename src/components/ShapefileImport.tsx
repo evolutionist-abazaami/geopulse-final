@@ -8,9 +8,45 @@ import { FileUp, MapPin, Loader2, CheckCircle2, AlertCircle, X, FileType } from 
 import { toast } from "sonner";
 import { parseShapefile, readFileAsArrayBuffer, ShapefileImportResult } from "@/lib/shapefile-utils";
 import { AnalysisFeature } from "@/lib/gis-export";
+import type { ImportedGeoJSON } from "@/types/importedGeoJSON";
 
 interface ShapefileImportProps {
-  onImport: (features: AnalysisFeature[], bounds: ShapefileImportResult['bounds']) => void;
+  onImport: (
+    features: AnalysisFeature[],
+    bounds: ShapefileImportResult['bounds'],
+    geoJSON: ImportedGeoJSON
+  ) => void;
+}
+
+type ImportedFeature = ImportedGeoJSON["features"][number];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isImportedFeature(value: unknown): value is ImportedFeature {
+  if (!isRecord(value) || value.type !== "Feature" || !isRecord(value.geometry)) return false;
+  const geometryType = value.geometry.type;
+  return (
+    typeof geometryType === "string" &&
+    ["Point", "MultiPoint", "LineString", "MultiLineString", "Polygon", "MultiPolygon"].includes(geometryType) &&
+    Array.isArray(value.geometry.coordinates)
+  );
+}
+
+function collectPositions(coordinates: unknown, positions: number[][]): void {
+  if (!Array.isArray(coordinates)) return;
+  if (
+    coordinates.length >= 2 &&
+    typeof coordinates[0] === "number" &&
+    typeof coordinates[1] === "number" &&
+    Number.isFinite(coordinates[0]) &&
+    Number.isFinite(coordinates[1])
+  ) {
+    positions.push([coordinates[0], coordinates[1]]);
+    return;
+  }
+  coordinates.forEach(coordinate => collectPositions(coordinate, positions));
 }
 
 const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
@@ -22,13 +58,15 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    const validFiles = files.filter(f => 
-      f.name.endsWith('.shp') || 
-      f.name.endsWith('.dbf') || 
-      f.name.endsWith('.shx') ||
-      f.name.endsWith('.prj') ||
-      f.name.endsWith('.geojson') ||
-      f.name.endsWith('.json')
+    const validFiles = files.filter(f => {
+      const extension = f.name.split('.').pop()?.toLowerCase();
+      return extension === 'shp' ||
+        extension === 'dbf' ||
+        extension === 'shx' ||
+        extension === 'prj' ||
+        extension === 'geojson' ||
+        extension === 'json';
+    }
     );
     
     if (validFiles.length === 0) {
@@ -36,8 +74,13 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
       return;
     }
     
-    setSelectedFiles(validFiles);
+    setSelectedFiles(previousFiles => {
+      const selectedByName = new Map(previousFiles.map(file => [file.name.toLowerCase(), file]));
+      validFiles.forEach(file => selectedByName.set(file.name.toLowerCase(), file));
+      return [...selectedByName.values()];
+    });
     setImportResult(null);
+    e.target.value = "";
   };
 
   const processFiles = async () => {
@@ -48,65 +91,74 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
 
     try {
       // Check for GeoJSON first
-      const geoJsonFile = selectedFiles.find(f => f.name.endsWith('.geojson') || f.name.endsWith('.json'));
+      const geoJsonFile = selectedFiles.find(f => /\.(geojson|json)$/i.test(f.name));
       
       if (geoJsonFile) {
         setProgress(30);
         const text = await geoJsonFile.text();
-        const geoJSON = JSON.parse(text);
+        const geoJSON: unknown = JSON.parse(text);
         
         setProgress(60);
         const features: AnalysisFeature[] = [];
         let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
         
-        const geoFeatures = geoJSON.features || [geoJSON];
-        
-        geoFeatures.forEach((feature: any, index: number) => {
-          if (feature.geometry) {
-            let lat = 0, lng = 0;
-            
-            if (feature.geometry.type === 'Point') {
-              lng = feature.geometry.coordinates[0];
-              lat = feature.geometry.coordinates[1];
-            } else if (feature.geometry.coordinates) {
-              // Get centroid for polygons/lines
-              const flatCoords = JSON.stringify(feature.geometry.coordinates);
-              const numbers = flatCoords.match(/-?\d+\.?\d*/g)?.map(Number) || [];
-              if (numbers.length >= 2) {
-                const lngs = numbers.filter((_, i) => i % 2 === 0);
-                const lats = numbers.filter((_, i) => i % 2 === 1);
-                lng = lngs.reduce((a, b) => a + b, 0) / lngs.length;
-                lat = lats.reduce((a, b) => a + b, 0) / lats.length;
-              }
-            }
+        let candidateFeatures: unknown[];
+        if (isRecord(geoJSON) && geoJSON.type === "FeatureCollection" && Array.isArray(geoJSON.features)) {
+          candidateFeatures = geoJSON.features;
+        } else if (isImportedFeature(geoJSON)) {
+          candidateFeatures = [geoJSON];
+        } else {
+          throw new Error("GeoJSON must be a FeatureCollection or Feature");
+        }
 
-            if (lat && lng) {
-              minLat = Math.min(minLat, lat);
-              maxLat = Math.max(maxLat, lat);
-              minLng = Math.min(minLng, lng);
-              maxLng = Math.max(maxLng, lng);
+        const validGeoFeatures: ImportedGeoJSON["features"] = [];
+        const importedGeoJSON: ImportedGeoJSON = {
+          type: 'FeatureCollection',
+          features: validGeoFeatures,
+        };
+        candidateFeatures.forEach((candidate, index) => {
+          if (!isImportedFeature(candidate) || candidate.geometry.type === "GeometryCollection") return;
+          const positions: number[][] = [];
+          collectPositions(candidate.geometry.coordinates, positions);
+          if (positions.length === 0) return;
+          validGeoFeatures.push(candidate);
 
-              const props = feature.properties || {};
-              features.push({
-                id: `geo_${index}_${Date.now()}`,
-                name: props.name || props.NAME || `Feature ${index + 1}`,
-                coordinates: { lat, lng },
-                eventType: props.event_type || props.type || 'environmental_change',
-                changePercent: props.change_percent,
-                startDate: props.start_date || new Date().toISOString().split('T')[0],
-                endDate: props.end_date || new Date().toISOString().split('T')[0],
-                summary: props.summary || props.description,
-                areaAnalyzed: props.area,
-                createdAt: new Date().toISOString(),
-              });
-            }
-          }
+          const lng = positions.reduce((sum, point) => sum + point[0], 0) / positions.length;
+          const lat = positions.reduce((sum, point) => sum + point[1], 0) / positions.length;
+          positions.forEach(([positionLng, positionLat]) => {
+            minLat = Math.min(minLat, positionLat);
+            maxLat = Math.max(maxLat, positionLat);
+            minLng = Math.min(minLng, positionLng);
+            maxLng = Math.max(maxLng, positionLng);
+          });
+
+          const props = candidate.properties ?? {};
+          const eventType = props.event_type ?? props.type;
+          const changePercent = Number(props.change_percent);
+          features.push({
+            id: `geo_${index}_${Date.now()}`,
+            name: String(props.name ?? props.NAME ?? `Feature ${index + 1}`),
+            coordinates: { lat, lng },
+            eventType: String(eventType ?? 'environmental_change'),
+            changePercent: Number.isFinite(changePercent) ? changePercent : undefined,
+            startDate: String(props.start_date ?? new Date().toISOString().split('T')[0]),
+            endDate: String(props.end_date ?? new Date().toISOString().split('T')[0]),
+            summary: props.summary === undefined && props.description === undefined
+              ? undefined
+              : String(props.summary ?? props.description),
+            areaAnalyzed: props.area === undefined ? undefined : String(props.area),
+            createdAt: new Date().toISOString(),
+          });
         });
 
+        if (features.length === 0) {
+          throw new Error("No valid geometries were found in the selected file");
+        }
         setProgress(100);
         const result: ShapefileImportResult = {
           features,
-          properties: geoFeatures.map((f: any) => f.properties || {}),
+          properties: validGeoFeatures.map(feature => feature.properties ?? {}),
+          geoJSON: importedGeoJSON,
           bounds: { minLat, maxLat, minLng, maxLng },
         };
         
@@ -114,8 +166,9 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
         toast.success(`Imported ${features.length} features from GeoJSON`);
       } else {
         // Process Shapefile
-        const shpFile = selectedFiles.find(f => f.name.endsWith('.shp'));
-        const dbfFile = selectedFiles.find(f => f.name.endsWith('.dbf'));
+        const shpFile = selectedFiles.find(f => /\.shp$/i.test(f.name));
+        const dbfFile = selectedFiles.find(f => /\.dbf$/i.test(f.name));
+        const prjFile = selectedFiles.find(f => /\.prj$/i.test(f.name));
         
         if (!shpFile) {
           throw new Error("No .shp file found");
@@ -129,9 +182,10 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
         if (dbfFile) {
           dbfBuffer = await readFileAsArrayBuffer(dbfFile);
         }
+        const prjText = prjFile ? await prjFile.text() : undefined;
 
         setProgress(70);
-        const result = await parseShapefile(shpBuffer, dbfBuffer);
+        const result = await parseShapefile(shpBuffer, dbfBuffer, prjText);
         
         setProgress(100);
         setImportResult(result);
@@ -147,7 +201,7 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
 
   const confirmImport = () => {
     if (importResult) {
-      onImport(importResult.features, importResult.bounds);
+      onImport(importResult.features, importResult.bounds, importResult.geoJSON);
       toast.success("Features loaded to map");
       setSelectedFiles([]);
       setImportResult(null);

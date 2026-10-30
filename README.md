@@ -55,6 +55,16 @@ Analysis constants and the corresponding test coverage are summarized in
 included in this repository snapshot, so that ledger is a code-based reference,
 not a completed sentence-by-sentence manuscript audit.
 
+## GIS import and export
+
+The map's Import GIS Data tool accepts Shapefile components (`.shp` and
+optional `.dbf`/`.prj`) and GeoJSON. Imported points, lines, and polygons are
+rendered on the map; a `.prj` file is used to reproject shapefile coordinates
+to WGS84 for display. The GeoTIFF button on the map toolbar exports the current
+flat, north-up map view as a georeferenced EPSG:3857 raster that can be opened
+in QGIS, ArcGIS, and other GIS software. Vector feature exports remain
+available separately as Shapefile, GeoJSON, or KML.
+
 ## Environment variables
 
 Set values in the appropriate Supabase project settings and local frontend
