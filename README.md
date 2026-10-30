@@ -57,13 +57,14 @@ not a completed sentence-by-sentence manuscript audit.
 
 ## GIS import and export
 
-The map's Import GIS Data tool accepts Shapefile components (`.shp` and
-optional `.dbf`/`.prj`) and GeoJSON. Imported points, lines, and polygons are
-rendered on the map; a `.prj` file is used to reproject shapefile coordinates
-to WGS84 for display. The GeoTIFF button on the map toolbar exports the current
-flat, north-up map view as a georeferenced EPSG:3857 raster that can be opened
-in QGIS, ArcGIS, and other GIS software. Vector feature exports remain
-available separately as Shapefile, GeoJSON, or KML.
+The map's Import GIS Data tool accepts a zipped Shapefile (one `.shp` per
+archive), individual Shapefile components, and GeoJSON. Include the matching
+`.dbf` and `.prj` files with the `.shp`; the projection file is required for
+projected source coordinates. Imported points, lines, and polygons are
+rendered on the map. The GeoTIFF button exports the current flat, north-up map
+view as a standards-readable, georeferenced EPSG:3857 RGB raster. It can be
+added as a raster layer in QGIS, ArcGIS, and other GIS software. Vector feature
+exports remain available separately as Shapefile, GeoJSON, or KML.
 
 ## Environment variables
 

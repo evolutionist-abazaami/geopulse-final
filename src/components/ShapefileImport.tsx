@@ -6,7 +6,12 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { FileUp, MapPin, Loader2, CheckCircle2, AlertCircle, X, FileType } from "lucide-react";
 import { toast } from "sonner";
-import { parseShapefile, readFileAsArrayBuffer, ShapefileImportResult } from "@/lib/shapefile-utils";
+import {
+  extractShapefileArchive,
+  parseShapefile,
+  readFileAsArrayBuffer,
+  ShapefileImportResult,
+} from "@/lib/shapefile-utils";
 import { AnalysisFeature } from "@/lib/gis-export";
 import type { ImportedGeoJSON } from "@/types/importedGeoJSON";
 
@@ -64,6 +69,7 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
         extension === 'dbf' ||
         extension === 'shx' ||
         extension === 'prj' ||
+        extension === 'zip' ||
         extension === 'geojson' ||
         extension === 'json';
     }
@@ -90,10 +96,18 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
     setProgress(10);
 
     try {
-      // Check for GeoJSON first
+      const archiveFile = selectedFiles.find(file => /\.zip$/i.test(file.name));
       const geoJsonFile = selectedFiles.find(f => /\.(geojson|json)$/i.test(f.name));
       
-      if (geoJsonFile) {
+      if (archiveFile) {
+        setProgress(30);
+        const archive = extractShapefileArchive(await readFileAsArrayBuffer(archiveFile));
+        setProgress(65);
+        const result = await parseShapefile(archive.shpBuffer, archive.dbfBuffer, archive.prjText);
+        setProgress(100);
+        setImportResult(result);
+        toast.success(`Imported ${result.features.length} features from Shapefile archive`);
+      } else if (geoJsonFile) {
         setProgress(30);
         const text = await geoJsonFile.text();
         const geoJSON: unknown = JSON.parse(text);
@@ -223,7 +237,7 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
         ref={fileInputRef}
         type="file"
         multiple
-        accept=".shp,.dbf,.shx,.prj,.geojson,.json"
+        accept=".shp,.dbf,.shx,.prj,.zip,.geojson,.json"
         onChange={handleFileSelect}
         className="hidden"
       />
@@ -235,8 +249,8 @@ const ShapefileImport = ({ onImport }: ShapefileImportProps) => {
           onClick={() => fileInputRef.current?.click()}
         >
           <FileUp className="h-6 w-6" />
-          <span className="text-sm">Select Shapefile or GeoJSON</span>
-          <span className="text-xs text-muted-foreground">.shp, .dbf, .geojson supported</span>
+          <span className="text-sm">Select Shapefile, ZIP, or GeoJSON</span>
+          <span className="text-xs text-muted-foreground">.zip (recommended), .shp components, .geojson</span>
         </Button>
       ) : (
         <div className="space-y-3">

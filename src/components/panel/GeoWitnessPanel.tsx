@@ -661,7 +661,7 @@ export function GeoWitnessPanel({ initialLocation }: { initialLocation?: Geocode
         {tool === "import" && (
           <div className="space-y-4">
             <p className="text-[13px] text-gray-500 dark:text-v2-muted">
-              Import Shapefiles (.shp) or GeoJSON files for analysis. Compatible with QGIS, ArcGIS, and other GIS applications.
+              Import a Shapefile ZIP (recommended), its .shp/.dbf/.prj components, or GeoJSON. ZIP archives must contain one shapefile.
             </p>
             <ShapefileImport onImport={handleShapefileImport} />
             {importedFeatures.length > 0 && (

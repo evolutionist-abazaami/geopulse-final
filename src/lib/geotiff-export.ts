@@ -81,7 +81,7 @@ export function encodeGeoTIFF(
     { tag: 339, type: 3, count: 3, data: "sampleFormat" },
     { tag: 33550, type: 12, count: 3, data: "pixelScale" },
     { tag: 33922, type: 12, count: 6, data: "tiepoint" },
-    { tag: 34735, type: 3, count: 16, data: "geoKeys" },
+    { tag: 34735, type: 3, count: 20, data: "geoKeys" },
   ];
 
   const ifdEnd = 8 + 2 + entries.length * 12 + 4;
@@ -98,7 +98,7 @@ export function encodeGeoTIFF(
   reserve("sampleFormat", 6);
   reserve("pixelScale", 24);
   reserve("tiepoint", 48);
-  reserve("geoKeys", 32);
+  reserve("geoKeys", 40);
   reserve("pixels", rgb.length);
 
   const buffer = new ArrayBuffer(extraOffset);
@@ -132,7 +132,7 @@ export function encodeGeoTIFF(
   [1, 1, 1].forEach((value, index) => view.setUint16(offsets.sampleFormat + index * 2, value, true));
   [scaleX, scaleY, 0].forEach((value, index) => view.setFloat64(offsets.pixelScale + index * 8, value, true));
   [0, 0, 0, west, north, 0].forEach((value, index) => view.setFloat64(offsets.tiepoint + index * 8, value, true));
-  [1, 1, 0, 3, 1024, 0, 1, 1, 3072, 0, 1, 3857, 2054, 0, 1, 9102]
+  [1, 1, 0, 4, 1024, 0, 1, 1, 1025, 0, 1, 1, 2054, 0, 1, 9102, 3072, 0, 1, 3857]
     .forEach((value, index) => view.setUint16(offsets.geoKeys + index * 2, value, true));
   bytes.set(rgb, offsets.pixels);
   return buffer;

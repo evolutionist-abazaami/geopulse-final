@@ -5,13 +5,14 @@
 
 import * as shapefile from 'shapefile';
 import proj4 from 'proj4';
+import { unzipSync } from 'fflate';
 import { AnalysisFeature, toGeoJSON, downloadFile } from './gis-export';
 import type { ImportedGeoJSON } from '@/types/importedGeoJSON';
 import type { Geometry } from 'geojson';
 
 export interface ShapefileImportResult {
   features: AnalysisFeature[];
-  properties: Record<string, any>[];
+  properties: Record<string, unknown>[];
   geoJSON: ImportedGeoJSON;
   bounds: {
     minLat: number;
@@ -20,6 +21,51 @@ export interface ShapefileImportResult {
     maxLng: number;
   };
   crs?: string;
+}
+
+export interface ShapefileArchiveContents {
+  shpBuffer: ArrayBuffer;
+  dbfBuffer?: ArrayBuffer;
+  prjText?: string;
+}
+
+export function extractShapefileArchive(archiveBuffer: ArrayBuffer): ShapefileArchiveContents {
+  const entries = unzipSync(new Uint8Array(archiveBuffer));
+  const files = Object.entries(entries)
+    .filter(([name]) => !name.endsWith('/'))
+    .map(([name, data]) => ({
+      name: name.replace(/\\/g, '/'),
+      data,
+      basename: name.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? '',
+      directory: name.replace(/\\/g, '/').split('/').slice(0, -1).join('/').toLowerCase(),
+    }));
+  const shapefiles = files.filter(file => file.basename.endsWith('.shp'));
+  if (shapefiles.length !== 1) {
+    throw new Error(
+      shapefiles.length === 0
+        ? 'The ZIP archive does not contain a .shp file'
+        : 'The ZIP archive contains multiple .shp files; upload one shapefile per archive'
+    );
+  }
+
+  const shp = shapefiles[0];
+  const stem = shp.basename.slice(0, -4);
+  const sidecar = (extension: string) =>
+    files.find(file => file.directory === shp.directory && file.basename === `${stem}.${extension}`) ??
+    files.find(file => file.basename === `${stem}.${extension}`);
+  const toArrayBuffer = (data: Uint8Array): ArrayBuffer => {
+    const copy = new Uint8Array(data.byteLength);
+    copy.set(data);
+    return copy.buffer;
+  };
+  const dbf = sidecar('dbf');
+  const prj = sidecar('prj');
+
+  return {
+    shpBuffer: toArrayBuffer(shp.data),
+    dbfBuffer: dbf ? toArrayBuffer(dbf.data) : undefined,
+    prjText: prj ? new TextDecoder().decode(prj.data).replace(/^\uFEFF/, '') : undefined,
+  };
 }
 
 /**
@@ -31,7 +77,7 @@ export async function parseShapefile(
   prjText?: string
 ): Promise<ShapefileImportResult> {
   const features: AnalysisFeature[] = [];
-  const properties: Record<string, any>[] = [];
+  const properties: Record<string, unknown>[] = [];
   const geoJSONFeatures: ImportedGeoJSON['features'] = [];
   let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
 
@@ -64,6 +110,16 @@ export async function parseShapefile(
           index++;
           continue;
         }
+        const hasInvalidGeographicCoordinates = positions.some(([lng, lat]) =>
+          Math.abs(lng) > 180 || Math.abs(lat) > 90
+        );
+        if (hasInvalidGeographicCoordinates) {
+          throw new Error(
+            projection
+              ? 'The .prj coordinates could not be converted to WGS84. Check that the matching projection file is included.'
+              : 'Coordinates are outside longitude/latitude ranges. Upload the matching .prj file or a ZIP containing the shapefile sidecars.'
+          );
+        }
 
         geoJSONFeatures.push({
           type: 'Feature',
@@ -82,19 +138,19 @@ export async function parseShapefile(
         });
 
         // Extract properties
-        const props = feature.properties || {};
+        const props: Record<string, unknown> = feature.properties || {};
         properties.push(props);
 
         // Create AnalysisFeature
         features.push({
           id: `shp_${index}_${Date.now()}`,
-          name: props.name || props.NAME || props.Name || `Feature ${index + 1}`,
+          name: String(props.name || props.NAME || props.Name || `Feature ${index + 1}`),
           coordinates: { lat, lng },
           eventType: detectEventType(props),
           changePercent: extractChangePercent(props),
           startDate: extractDate(props, 'start') || new Date().toISOString().split('T')[0],
           endDate: extractDate(props, 'end') || new Date().toISOString().split('T')[0],
-          summary: props.summary || props.SUMMARY || props.description || props.DESCRIPTION || '',
+          summary: String(props.summary || props.SUMMARY || props.description || props.DESCRIPTION || ''),
           areaAnalyzed: extractArea(props),
           createdAt: new Date().toISOString(),
         });
@@ -158,7 +214,7 @@ function collectPositions(coordinates: unknown, positions: [number, number][]): 
 /**
  * Detect event type from properties
  */
-function detectEventType(props: Record<string, any>): string {
+function detectEventType(props: Record<string, unknown>): string {
   const typeFields = ['event_type', 'eventType', 'EVENT_TYPE', 'type', 'TYPE', 'class', 'CLASS', 'category'];
   
   for (const field of typeFields) {
@@ -168,7 +224,7 @@ function detectEventType(props: Record<string, any>): string {
   }
   
   // Try to infer from other fields
-  const allValues = Object.values(props).join(' ').toLowerCase();
+  const allValues = Object.values(props).map(String).join(' ').toLowerCase();
   if (allValues.includes('deforest') || allValues.includes('forest')) return 'deforestation';
   if (allValues.includes('flood')) return 'flood';
   if (allValues.includes('drought')) return 'drought';
@@ -181,7 +237,7 @@ function detectEventType(props: Record<string, any>): string {
 /**
  * Extract change percentage from properties
  */
-function extractChangePercent(props: Record<string, any>): number | undefined {
+function extractChangePercent(props: Record<string, unknown>): number | undefined {
   const percentFields = ['change_percent', 'changePercent', 'CHANGE_PERCENT', 'change', 'CHANGE', 'percent', 'PERCENT'];
   
   for (const field of percentFields) {
@@ -197,7 +253,7 @@ function extractChangePercent(props: Record<string, any>): number | undefined {
 /**
  * Extract date from properties
  */
-function extractDate(props: Record<string, any>, type: 'start' | 'end'): string | null {
+function extractDate(props: Record<string, unknown>, type: 'start' | 'end'): string | null {
   const startFields = ['start_date', 'startDate', 'START_DATE', 'date_start', 'begin', 'BEGIN'];
   const endFields = ['end_date', 'endDate', 'END_DATE', 'date_end', 'end', 'END'];
   const dateFields = ['date', 'DATE', 'timestamp', 'TIMESTAMP'];
@@ -206,7 +262,7 @@ function extractDate(props: Record<string, any>, type: 'start' | 'end'): string 
   
   for (const field of fields) {
     if (props[field]) {
-      const date = new Date(props[field]);
+      const date = new Date(String(props[field]));
       if (!isNaN(date.getTime())) {
         return date.toISOString().split('T')[0];
       }
@@ -219,7 +275,7 @@ function extractDate(props: Record<string, any>, type: 'start' | 'end'): string 
 /**
  * Extract area from properties
  */
-function extractArea(props: Record<string, any>): string | undefined {
+function extractArea(props: Record<string, unknown>): string | undefined {
   const areaFields = ['area', 'AREA', 'area_km2', 'AREA_KM2', 'area_analyzed', 'size', 'SIZE'];
   
   for (const field of areaFields) {
