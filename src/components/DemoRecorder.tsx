@@ -93,9 +93,9 @@ const DemoRecorder = () => {
     if (activeTab === "library" && user) {
       loadSavedRecordings();
     }
-  }, [activeTab, user]);
+  }, [activeTab, loadSavedRecordings, user]);
 
-  const loadSavedRecordings = async () => {
+  const loadSavedRecordings = useCallback(async () => {
     if (!user) return;
     
     setIsLoadingRecordings(true);
@@ -117,7 +117,7 @@ const DemoRecorder = () => {
     } finally {
       setIsLoadingRecordings(false);
     }
-  };
+  }, [toast, user]);
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -198,7 +198,7 @@ const DemoRecorder = () => {
 
       stream.getVideoTracks()[0].onended = () => {
         if (recordingState === "recording") {
-          stopRecording();
+          mediaRecorderRef.current?.stop();
         }
       };
 
@@ -335,7 +335,7 @@ const DemoRecorder = () => {
       setIsUploading(false);
       setUploadProgress(0);
     }
-  }, [recordedBlob, user, recordingTitle, recordingTime, toast]);
+  }, [loadSavedRecordings, recordedBlob, resetRecording, user, recordingTitle, recordingTime, toast]);
 
   const deleteRecording = async (recording: SavedRecording) => {
     try {

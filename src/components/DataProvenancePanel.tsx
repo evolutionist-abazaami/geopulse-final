@@ -2,7 +2,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 
 interface DataProvenancePanelProps {
-  results: Record<string, any>;
+  results: Record<string, unknown>;
 }
 
 const DataProvenancePanel = ({ results }: DataProvenancePanelProps) => {
@@ -13,7 +13,6 @@ const DataProvenancePanel = ({ results }: DataProvenancePanelProps) => {
     "changePercent",
     "area",
     "spectralIndices",
-    "predictiveModeling",
     "severity",
     "summary",
     "fullAnalysis",
@@ -30,6 +29,7 @@ const DataProvenancePanel = ({ results }: DataProvenancePanelProps) => {
         {provenance.summary?.origin === "model_generated" && (
           <Badge variant="outline">Narrative is model-generated</Badge>
         )}
+        <Badge variant="outline">Forecast projections: disabled pending validation</Badge>
       </div>
       <p className="text-xs leading-relaxed text-muted-foreground">
         {results?.dataProvenance?.disclaimer ??

@@ -187,7 +187,7 @@ const MapLibreMap = forwardRef<MapLibreMapHandle, MapLibreMapProps>(({
         setMapLoaded(false);
       }
     };
-  }, []);
+  }, [center, onMapReady, showFullscreenControl, showGeolocateControl, zoom]);
 
   // Handle 3D mode toggle - add/remove terrain dynamically
   useEffect(() => {

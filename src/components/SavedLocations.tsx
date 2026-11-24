@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -14,6 +14,7 @@ import {
   Eye
 } from "lucide-react";
 import { toast } from "sonner";
+import type { User } from "@supabase/supabase-js";
 
 type SavedLocation = {
   id: string;
@@ -36,23 +37,9 @@ const SavedLocations = ({ onLocationSelect, currentLocation }: SavedLocationsPro
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [customName, setCustomName] = useState("");
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<User | null>(null);
 
-  useEffect(() => {
-    checkUser();
-  }, []);
-
-  const checkUser = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    setUser(user);
-    if (user) {
-      fetchLocations();
-    } else {
-      setIsLoading(false);
-    }
-  };
-
-  const fetchLocations = async () => {
+  const fetchLocations = useCallback(async () => {
     try {
       const { data, error } = await supabase
         .from("saved_locations")
@@ -66,7 +53,21 @@ const SavedLocations = ({ onLocationSelect, currentLocation }: SavedLocationsPro
     } finally {
       setIsLoading(false);
     }
-  };
+  }, []);
+
+  const checkUser = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    setUser(user);
+    if (user) {
+      fetchLocations();
+    } else {
+      setIsLoading(false);
+    }
+  }, [fetchLocations]);
+
+  useEffect(() => {
+    checkUser();
+  }, [checkUser]);
 
   const saveCurrentLocation = async () => {
     if (!currentLocation || !user) {

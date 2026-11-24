@@ -25,3 +25,12 @@ export function distanceKilometers(
     Math.sin(longitudeDelta / 2) ** 2;
   return 2 * earthRadiusKm * Math.asin(Math.sqrt(haversine));
 }
+
+export function getProviderObservationTime(observation: Record<string, unknown>): string | null {
+  const rawData = observation.raw_data;
+  if (!rawData || typeof rawData !== "object" || Array.isArray(rawData)) return null;
+  const current = (rawData as Record<string, unknown>).current;
+  if (!current || typeof current !== "object" || Array.isArray(current)) return null;
+  const time = (current as Record<string, unknown>).time;
+  return typeof time === "string" && time.trim() ? time : null;
+}

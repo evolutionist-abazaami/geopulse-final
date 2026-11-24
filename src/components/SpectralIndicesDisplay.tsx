@@ -94,13 +94,13 @@ const interpretMean = (config: typeof indexConfig[keyof typeof indexConfig], mea
 };
 
 // Safe numeric formatter
-const safeNumFixed = (val: any, decimals: number = 2): string => {
+const safeNumFixed = (val: unknown, decimals: number = 2): string => {
   const num = Number(val);
   return isNaN(num) ? "0.00" : num.toFixed(decimals);
 };
 
 // Normalize index value to 0-100 for progress bar
-const normalizeValue = (value: any): number => {
+const normalizeValue = (value: unknown): number => {
   const num = Number(value);
   const safeVal = isNaN(num) ? 0 : num;
   const normalized = ((safeVal + 1) / 2) * 100;

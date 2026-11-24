@@ -4,7 +4,6 @@ import {
   NDVI_SEVERITY_THRESHOLDS,
   SENTINEL_2_SENSOR,
   STATISTICS_GRID_SIZE,
-  TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH,
   NEAR_ZERO_NDVI_BASELINE,
 } from "./analysis-constants.ts";
 import type { Origin } from "./analysis-constants.ts";
@@ -61,11 +60,11 @@ const MODEL_GENERATED_FIELDS = new Set([
 const MEASURED_FIELDS = new Set([
   "area",
   "changePercent",
+  "changeUnit",
   "temporalBreakdown",
   "cloudCoverage",
   "dataQuality",
   "spectralIndices",
-  "predictiveModeling",
 ]);
 
 export function attachFieldProvenance<T extends Record<string, unknown>>(
@@ -120,7 +119,7 @@ export function normalizeNumericFields(
   method: AnalysisMethod,
   fields: SatelliteNumericFields,
 ): SatelliteNumericFields {
-  if (method === "measured") return fields;
+  if (method === "measured") return { ...fields, predictiveModeling: null };
   return {
     area: null,
     changePercent: null,
@@ -143,12 +142,6 @@ export function calculateChangePercent(baseline: number, current: number): numbe
   return Math.abs(baseline) > NEAR_ZERO_NDVI_BASELINE
     ? (delta / Math.abs(baseline)) * 100
     : delta * 100;
-}
-
-export function deriveTrendDirection(slopePercentPerMonth: number): "improving" | "stable" | "declining" {
-  if (slopePercentPerMonth > TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH) return "improving";
-  if (slopePercentPerMonth < -TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH) return "declining";
-  return "stable";
 }
 
 export function createAnalysisWindows(

@@ -7,10 +7,11 @@ import {
   normalizeNumericFields,
 } from "./satellite-analysis.ts";
 import { checkNarrativeNumbers } from "./narrative-guard.ts";
-import { determineHazardSeverity } from "./hazard-severity.ts";
+import { determineHazardSeverity, getProviderObservationTime } from "./hazard-severity.ts";
 import { groqChatCompletion } from "./groq-client.ts";
 import { getLandsatSourceForDate, parseLandsatStatistics } from "./earth-engine-statistics.ts";
 import { fetchSpectralStatistics } from "./sentinel-statistics.ts";
+import { normalizeModelConfidence } from "./file-analysis.ts";
 
 Deno.test("every analysis result field has a provenance entry", () => {
   const result = {
@@ -51,6 +52,43 @@ Deno.test("model-only analysis always nulls numeric satellite fields", () => {
       predictiveModeling: null,
     },
   );
+});
+
+Deno.test("measured values do not expose unvalidated trend projections or R-squared as confidence", () => {
+  const result = normalizeNumericFields("measured", {
+    area: "12 km²",
+    changePercent: 15,
+    spectralIndices: { ndvi: { mean: 0.5, min: 0.2, max: 0.8 } },
+    temporalBreakdown: [{ label: "Jan", changePercent: 2, months: 1 }],
+    predictiveModeling: {
+      trend_direction: "improving",
+      projected_change_6mo: 2,
+      projected_change_12mo: 4,
+      confidence: 100,
+      methodology: "test input must not be retained",
+    },
+  });
+
+  assertEquals(result.area, "12 km²");
+  assertEquals(result.changePercent, 15);
+  assertEquals(result.temporalBreakdown, [{ label: "Jan", changePercent: 2, months: 1 }]);
+  assertEquals(result.predictiveModeling, null);
+  const withProvenance = attachFieldProvenance(
+    { ...result },
+    "measured",
+    "2024-01-01",
+    "2024-12-31",
+  );
+  assertEquals(withProvenance.fieldProvenance.predictiveModeling.origin, "unavailable");
+});
+
+Deno.test("model-reported confidence is accepted only when finite and within range", () => {
+  assertEquals(normalizeModelConfidence(85), 85);
+  assertEquals(normalizeModelConfidence(0), null);
+  assertEquals(normalizeModelConfidence(101), null);
+  assertEquals(normalizeModelConfidence("85"), null);
+  assertEquals(normalizeModelConfidence(Number.NaN), null);
+  assertEquals(normalizeModelConfidence(Number.POSITIVE_INFINITY), null);
 });
 
 Deno.test("severity is derived from the exported measured-change thresholds", () => {
@@ -108,6 +146,14 @@ Deno.test("hazard severity uses documented ratio boundaries", () => {
   assertEquals(determineHazardSeverity(131, 100), "moderate");
   assertEquals(determineHazardSeverity(176, 100), "high");
   assertEquals(determineHazardSeverity(251, 100), "critical");
+});
+
+Deno.test("provider observation time is read from the stored raw response", () => {
+  assertEquals(
+    getProviderObservationTime({ raw_data: { current: { time: "2026-11-23T09:00" } } }),
+    "2026-11-23T09:00",
+  );
+  assertEquals(getProviderObservationTime({ observation_date: "2026-11-23T09:10:00Z" }), null);
 });
 
 Deno.test("Sentinel Hub statistics are parsed from a mocked API response", async () => {

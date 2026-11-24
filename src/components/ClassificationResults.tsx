@@ -90,16 +90,18 @@ const getSeverityColor = (severity: string): string => {
   }
 };
 
-const safeFixed = (val: any, decimals: number = 1): string => {
+const safeFixed = (val: unknown, decimals: number = 1): string => {
   const num = Number(val);
   return isNaN(num) ? "0" : num.toFixed(decimals);
 };
 
+type AvailabilityResult = { unavailable?: boolean };
+
 const ClassificationResults = ({ classificationResults, changeDetection }: ClassificationResultsProps) => {
   if (!classificationResults && !changeDetection) return null;
 
-  const classificationUnavailable = Boolean((classificationResults as any)?.unavailable);
-  const changeDetectionUnavailable = Boolean((changeDetection as any)?.unavailable);
+  const classificationUnavailable = Boolean((classificationResults as AvailabilityResult | null)?.unavailable);
+  const changeDetectionUnavailable = Boolean((changeDetection as AvailabilityResult | null)?.unavailable);
 
   return (
     <div className="space-y-4">
@@ -117,7 +119,9 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
           </div>
 
           {classificationUnavailable ? (
-            <p className="text-sm text-muted-foreground">Classification metrics are temporarily unavailable while the AI provider recovers.</p>
+            <p className="text-sm text-muted-foreground">
+              Land-cover classification is disabled in this build; no validated classification metrics are available.
+            </p>
           ) : (
             <>
 
@@ -197,7 +201,9 @@ const ClassificationResults = ({ classificationResults, changeDetection }: Class
           </div>
 
           {changeDetectionUnavailable ? (
-            <p className="text-sm text-muted-foreground">Change detection details are temporarily unavailable while the AI provider recovers.</p>
+            <p className="text-sm text-muted-foreground">
+              Pixel-wise change detection is disabled in this build; no validated change results are available.
+            </p>
           ) : (
             <>
 

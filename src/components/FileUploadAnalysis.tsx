@@ -9,7 +9,23 @@ import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 
 interface FileUploadAnalysisProps {
-  onAnalysisComplete?: (result: any) => void;
+  onAnalysisComplete?: (result: FileAnalysisResult) => void;
+}
+
+interface FileAnalysisResult {
+  summary: string;
+  findings: string[];
+  detailedAnalysis: string;
+  recommendations: string[];
+  confidenceLevel?: number | null;
+  dataSources: string[];
+  methodology: string;
+  severity: string;
+  filesAnalyzed: { name: string; type: string; size: string }[];
+  reportType: "professional" | "simple";
+  timestamp: string;
+  dataProvenance: { analysisMethod: string; disclaimer: string };
+  [key: string]: unknown;
 }
 
 const generateLocalFileAnalysis = (fileList: File[], type: "professional" | "simple") => {
@@ -18,26 +34,26 @@ const generateLocalFileAnalysis = (fileList: File[], type: "professional" | "sim
 
   return {
     summary: isSimple
-      ? `The analysis service is unreachable, so this is a placeholder summary for ${fileList.length} uploaded document(s) (${fileNames}) - it does not reflect their actual content.`
-      : `The analysis service is unreachable. This is placeholder text, not a real analysis of the uploaded datasets (${fileNames}).`,
+      ? `No AI analysis was returned, so this is a placeholder summary for ${fileList.length} uploaded document(s) (${fileNames}) - it does not reflect their actual content.`
+      : `No AI analysis was returned. This is placeholder text, not a real analysis of the uploaded datasets (${fileNames}).`,
     findings: fileList.map((file) =>
-      `File "${file.name}" (${(file.size / 1024).toFixed(1)} KB) was received, but not analyzed - the AI analysis service was unavailable.`
+      `File "${file.name}" (${(file.size / 1024).toFixed(1)} KB) was received, but not analyzed - no AI result was available.`
     ),
-    detailedAnalysis: `The file analysis service could not be reached, so no real inspection of "${fileNames}" was performed. Retry once the service is available for an actual analysis.`,
+    detailedAnalysis: `No AI analysis was returned, so no real inspection of "${fileNames}" was performed. Check the request and service status before retrying.`,
     recommendations: [
-      `Retry the analysis once the AI analysis service is reachable.`,
-      `If this persists, check your connection or try again in a few minutes.`,
+      `Retry after checking the request and analysis service status.`,
+      `Do not use this placeholder as an assessment of the uploaded files.`,
     ],
-    confidenceLevel: 0,
+    confidenceLevel: null,
     dataSources: [],
-    methodology: "None - analysis service unavailable, this is placeholder text only",
+    methodology: "None - no AI analysis was returned; this is placeholder text only",
     severity: "low",
     filesAnalyzed: fileList.map(f => ({ name: f.name, type: f.type, size: `${(f.size / 1024).toFixed(1)} KB` })),
     reportType: type,
     timestamp: new Date().toISOString(),
     dataProvenance: {
       analysisMethod: "unavailable",
-      disclaimer: "The AI analysis service could not be reached, so this is placeholder text - it is not a real analysis of your uploaded file(s). Please retry shortly.",
+      disclaimer: "No AI analysis was returned, so this is placeholder text - it is not a real analysis of your uploaded file(s).",
     },
   };
 };
@@ -45,9 +61,17 @@ const generateLocalFileAnalysis = (fileList: File[], type: "professional" | "sim
 const FileUploadAnalysis = ({ onAnalysisComplete }: FileUploadAnalysisProps) => {
   const [files, setFiles] = useState<File[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [analysisResult, setAnalysisResult] = useState<any>(null);
+  const [analysisResult, setAnalysisResult] = useState<FileAnalysisResult | null>(null);
   const [reportType, setReportType] = useState<"professional" | "simple">("simple");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const reportedConfidence = analysisResult
+    && analysisResult.dataProvenance?.analysisMethod !== "unavailable"
+    && typeof analysisResult.confidenceLevel === "number"
+    && Number.isFinite(analysisResult.confidenceLevel)
+    && analysisResult.confidenceLevel >= 1
+    && analysisResult.confidenceLevel <= 100
+    ? analysisResult.confidenceLevel
+    : null;
 
   const acceptedTypes = [
     "image/jpeg",
@@ -130,23 +154,27 @@ const FileUploadAnalysis = ({ onAnalysisComplete }: FileUploadAnalysisProps) => 
         }
       );
 
-      let result;
+      let result: FileAnalysisResult;
       if (!response.ok) {
-        console.warn(`File analysis API returned ${response.status}. Using GeoPulse Local File Engine.`);
+        console.warn(`File analysis API returned ${response.status}; no AI file analysis is available.`);
         result = generateLocalFileAnalysis(files, reportType);
       } else {
-        result = await response.json();
+        result = await response.json() as FileAnalysisResult;
       }
 
       setAnalysisResult(result);
       onAnalysisComplete?.(result);
-      toast.success("Analysis complete!");
+      if (result.dataProvenance?.analysisMethod === "unavailable") {
+        toast.error("Analysis unavailable; no AI file analysis was performed.");
+      } else {
+        toast.success("Analysis complete.");
+      }
     } catch (error) {
-      console.warn("File analysis API unreachable. Engaging local file analyzer:", error);
+      console.warn("File analysis request failed; no AI file analysis is available:", error);
       const fallbackResult = generateLocalFileAnalysis(files, reportType);
       setAnalysisResult(fallbackResult);
       onAnalysisComplete?.(fallbackResult);
-      toast.success("Analysis complete (GeoPulse File Engine)");
+      toast.error("Analysis unavailable; no AI file analysis was performed.");
     } finally {
       setIsAnalyzing(false);
     }
@@ -178,15 +206,19 @@ DETAILED ANALYSIS
 -----------------
 ${analysisResult.detailedAnalysis || "N/A"}
 
-METHODOLOGY
------------
-${analysisResult.methodology || "AI-powered image and data analysis using satellite imagery interpretation algorithms."}
+MODEL-REPORTED METHODOLOGY (NOT INDEPENDENTLY VERIFIED)
+-------------------------------------------------------
+${analysisResult.methodology || "Not provided by the analysis service."}
 
-DATA QUALITY ASSESSMENT
------------------------
-Confidence Level: ${analysisResult.confidenceLevel || 85}%
-Data Sources: ${analysisResult.dataSources?.join(", ") || "Uploaded files"}
+MODEL-REPORTED METADATA (NOT INDEPENDENTLY VERIFIED)
+----------------------------------------------------
+Confidence: ${reportedConfidence === null ? "Not provided" : `${reportedConfidence}% (uncalibrated self-report)`}
+Data sources: ${analysisResult.dataSources?.join(", ") || "Not independently verified"}
 ` : ""}
+
+DATA PROVENANCE / LIMITATIONS
+-----------------------------
+${analysisResult.dataProvenance?.disclaimer || "No provenance disclaimer was provided."}
 
 RECOMMENDATIONS
 ---------------
@@ -315,9 +347,13 @@ Report generated by GeoPulse AI Environmental Analysis System
       {/* Analysis Results */}
       {analysisResult && (
         <div className="space-y-4 pt-4 border-t border-border">
-          <div className="flex items-center gap-2 text-primary">
-            <CheckCircle className="h-5 w-5" />
-            <h4 className="font-semibold">Analysis Complete</h4>
+          <div className={`flex items-center gap-2 ${analysisResult.dataProvenance?.analysisMethod === "unavailable" ? "text-amber-600" : "text-primary"}`}>
+            {analysisResult.dataProvenance?.analysisMethod === "unavailable"
+              ? <AlertTriangle className="h-5 w-5" />
+              : <CheckCircle className="h-5 w-5" />}
+            <h4 className="font-semibold">
+              {analysisResult.dataProvenance?.analysisMethod === "unavailable" ? "Analysis unavailable" : "Analysis complete"}
+            </h4>
           </div>
 
           {analysisResult.dataProvenance?.disclaimer && (
@@ -346,12 +382,12 @@ Report generated by GeoPulse AI Environmental Analysis System
             </div>
           )}
 
-          <div className="flex items-center justify-between p-3 bg-primary/5 rounded-lg">
-            <span className="text-sm">Confidence Level</span>
-            <span className="font-semibold text-primary">
-              {analysisResult.confidenceLevel || 85}%
-            </span>
-          </div>
+          {reportedConfidence !== null && (
+            <div className="flex items-center justify-between p-3 bg-primary/5 rounded-lg">
+              <span className="text-sm">Model-reported confidence (not calibrated)</span>
+              <span className="font-semibold text-primary">{reportedConfidence}%</span>
+            </div>
+          )}
 
           <Button variant="outline" className="w-full" onClick={downloadReport}>
             <Download className="h-4 w-4 mr-2" />

@@ -28,9 +28,6 @@ export const NDVI_SEVERITY_THRESHOLDS = {
   critical: 15,
 } as const;
 
-// Regression slopes smaller than this magnitude are reported as stable.
-export const TREND_SLOPE_DEADBAND_PERCENT_PER_MONTH = 0.1;
-
 export const HAZARD_SEVERITY_RATIO_THRESHOLDS = {
   moderate: 0.3,
   high: 0.75,

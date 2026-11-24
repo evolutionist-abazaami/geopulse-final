@@ -107,7 +107,7 @@ const AnimatedMapTransition = ({
       mapInstance.current = null;
       setMapLoaded(false);
     };
-  }, []);
+  }, [center, zoom]);
 
   // Update map center
   useEffect(() => {

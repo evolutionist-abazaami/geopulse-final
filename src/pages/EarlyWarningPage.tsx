@@ -14,6 +14,7 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { TrendChart } from "@/components/charts/TrendChart";
+import type { User } from "@supabase/supabase-js";
 
 type HazardAlert = {
   id: string;
@@ -27,7 +28,7 @@ type HazardAlert = {
   metric_name: string | null;
   metric_value: number | null;
   threshold_value: number | null;
-  ai_analysis: any;
+  ai_analysis: { assessment?: string } | null;
   is_read: boolean;
   is_resolved: boolean;
   created_at: string;
@@ -132,7 +133,7 @@ type Tab = "alerts" | "thresholds" | "weather" | "trends";
  */
 export default function EarlyWarningPage() {
   const navigate = useNavigate();
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [alerts, setAlerts] = useState<HazardAlert[]>([]);
   const [thresholds, setThresholds] = useState<MonitoringThreshold[]>([]);
@@ -147,6 +148,8 @@ export default function EarlyWarningPage() {
 
   useEffect(() => {
     checkUserAndLoad();
+    // Mount-only auth and initial data load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -205,8 +208,8 @@ export default function EarlyWarningPage() {
       if (error) throw error;
       toast.success(`Weather data ingested: ${data.ingested} locations`);
       await loadAllData();
-    } catch (err: any) {
-      toast.error("Failed to ingest weather data: " + err.message);
+    } catch (err: unknown) {
+      toast.error("Failed to ingest weather data: " + (err instanceof Error ? err.message : "Unknown error"));
     } finally {
       setIsIngesting(false);
     }
@@ -219,8 +222,8 @@ export default function EarlyWarningPage() {
       if (error) throw error;
       toast.success(`Evaluation complete: ${data.alerts_created} new alerts`);
       await loadAllData();
-    } catch (err: any) {
-      toast.error("Failed to evaluate hazards: " + err.message);
+    } catch (err: unknown) {
+      toast.error("Failed to evaluate hazards: " + (err instanceof Error ? err.message : "Unknown error"));
     } finally {
       setIsEvaluating(false);
     }
@@ -316,7 +319,7 @@ export default function EarlyWarningPage() {
               <Shield className="w-5 h-5 text-brand" />
               Early Warning
             </h1>
-            <p className="text-[14px] text-gray-500 dark:text-v2-muted mt-1">Automated environmental hazard monitoring and alerts for Africa</p>
+            <p className="text-[14px] text-gray-500 dark:text-v2-muted mt-1">Experimental threshold alerts using Open-Meteo data; not validated forecasts or official warnings.</p>
           </div>
           <div className="flex gap-2 flex-wrap">
             <button
@@ -350,19 +353,19 @@ export default function EarlyWarningPage() {
             <CollapsibleContent className="mt-3 space-y-3 text-[13px] text-gray-600 dark:text-v2-secondary">
               <div className="flex items-start gap-2.5">
                 <div className="h-5 w-5 rounded-full bg-brand-dim flex items-center justify-center text-[10px] font-bold text-brand mt-0.5 flex-shrink-0">1</div>
-                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Real weather data is collected automatically.</strong> Every 30 minutes, current temperature, rainfall, soil moisture, wind speed, and humidity are fetched from the Open-Meteo API for each monitored location.</p>
+                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Open-Meteo data is collected automatically.</strong> When scheduled jobs are configured, provider temperature, precipitation, soil-moisture, wind, and humidity values are fetched every 30 minutes. These are not field observations collected by GeoPulse.</p>
               </div>
               <div className="flex items-start gap-2.5">
                 <div className="h-5 w-5 rounded-full bg-brand-dim flex items-center justify-center text-[10px] font-bold text-brand mt-0.5 flex-shrink-0">2</div>
-                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Your thresholds are checked automatically.</strong> Every 15 minutes, each active threshold you've configured below (e.g. "temperature above 38°C in Accra") is compared against the latest real reading for that region.</p>
+                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Your thresholds are checked automatically.</strong> When scheduled evaluations run, each active threshold is compared with the nearest stored Open-Meteo record within 25 km. There is currently no maximum-age filter, so an alert may use stale data; check the provider time and ingestion time shown in its description.</p>
               </div>
               <div className="flex items-start gap-2.5">
                 <div className="h-5 w-5 rounded-full bg-brand-dim flex items-center justify-center text-[10px] font-bold text-brand mt-0.5 flex-shrink-0">3</div>
-                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">An alert is created when a threshold is exceeded.</strong> The AI assistant adds a short plain-language risk assessment alongside the real reading that crossed your threshold.</p>
+                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">An alert is created when a configured threshold is crossed.</strong> Its description identifies the source, provider time, and record ingestion time. An optional Groq-generated explanation is model-written text, not a measured result or validated risk prediction.</p>
               </div>
               <div className="pt-2 border-t border-brand-border/50 flex items-start gap-2.5">
                 <Zap className="h-4 w-4 text-brand mt-0.5 flex-shrink-0" />
-                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Why this matters:</strong> because ingestion and evaluation now run on a schedule in the background, you don't have to keep this page open or click anything to catch an emerging condition - alerts accumulate here even while you're away.</p>
+                <p><strong className="text-gray-900 dark:text-v2-primary font-medium">Important limitation:</strong> scheduled jobs can update this dashboard while it is closed, but provider availability and data freshness are not guaranteed. Verify timestamps and consult official warning authorities for safety decisions.</p>
               </div>
             </CollapsibleContent>
           </div>

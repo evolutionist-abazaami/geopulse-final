@@ -4674,6 +4674,7 @@
         "npm:@types/node@^22.16.5",
         "npm:@types/react-dom@^18.3.7",
         "npm:@types/react@^18.3.23",
+        "npm:@types/wellknown@~0.5.8",
         "npm:@vitejs/plugin-react-swc@^3.11.0",
         "npm:autoprefixer@^10.4.21",
         "npm:class-variance-authority@~0.7.1",
@@ -4684,7 +4685,9 @@
         "npm:eslint-plugin-react-hooks@^5.2.0",
         "npm:eslint-plugin-react-refresh@~0.4.20",
         "npm:eslint@^9.32.0",
+        "npm:fflate@~0.8.2",
         "npm:framer-motion@13",
+        "npm:geotiff@^3.0.5",
         "npm:globals@^15.15.0",
         "npm:input-otp@^1.4.2",
         "npm:jspdf@4",
@@ -4693,6 +4696,7 @@
         "npm:maplibre-gl@^5.14.0",
         "npm:next-themes@0.3",
         "npm:postcss@^8.5.6",
+        "npm:proj4@^2.22.0",
         "npm:react-day-picker@^8.10.1",
         "npm:react-dom@^18.3.1",
         "npm:react-hook-form@^7.61.1",
@@ -4712,6 +4716,7 @@
         "npm:vaul@~0.9.9",
         "npm:vite@^5.4.19",
         "npm:vitest@^2.1.9",
+        "npm:wellknown@0.5",
         "npm:zod@^3.25.76"
       ]
     }

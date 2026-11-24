@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Loader2, MapPin, Thermometer, CloudRain, Droplets, Wind, Activity, Zap, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
+import { useCallback } from "react";
+import type { Database } from "@/integrations/supabase/types";
 
 interface RealTimeRegionalStatusProps {
   regionName?: string;
@@ -13,63 +15,13 @@ interface RealTimeRegionalStatusProps {
 }
 
 const RealTimeRegionalStatus = ({ regionName, lat, lng }: RealTimeRegionalStatusProps) => {
-  const [status, setStatus] = useState<any>(null);
+  type WeatherObservation = Database["public"]["Tables"]["weather_observations"]["Row"];
+  const [status, setStatus] = useState<WeatherObservation | null>(null);
   const [narrative, setNarrative] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingNarrative, setIsGeneratingNarrative] = useState(false);
 
-  useEffect(() => {
-    if (regionName) {
-      fetchLatestStatus();
-    }
-  }, [regionName]);
-
-  // Realtime subscription for weather updates
-  useEffect(() => {
-    if (!regionName) return;
-
-    const channel = supabase
-      .channel(`weather-realtime-${regionName}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "weather_observations" },
-        (payload) => {
-          const obs = payload.new as any;
-          if (obs.region_name === regionName) {
-            setStatus(obs);
-            generateNarrative(obs);
-            toast.info(`📡 Live update for ${regionName}`);
-          }
-        }
-      )
-      .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
-  }, [regionName]);
-
-  const fetchLatestStatus = async () => {
-    setIsLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from("weather_observations")
-        .select("*")
-        .eq("region_name", regionName!)
-        .order("observation_date", { ascending: false })
-        .limit(1);
-
-      if (error) throw error;
-      if (data && data.length > 0) {
-        setStatus(data[0]);
-        await generateNarrative(data[0]);
-      }
-    } catch (err) {
-      console.error("Failed to fetch status:", err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const generateNarrative = async (obs: any) => {
+  const generateNarrative = useCallback(async (obs: WeatherObservation) => {
     setIsGeneratingNarrative(true);
     try {
       const { data, error } = await supabase.functions.invoke("ai-assistant", {
@@ -95,13 +47,66 @@ Focus on what is actually happening right now - describe conditions in simple te
       });
 
       if (error) throw error;
-      setNarrative(data?.response || data?.choices?.[0]?.message?.content || "Unable to generate narrative.");
+      const response = data as { response?: string; choices?: { message?: { content?: string } }[] } | null;
+      setNarrative(response?.response || response?.choices?.[0]?.message?.content || "Unable to generate narrative.");
     } catch {
       setNarrative("Real-time narrative unavailable. See metrics below for current conditions.");
     } finally {
       setIsGeneratingNarrative(false);
     }
-  };
+  }, []);
+
+  const fetchLatestStatus = useCallback(async () => {
+    if (!regionName) return;
+    setIsLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("weather_observations")
+        .select("*")
+        .eq("region_name", regionName)
+        .order("observation_date", { ascending: false })
+        .limit(1);
+
+      if (error) throw error;
+      if (data && data.length > 0) {
+        setStatus(data[0]);
+        await generateNarrative(data[0]);
+      }
+    } catch (err) {
+      console.error("Failed to fetch status:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [generateNarrative, regionName]);
+
+  useEffect(() => {
+    if (regionName) {
+      fetchLatestStatus();
+    }
+  }, [fetchLatestStatus, regionName]);
+
+  // Realtime subscription for weather updates
+  useEffect(() => {
+    if (!regionName) return;
+
+    const channel = supabase
+      .channel(`weather-realtime-${regionName}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "weather_observations" },
+        (payload) => {
+          const obs = payload.new as WeatherObservation;
+          if (obs.region_name === regionName) {
+            setStatus(obs);
+            generateNarrative(obs);
+            toast.info(`📡 Live update for ${regionName}`);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [generateNarrative, regionName]);
 
   const handleRefresh = async () => {
     try {

@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { normalizeModelConfidence } from "../_shared/file-analysis.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -309,15 +310,16 @@ Please provide a comprehensive ${isSimple ? 'simple, easy-to-understand' : 'prof
         findings: [],
         detailedAnalysis: analysis,
         recommendations: [],
-        confidenceLevel: 80,
+        confidenceLevel: null,
         dataSources: ["Uploaded files"],
-        methodology: "AI-powered file analysis",
+        methodology: null,
         severity: "medium"
       };
     }
 
     const result = {
       ...parsedAnalysis,
+      confidenceLevel: normalizeModelConfidence(parsedAnalysis.confidenceLevel),
       filesAnalyzed: fileDescriptions,
       reportType,
       timestamp: new Date().toISOString(),

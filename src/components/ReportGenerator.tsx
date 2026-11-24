@@ -11,6 +11,7 @@ import { supabase } from "@/integrations/supabase/client";
 import jsPDF from "jspdf";
 import maplibregl from "maplibre-gl";
 import type { MapOptions, StyleSpecification } from "maplibre-gl";
+import { paginateReportTableRows, wrapReportTableRows } from "@/lib/report-layout";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 interface ReportProvenance {
@@ -32,6 +33,7 @@ interface ReportAnalysisData {
   end_date?: string;
   changePercent?: number | string | null;
   change_percent?: number | string | null;
+  changeUnit?: string | null;
   area?: string | number | null;
   severity?: string | null;
   sensorInfo?: { sensor?: string };
@@ -73,6 +75,12 @@ interface TemporalBreakdownEntry {
   changePercent: number;
 }
 
+const getChangeUnitLabel = (value: unknown): string => {
+  if (value === "percent") return "percent";
+  if (value === "percentage_points") return "percentage points";
+  return "unit not reported";
+};
+
 const readTemporalBreakdown = (value: unknown): TemporalBreakdownEntry[] => {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is TemporalBreakdownEntry => {
@@ -108,7 +116,7 @@ const sanitizeForPdf = (text: unknown): string => {
  * instead of asking an AI model to illustrate one. Deterministic, free,
  * and always available - no network call, no quota, no hallucinated values.
  */
-const renderTrendChartPng = (periods: { label: string; value: number }[]): string => {
+const renderTrendChartPng = (periods: { label: string; value: number }[], unitLabel: string): string => {
   const width = 900;
   const height = 300;
   const canvas = document.createElement("canvas");
@@ -125,6 +133,7 @@ const renderTrendChartPng = (periods: { label: string; value: number }[]): strin
   const chartH = height - padding.top - padding.bottom;
 
   const values = periods.map((p) => p.value);
+  const valueSuffix = unitLabel === "percent" ? "%" : unitLabel === "percentage points" ? " pp" : "";
   const minVal = Math.min(0, ...values);
   const maxVal = Math.max(0, ...values, 1);
   const range = maxVal - minVal || 1;
@@ -144,7 +153,7 @@ const renderTrendChartPng = (periods: { label: string; value: number }[]): strin
     ctx.moveTo(padding.left, y);
     ctx.lineTo(padding.left + chartW, y);
     ctx.stroke();
-    ctx.fillText(`${v.toFixed(0)}%`, padding.left - 10, y + 7);
+    ctx.fillText(`${v.toFixed(0)}${valueSuffix}`, padding.left - 10, y + 7);
   }
 
   const barGap = 24;
@@ -162,7 +171,7 @@ const renderTrendChartPng = (periods: { label: string; value: number }[]): strin
     ctx.fillStyle = "#374151";
     ctx.textAlign = "center";
     ctx.font = "bold 18px Arial";
-    ctx.fillText(`${p.value.toFixed(1)}%`, x + barWidth / 2, barTop - 8);
+    ctx.fillText(`${p.value.toFixed(1)}${valueSuffix}`, x + barWidth / 2, barTop - 8);
 
     ctx.fillStyle = "#6b7280";
     ctx.font = "16px Arial";
@@ -459,9 +468,8 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
   const [showPreview, setShowPreview] = useState(false);
   const [selectedAdvancedViz, setSelectedAdvancedViz] = useState<string[]>(['terrain_3d', 'risk_zones']);
   const [previewImages, setPreviewImages] = useState<Record<string, string | null>>({});
-  // Side-channel for the Quality Assurance / References sections: which
-  // panels in the most recent generation actually came from real Sentinel
-  // Hub imagery vs. an AI illustration, keyed by visualization type.
+  // Side-channel for the Quality Assurance / References sections: the provider
+  // source reported for each returned visualization, keyed by visualization type.
   const lastDataSourcesRef = useRef<Record<string, string>>({});
 
   const generateVisualization = async (type: string): Promise<{ imageUrl: string | null; gridData?: RiskGridData; dataSource?: string } | null> => {
@@ -486,8 +494,10 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             lng: lng ?? analysisData?.locations?.[0]?.lng,
             endDate: analysisData?.endDate || analysisData?.end_date,
             data: analysisData,
+            allowAiIllustration: false,
           }),
-        }
+          signal: AbortSignal.timeout(15000),
+        },
       );
 
       if (!response.ok) {
@@ -639,7 +649,10 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
               label: String(p.label || p.period || "Period"),
               value: p.changePercent,
             }));
-            advancedImages.temporal_animation = renderTrendChartPng(periods);
+            advancedImages.temporal_animation = renderTrendChartPng(
+              periods,
+              getChangeUnitLabel(analysisData?.changeUnit),
+            );
             lastDataSourcesRef.current.temporal_animation = "Measured temporal NDVI change (rendered on-device)";
           }
 
@@ -701,6 +714,11 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
         return;
       }
       const changePercent = parsedChange;
+      const changeUnitLabel = analysisData?.fieldProvenance?.changeUnit?.origin === "measured"
+        ? getChangeUnitLabel(analysisData.changeUnit)
+        : "unit not reported";
+      const formatChangeValue = (value: number) =>
+        `${value.toFixed(1)}${changeUnitLabel === "percent" ? "%" : changeUnitLabel === "percentage points" ? " pp" : ""}`;
       const severity = analysisData?.fieldProvenance?.severity?.origin === "measured"
         ? String(analysisData.severity ?? "Unavailable")
         : "Unavailable";
@@ -750,10 +768,30 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       // Helper functions
       const addWrappedText = (text: string, x: number, y: number, maxWidth: number, lineHeight: number = 5): number => {
         const lines = pdf.splitTextToSize(sanitizeForPdf(text), maxWidth);
-        const maxLines = Math.floor((pageHeight - y - 25) / lineHeight);
-        const displayLines = lines.slice(0, Math.min(lines.length, maxLines));
-        pdf.text(displayLines, x, y);
-        return y + (displayLines.length * lineHeight);
+        let currentY = y;
+        let lineOffset = 0;
+
+        while (lineOffset < lines.length) {
+          const availableLines = Math.floor((pageHeight - currentY - 25) / lineHeight);
+          if (availableLines < 1) {
+            pdf.addPage();
+            addPageHeader();
+            currentY = 22;
+            continue;
+          }
+
+          const pageLines = lines.slice(lineOffset, lineOffset + availableLines);
+          pdf.text(pageLines, x, currentY);
+          currentY += pageLines.length * lineHeight;
+          lineOffset += pageLines.length;
+          if (lineOffset < lines.length) {
+            pdf.addPage();
+            addPageHeader();
+            currentY = 22;
+          }
+        }
+
+        return currentY;
       };
 
       const addSectionTitle = (title: string, y: number, sectionNumber?: string): number => {
@@ -776,50 +814,89 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       };
 
       const addTableWithBorders = (headers: string[], rows: string[][], y: number, colWidths: number[]): number => {
-        const rowHeight = 8;
         const cellPadding = 2;
-        let currentY = y;
-        
-        // Header row
-        pdf.setFillColor(243, 244, 246);
-        pdf.rect(margin, currentY, contentWidth, rowHeight, "F");
+        const lineHeight = 3.5;
+        const rowPadding = 4;
+        const bottomLimit = pageHeight - 18;
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(8);
-        pdf.setTextColor(55, 65, 81);
-        
-        let xPos = margin;
-        headers.forEach((header, i) => {
-          pdf.text(sanitizeForPdf(header), xPos + cellPadding, currentY + 5.5);
-          xPos += colWidths[i];
-        });
-        
-        // Draw header bottom border
-        pdf.setDrawColor(209, 213, 219);
-        pdf.setLineWidth(0.3);
-        pdf.line(margin, currentY + rowHeight, margin + contentWidth, currentY + rowHeight);
-        currentY += rowHeight;
-        
-        // Data rows
-        pdf.setFont("helvetica", "normal");
-        pdf.setFontSize(8);
-        
-        rows.forEach((row, rowIndex) => {
-          // Alternate row background
-          if (rowIndex % 2 === 1) {
+        const wrappedHeaders = wrapReportTableRows(
+          [headers.map(sanitizeForPdf)],
+          colWidths,
+          (text, width) => pdf.splitTextToSize(text, width),
+          cellPadding * 2,
+        )[0];
+        const headerHeight = Math.max(8, wrappedHeaders.lineCount * lineHeight + rowPadding);
+        const wrappedRows = wrapReportTableRows(
+          rows.map((row) => row.map(sanitizeForPdf)),
+          colWidths,
+          (text, width) => pdf.splitTextToSize(text, width),
+          cellPadding * 2,
+        );
+        const pagination = paginateReportTableRows(
+          wrappedRows.map((row) => row.lineCount),
+          y,
+          bottomLimit,
+          headerHeight,
+          22,
+          lineHeight,
+          rowPadding,
+        );
+        let currentY = y;
+
+        const drawHeader = () => {
+          pdf.setFont("helvetica", "bold");
+          pdf.setFontSize(8);
+          pdf.setFillColor(243, 244, 246);
+          pdf.rect(margin, currentY, contentWidth, headerHeight, "F");
+          pdf.setTextColor(55, 65, 81);
+          let xPos = margin;
+          wrappedHeaders.cells.forEach((lines, columnIndex) => {
+            pdf.text(lines, xPos + cellPadding, currentY + rowPadding);
+            xPos += colWidths[columnIndex];
+          });
+          pdf.setDrawColor(209, 213, 219);
+          pdf.rect(margin, currentY, contentWidth, headerHeight);
+          currentY += headerHeight;
+        };
+
+        const startContinuationPage = () => {
+          pdf.addPage();
+          addPageHeader();
+          currentY = 22;
+          drawHeader();
+        };
+
+        if (pagination.startOnNewPage) {
+          startContinuationPage();
+        } else {
+          drawHeader();
+        }
+
+        pagination.chunks.forEach((chunk) => {
+          if (chunk.pageBreakBefore) startContinuationPage();
+          const row = wrappedRows[chunk.rowIndex];
+          if (chunk.rowIndex % 2 === 1) {
             pdf.setFillColor(249, 250, 251);
-            pdf.rect(margin, currentY, contentWidth, rowHeight, "F");
+            pdf.rect(margin, currentY, contentWidth, chunk.height, "F");
           }
-          
-          xPos = margin;
-          row.forEach((cell, i) => {
-            // Check if this is a status column (last column typically)
-            const displayCell = sanitizeForPdf(cell);
-            if (i === row.length - 1 && (displayCell.includes('UP') || displayCell.includes('DOWN') || displayCell === 'FLAT' || displayCell === 'MODERATE' || displayCell === 'HIGH' || displayCell === 'LOW' || displayCell === 'CRITICAL')) {
-              if (displayCell.includes('STRONG UP') || displayCell === 'HIGH' || displayCell === 'CRITICAL') {
+
+          pdf.setFont("helvetica", "normal");
+          pdf.setFontSize(8);
+          let xPos = margin;
+          row.cells.forEach((cellLines, columnIndex) => {
+            const cellText = cellLines.slice(chunk.lineOffset, chunk.lineOffset + chunk.lineCount);
+            const displayCell = cellLines.join(" ");
+            if (columnIndex === row.cells.length - 1 &&
+              (displayCell.includes("UP") || displayCell.includes("DOWN") ||
+                displayCell === "FLAT" || displayCell === "MODERATE" ||
+                displayCell === "HIGH" || displayCell === "LOW" ||
+                displayCell === "CRITICAL")) {
+              if (displayCell.includes("STRONG UP") || displayCell === "HIGH" || displayCell === "CRITICAL") {
                 pdf.setTextColor(220, 38, 38);
-              } else if (displayCell.includes('UP') || displayCell === 'MODERATE') {
+              } else if (displayCell.includes("UP") || displayCell === "MODERATE") {
                 pdf.setTextColor(234, 179, 8);
-              } else if (displayCell.includes('DOWN') || displayCell === 'LOW') {
+              } else if (displayCell.includes("DOWN") || displayCell === "LOW") {
                 pdf.setTextColor(34, 197, 94);
               } else {
                 pdf.setTextColor(75, 85, 99);
@@ -827,22 +904,15 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             } else {
               pdf.setTextColor(75, 85, 99);
             }
-            
-            const truncatedText = pdf.splitTextToSize(displayCell, colWidths[i] - cellPadding * 2)[0] || displayCell;
-            pdf.text(truncatedText, xPos + cellPadding, currentY + 5.5);
-            xPos += colWidths[i];
+            pdf.text(cellText.length > 0 ? cellText : [""], xPos + cellPadding, currentY + rowPadding);
+            xPos += colWidths[columnIndex];
           });
-          
-          // Row border
+
           pdf.setDrawColor(229, 231, 235);
-          pdf.line(margin, currentY + rowHeight, margin + contentWidth, currentY + rowHeight);
-          currentY += rowHeight;
+          pdf.rect(margin, currentY, contentWidth, chunk.height);
+          currentY += chunk.height;
         });
-        
-        // Table outer border
-        pdf.setDrawColor(209, 213, 219);
-        pdf.rect(margin, y, contentWidth, currentY - y);
-        
+
         return currentY + 5;
       };
 
@@ -935,7 +1005,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       
       pdf.setFillColor(34, 197, 94);
       pdf.roundedRect(pageWidth - margin - 50, metaStartY + 8, 45, 8, 2, 2, "F");
-      pdf.text("NDVI change percentage", pageWidth - margin - 48, metaStartY + 13);
+      pdf.text("NDVI change value", pageWidth - margin - 48, metaStartY + 13);
 
       yPos += 65;
 
@@ -1040,7 +1110,7 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       const assessmentHeaders = ["MEASUREMENT", "VALUE", "PROVENANCE"];
       const assessmentRows = [
         ["Area analyzed", area, "Satellite measurement"],
-        ["NDVI change", `${changePercent.toFixed(1)}%`, "Measured"],
+        ["NDVI change", formatChangeValue(changePercent), "Measured"],
         ["Sensor", sensorName, "Analysis metadata"],
         ["Severity", severity, severity === "Unavailable" ? "Unavailable" : "Measured"],
       ];
@@ -1244,10 +1314,15 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
       const temporalRows = Array.isArray(periodsFromData) && periodsFromData.length > 0
         ? periodsFromData.map((p) => [
             String(p.label || p.period || "Period"),
-            `${p.changePercent.toFixed(1)}%`,
+            formatChangeValue(p.changePercent),
           ])
-        : [[`${formatReportDate(startDate)} - ${formatReportDate(endDate)}`, `${changePercent.toFixed(1)}%`]];
-      yPos = addTableWithBorders(["PERIOD", "MEASURED NDVI CHANGE"], temporalRows, yPos, [85, 85]);
+        : [[`${formatReportDate(startDate)} - ${formatReportDate(endDate)}`, formatChangeValue(changePercent)]];
+      yPos = addTableWithBorders(
+        ["PERIOD", `MEASURED NDVI CHANGE (${changeUnitLabel.toUpperCase()})`],
+        temporalRows,
+        yPos,
+        [85, 85],
+      );
       yPos += 5;
 
       pdf.setFontSize(8);
@@ -1274,16 +1349,17 @@ const ReportGenerator = ({ analysisData, eventType, region, lat, lng, onCaptureM
             value: p.changePercent,
           }))
         : [{ label: "Full Study Period", value: changePercent }];
-      const chartImage = renderTrendChartPng(chartPeriods);
-
-      if (chartImage) {
+      try {
+        const chartImage = renderTrendChartPng(chartPeriods, changeUnitLabel);
+        if (!chartImage) throw new Error("Chart canvas could not be rendered.");
         pdf.addImage(chartImage, "PNG", margin + 5, yPos + 5, chartImgWidth, chartImgHeight);
-      } else {
+      } catch (error) {
+        console.warn("Measured chart could not be embedded; the data table remains in the report.", error);
         pdf.setFontSize(12);
         pdf.setTextColor(107, 114, 128);
-        pdf.text("Trend Analysis Chart", margin + contentWidth / 2 - 30, yPos + 20);
+        pdf.text("Chart unavailable; measured values are listed in the table above.", margin + 12, yPos + 20);
         pdf.setFontSize(9);
-        pdf.text(`${changePercent.toFixed(1)}% change detected over study period`, margin + contentWidth / 2 - 45, yPos + 32);
+        pdf.text(`${chartPeriods.length} measured period value(s) are retained in the table above.`, margin + 12, yPos + 32);
       }
       yPos += 65;
       

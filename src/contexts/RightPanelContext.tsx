@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import type { RegionBounds } from "./MapContext";
 import type { GeocodedPlace } from "@/types/geospatial";
+import type { Json } from "@/integrations/supabase/types";
 
 export interface AnalysisHistoryRow {
   id: string;
@@ -10,7 +11,7 @@ export interface AnalysisHistoryRow {
   region_name: string;
   region_bounds: RegionBounds;
   date_range: { start: string; end: string } | null;
-  result_payload: any;
+  result_payload: Json;
   created_at: string;
 }
 

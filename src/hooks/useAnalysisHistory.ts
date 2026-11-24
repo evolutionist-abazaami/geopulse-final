@@ -3,6 +3,7 @@ import { isToday, isYesterday, isThisWeek } from "date-fns";
 import { supabase } from "@/integrations/supabase/client";
 import type { AnalysisHistoryRow } from "@/contexts/RightPanelContext";
 import type { RegionBounds } from "@/contexts/MapContext";
+import type { Json } from "@/integrations/supabase/types";
 
 export interface SaveAnalysisInput {
   type: "geowitness";
@@ -10,7 +11,7 @@ export interface SaveAnalysisInput {
   regionName: string;
   regionBounds: RegionBounds;
   dateRange?: { start: string; end: string } | null;
-  resultPayload: any;
+  resultPayload: Json;
 }
 
 export function useAnalysisHistory() {
@@ -85,8 +86,8 @@ export function useAnalysisHistory() {
         type: input.type,
         event_type: input.eventType ?? null,
         region_name: input.regionName,
-        region_bounds: input.regionBounds as any,
-        date_range: (input.dateRange ?? null) as any,
+        region_bounds: input.regionBounds,
+        date_range: input.dateRange ?? null,
         result_payload: input.resultPayload,
       })
       .select()

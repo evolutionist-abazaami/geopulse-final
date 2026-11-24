@@ -9,7 +9,10 @@
 // retired - `supabase.auth` is used directly and unmodified. This function
 // is kept as a no-op purely so `client.ts` (auto-generated, not meant to be
 // hand-edited) doesn't need to change.
-export function installLocalAuthFallback(supabase: any) {
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "./types";
+
+export function installLocalAuthFallback(supabase: SupabaseClient<Database>) {
   // One-time cleanup: clear any fake local session/account data left over
   // from when the fallback was active, so a returning browser doesn't stay
   // stuck holding a "session" that was never real.

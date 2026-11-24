@@ -32,17 +32,23 @@ model-generated explanations while keeping measurement provenance explicit.
   Landsat surface-reflectance scale and offset are applied before computing
   spectral indices.
 - **Measured versus generated output:** NDVI, NDWI, NBR, valid-pixel ratio,
-  change, and supported trend calculations come from satellite statistics.
-  When those measurements are unavailable, numeric satellite fields are null.
+  change, and sampled temporal values come from satellite statistics. Future
+  projections and R²-derived confidence are disabled pending independent
+  validation. When measurements are unavailable, numeric satellite fields
+  are null.
   Groq-generated narrative is separately identified; its percentages and
   index-like values are checked against measurements, retried once, and
   replaced with a deterministic summary if mismatches remain.
 - **Narrative model availability:** `analyze-satellite` rotates to another
   configured Groq model when a model ID is unavailable. Keep its model list
   aligned with Groq's active model catalog as models are deprecated.
-- **Visualizations:** `generate-visualization` prefers Sentinel Hub imagery.
-  Gemini-generated fallback illustrations are not satellite measurements and
-  must be interpreted as generated visuals.
+- **Visualizations:** `generate-visualization` prefers source-backed Sentinel
+  Hub imagery. Gemini can produce prompt-based illustrations only when a
+  caller explicitly opts in; they are not satellite measurements.
+  Classification and pixel-wise change-detection maps are rejected while
+  those analysis methods are disabled, rather than generated as illustrations.
+  The PDF report generator opts out, and creates its tables and measured NDVI
+  chart locally from analysis results.
 - **Weather and alerts:** `ingest-weather` stores Open-Meteo observations and
   the returned daily data. Open-Meteo `current.rain` is the preceding-interval
   value, not a daily accumulation. Thresholds can use `daily_rain_sum` to read
@@ -54,6 +60,15 @@ Analysis constants and the corresponding test coverage are summarized in
 [`docs/PAPER_CLAIMS.md`](./docs/PAPER_CLAIMS.md). No manuscript document was
 included in this repository snapshot, so that ledger is a code-based reference,
 not a completed sentence-by-sentence manuscript audit.
+
+The code-based scientific methods review and staged path to research,
+operational advisory, and public-safety readiness are documented in
+[`docs/SCIENTIFIC_METHODS_AND_SYSTEM_ASSESSMENT.md`](./docs/SCIENTIFIC_METHODS_AND_SYSTEM_ASSESSMENT.md)
+and [`docs/REQUIREMENTS_AND_DELIVERY_ROADMAP.md`](./docs/REQUIREMENTS_AND_DELIVERY_ROADMAP.md).
+The standalone expert methods dossier is at
+[`docs/GEOPULSE_EXPERT_METHODS_DOSSIER.md`](./docs/GEOPULSE_EXPERT_METHODS_DOSSIER.md).
+The selected Ghana research pilot has a draft, partner-reviewable requirements
+register at [`docs/GHANA_VEGETATION_CHANGE_PILOT.md`](./docs/GHANA_VEGETATION_CHANGE_PILOT.md).
 
 ## GIS import and export
 

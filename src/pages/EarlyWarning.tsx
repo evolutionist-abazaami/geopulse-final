@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { TrendChart } from "@/components/charts/TrendChart";
+import type { User } from "@supabase/supabase-js";
 
 type HazardAlert = {
   id: string;
@@ -30,7 +31,7 @@ type HazardAlert = {
   metric_name: string | null;
   metric_value: number | null;
   threshold_value: number | null;
-  ai_analysis: any;
+  ai_analysis: { assessment?: string } | null;
   is_read: boolean;
   is_resolved: boolean;
   created_at: string;
@@ -108,7 +109,7 @@ const DEFAULT_LOCATIONS = [
 
 const EarlyWarning = () => {
   const navigate = useNavigate();
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [alerts, setAlerts] = useState<HazardAlert[]>([]);
   const [thresholds, setThresholds] = useState<MonitoringThreshold[]>([]);
@@ -129,6 +130,8 @@ const EarlyWarning = () => {
 
   useEffect(() => {
     checkUserAndLoad();
+    // Mount-only auth and initial data load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Realtime subscription for alerts
@@ -193,8 +196,8 @@ const EarlyWarning = () => {
       if (error) throw error;
       toast.success(`Weather data ingested: ${data.ingested} locations`);
       await loadAllData();
-    } catch (err: any) {
-      toast.error("Failed to ingest weather data: " + err.message);
+    } catch (err: unknown) {
+      toast.error("Failed to ingest weather data: " + (err instanceof Error ? err.message : "Unknown error"));
     } finally {
       setIsIngesting(false);
     }
@@ -207,8 +210,8 @@ const EarlyWarning = () => {
       if (error) throw error;
       toast.success(`Evaluation complete: ${data.alerts_created} new alerts`);
       await loadAllData();
-    } catch (err: any) {
-      toast.error("Failed to evaluate hazards: " + err.message);
+    } catch (err: unknown) {
+      toast.error("Failed to evaluate hazards: " + (err instanceof Error ? err.message : "Unknown error"));
     } finally {
       setIsEvaluating(false);
     }

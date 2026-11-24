@@ -10,7 +10,7 @@ const typePillStyles: Record<string, string> = {
 };
 
 // Ported verbatim from the old Dashboard.tsx page's bulk export.
-function exportToJSON(data: any[], filename: string) {
+function exportToJSON(data: unknown[], filename: string) {
   const json = JSON.stringify(data, null, 2);
   const blob = new Blob([json], { type: "application/json" });
   const url = URL.createObjectURL(blob);

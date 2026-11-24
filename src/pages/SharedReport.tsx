@@ -8,9 +8,26 @@ import { supabase } from "@/integrations/supabase/client";
 import { ComparisonChart } from "@/components/charts/ComparisonChart";
 import jsPDF from "jspdf";
 
+interface SharedReportData {
+  period1?: { range?: string; changePercent?: number };
+  period2?: { range?: string; changePercent?: number };
+  comparison?: { trend?: string; difference?: number; insight?: string };
+  [key: string]: unknown;
+}
+
+interface SharedReportRow {
+  id: string;
+  title: string;
+  location_name: string;
+  event_type: string;
+  created_at: string;
+  view_count: number;
+  report_data: SharedReportData;
+}
+
 const SharedReport = () => {
   const { shareId } = useParams<{ shareId: string }>();
-  const [report, setReport] = useState<any>(null);
+  const [report, setReport] = useState<SharedReportRow | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,7 +53,7 @@ const SharedReport = () => {
         // Increment view count using secure RPC function
         await supabase.rpc("increment_shared_report_view", { p_share_id: shareId });
 
-        setReport(data);
+        setReport(data as unknown as SharedReportRow);
       } catch (err) {
         console.error("Error fetching report:", err);
         setError("Failed to load report");

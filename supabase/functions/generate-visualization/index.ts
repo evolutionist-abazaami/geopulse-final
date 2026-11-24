@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createUnavailableVisualizationResponse } from "../_shared/visualization-policy.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -157,17 +158,23 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-async function fetchSentinelHubImage(evalscriptKey: string, lat: number, lng: number): Promise<string | null> {
+async function fetchSentinelHubImage(
+  evalscriptKey: string,
+  lat: number,
+  lng: number,
+  requestedEndDate: Date,
+): Promise<string | null> {
   const token = await getSentinelHubToken();
   if (!token) return null;
 
   const half = 0.05; // ~11km-wide chip around the point
   const bbox = [lng - half, lat - half, lng + half, lat + half];
   const now = new Date();
+  const end = requestedEndDate.getTime() > now.getTime() ? now : requestedEndDate;
   // Wide window (6 months) so there's a scene available even in persistently
   // cloudy regions; per-pixel SCL masking in the evalscript makes whatever
   // cloud remains transparent rather than rendering it as false ground data.
-  const from = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
+  const from = new Date(end.getTime() - 180 * 24 * 60 * 60 * 1000);
 
   let response: Response;
   try {
@@ -180,7 +187,7 @@ async function fetchSentinelHubImage(evalscriptKey: string, lat: number, lng: nu
           data: [{
             type: "sentinel-2-l2a",
             dataFilter: {
-              timeRange: { from: from.toISOString(), to: now.toISOString() },
+              timeRange: { from: from.toISOString(), to: end.toISOString() },
               // "leastCC" composites per-pixel from whichever scene is least
               // cloudy at that exact pixel, which can silently stitch together
               // two different orbit passes/dates within the AOI - visible as a
@@ -332,6 +339,12 @@ serve(async (req) => {
     const body = await req.json();
     
     const visualizationType = validateVisualizationType(body.visualizationType);
+    const unavailableVisualization = createUnavailableVisualizationResponse(visualizationType, {
+      ...corsHeaders,
+      "Content-Type": "application/json",
+    });
+    if (unavailableVisualization) return unavailableVisualization;
+
     const region = validateString(body.region, 'region', 200) || 'Africa';
     const eventType = validateString(body.eventType, 'eventType', 100) || 'environmental changes';
     const changePercent = body.changePercent || body.data?.changePercent || 0;
@@ -340,7 +353,6 @@ serve(async (req) => {
     const classificationResults = body.classificationResults || body.data?.classificationResults;
     const changeDetection = body.changeDetection || body.data?.changeDetection;
     const landsatInfo = body.landsatInfo || body.data?.landsatInfo;
-    const predictiveData = body.predictiveModeling || body.data?.predictiveModeling;
 
     console.log(`Generating ${visualizationType} visualization for ${region} - User: ${user?.id || 'anonymous'}`);
 
@@ -351,18 +363,25 @@ serve(async (req) => {
     const rawLng = body.lng ?? body.data?.locations?.[0]?.lng ?? body.selectedLocation?.lng;
     const lat = typeof rawLat === "number" ? rawLat : parseFloat(rawLat);
     const lng = typeof rawLng === "number" ? rawLng : parseFloat(rawLng);
+    const rawEndDate = body.endDate ?? body.data?.endDate ?? body.data?.end_date;
+    const parsedEndDate = rawEndDate ? new Date(rawEndDate) : new Date();
+    const now = new Date();
+    const requestedImageryEndDate = Number.isNaN(parsedEndDate.getTime()) ? now : parsedEndDate;
+    const imageryEndDate = requestedImageryEndDate > now ? now : requestedImageryEndDate;
+    const imageryStartDate = new Date(imageryEndDate.getTime() - 180 * 24 * 60 * 60 * 1000);
 
     if (sentinelKey && Number.isFinite(lat) && Number.isFinite(lng)) {
-      const sentinelImage = await fetchSentinelHubImage(sentinelKey, lat, lng);
+      const sentinelImage = await fetchSentinelHubImage(sentinelKey, lat, lng, imageryEndDate);
       if (sentinelImage) {
         console.log(`Sentinel Hub image succeeded for ${visualizationType} at [${lat}, ${lng}]`);
         return new Response(
           JSON.stringify({
             success: true,
             imageUrl: sentinelImage,
-            description: "Real Sentinel-2 L2A satellite imagery (last 90 days, least cloud cover).",
+            description: `Provider-rendered Sentinel-2 L2A imagery selected from the 180-day window ending ${imageryEndDate.toISOString()}; imagery is visual context, not the analysis statistics.`,
             visualizationType,
-            dataSource: "Sentinel-2 L2A (Copernicus Data Space Ecosystem)",
+            dataSource: `Sentinel-2 L2A (Copernicus Data Space Ecosystem), visual query window ${imageryStartDate.toISOString().slice(0, 10)} to ${imageryEndDate.toISOString().slice(0, 10)}`,
+            origin: "provider_visualization",
           }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
@@ -387,12 +406,28 @@ serve(async (req) => {
               description: "Real per-cell NDVI measurements from Sentinel-2 (Copernicus Data Space Ecosystem), tiled across a 3x3 grid around the study coordinates.",
               visualizationType,
               dataSource: "Sentinel-2 L2A (Copernicus Data Space Ecosystem) - real gridded NDVI",
+              origin: "measured",
             }),
             { headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
         console.warn("Real risk grid unavailable (insufficient cloud-free cells), falling back to AI illustration.");
       }
+    }
+
+    if (body.allowAiIllustration !== true) {
+      return new Response(
+        JSON.stringify({
+          success: true,
+          imageUrl: null,
+          fallback: true,
+          description: "No source-backed visualization is available. AI-generated imagery was not used.",
+          visualizationType,
+          dataSource: "unavailable",
+          origin: "unavailable",
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
     }
 
     const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
@@ -542,23 +577,8 @@ ${changeDetection ? `
 Total changed area: ${changeDetection.total_changed_area_km2} km²
 Major changes: ${changeDetection.major_changes?.slice(0, 2).map((c: any) => c.type).join(', ')}` : ''}
 Add temporal annotations, timeline indicator, and change detection overlay.
-${predictiveData ? `Show projected future state with ${predictiveData.projected_change_12mo}% additional change.` : ''}
+Do not include future projections or confidence bands.
 Professional Sentinel-2 time-series analysis style, photorealistic, 16:9 aspect ratio.`;
-        break;
-
-      case "predictive":
-        prompt = `Create a predictive modeling visualization for ${eventType} in ${region}, Africa based on Sentinel-2 trend analysis.
-Show projected environmental changes over the next 12 months.
-Include: Current state indicator, trend arrows, confidence bands, projection zones.
-Use gradient colors from current (blue) through projected (orange/red for decline, green for improvement).
-${predictiveData ? `
-Trend: ${predictiveData.trend_direction}
-6-month projection: ${predictiveData.projected_change_6mo}%
-12-month projection: ${predictiveData.projected_change_12mo}%
-Confidence: ${predictiveData.confidence}%
-Method: ${predictiveData.methodology}` : ''}
-Add predictive heat zones showing high-probability change areas.
-Professional scientific forecasting visualization, 16:9 aspect ratio.`;
         break;
         
       case "timeline":
@@ -588,10 +608,9 @@ Include spectral index panel:
 - NDVI trend line (vegetation health)
 ${spectralIndices.ndwi ? '- NDWI trend (water content)' : ''}
 ${spectralIndices.nbr ? '- NBR trend (burn severity)' : ''}` : ''}
-Use gradient blue-to-red color scheme based on severity.
-Include: Clean gridlines, proper axis labels, data points with values, trend line, projection zone.
-Add confidence interval shading and annotation for key events.
-Professional scientific chart style, 16:9 aspect ratio.`;
+Use an illustrative style without numeric values.
+Do not invent trends, projections, confidence intervals, probabilities, or event annotations.
+Professional chart illustration style, 16:9 aspect ratio.`;
         break;
         
       case "heatmap":
@@ -812,6 +831,8 @@ Professional scientific poster style, 16:9 aspect ratio.`;
               : "AI image provider is temporarily overloaded. Showing analysis without an AI-rendered visualization.",
           visualizationType,
           model,
+          dataSource: "unavailable",
+          origin: "unavailable",
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
@@ -820,11 +841,13 @@ Professional scientific poster style, 16:9 aspect ratio.`;
     if (!imageUrl) {
       console.log("No images generated, returning placeholder");
       return new Response(
-        JSON.stringify({ 
+        JSON.stringify({
           success: true,
           imageUrl: null,
           description: description || "Visualization generated",
-          visualizationType
+          visualizationType,
+          dataSource: "unavailable",
+          origin: "unavailable",
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
@@ -834,10 +857,11 @@ Professional scientific poster style, 16:9 aspect ratio.`;
       JSON.stringify({ 
         success: true,
         imageUrl,
-        description: description || "Sentinel-2-style visualization generated successfully",
+        description: description || "AI-generated illustration; not satellite imagery, observed data, or validated analysis.",
         visualizationType,
         model,
-        dataSource: "Sentinel-2 MSI"
+        dataSource: "Gemini-generated illustration; not satellite data",
+        origin: "model_generated",
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );

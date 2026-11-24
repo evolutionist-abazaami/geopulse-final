@@ -32,6 +32,29 @@ const ReportGenerator = lazy(() => import("@/components/ReportGenerator"));
 const ComparisonMode = lazy(() => import("@/components/ComparisonMode"));
 const TimeLapseAnimation = lazy(() => import("@/components/TimeLapseAnimation"));
 
+interface SatelliteAnalysisResult {
+  fallback?: boolean;
+  providerMessage?: string;
+  providerStatus?: number;
+  severity?: string;
+  changePercent?: number | null;
+  summary?: string;
+  fullAnalysis?: string;
+  recommendations?: (string | { detail?: string; action?: string })[];
+  fieldProvenance?: Record<string, { origin?: string } | undefined>;
+  cloudCoverage?: { maskedPixelRatio?: number };
+  dataQuality?: { validPixelRatio?: number };
+  spectralIndices?: Parameters<typeof SpectralIndicesDisplay>[0]["spectralIndices"];
+  classificationResults?: Parameters<typeof ClassificationResults>[0]["classificationResults"];
+  changeDetection?: Parameters<typeof ClassificationResults>[0]["changeDetection"];
+  isMultiEvent?: boolean;
+  eventTypes?: string[];
+  eventType?: string;
+  id?: string;
+  area?: string;
+  [key: string]: unknown;
+}
+
 // Ported verbatim from the old GeoWitness.tsx page.
 const eventTypes = [
   { value: "deforestation", label: "Deforestation", icon: "🌳" },
@@ -83,7 +106,7 @@ const eventTypes = [
   { value: "volcanic_activity", label: "Volcanic Activity", icon: "🌋" },
 ];
 
-const isFallbackAnalysis = (data: any) => Boolean(data?.fallback);
+const isFallbackAnalysis = (data: SatelliteAnalysisResult) => Boolean(data.fallback);
 
 // Return unavailable data rather than manufacturing a satellite result offline.
 const generateLocalSatelliteAnalysis = (
@@ -184,7 +207,7 @@ export function GeoWitnessPanel({ initialLocation }: { initialLocation?: Geocode
   const [startDate, setStartDate] = useState("2022-01-01");
   const [endDate, setEndDate] = useState("2024-01-01");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [results, setResults] = useState<any>(null);
+  const [results, setResults] = useState<SatelliteAnalysisResult | null>(null);
   const [selectedLocation, setSelectedLocation] = useState<{
     lat: number;
     lng: number;
@@ -283,7 +306,7 @@ export function GeoWitnessPanel({ initialLocation }: { initialLocation?: Geocode
     setResults(null);
     toast.info(`Starting AI-powered satellite analysis for ${eventTypesToAnalyze.length} event type(s)...`);
 
-    const applyResult = (data: any) => {
+    const applyResult = (data: SatelliteAnalysisResult) => {
       setResults(data);
       mapCtx.setMarkers([{
         lat: coordinates.lat, lng: coordinates.lng,
@@ -353,9 +376,9 @@ export function GeoWitnessPanel({ initialLocation }: { initialLocation?: Geocode
         clearTimeout(timeoutId);
       }
 
-      let data: unknown;
+      let data: SatelliteAnalysisResult;
       if (response.ok) {
-        data = await response.json();
+        data = await response.json() as SatelliteAnalysisResult;
       } else {
         const responseText = await response.text();
         let providerMessage = response.statusText || "The analysis request failed.";
@@ -490,7 +513,7 @@ export function GeoWitnessPanel({ initialLocation }: { initialLocation?: Geocode
             </div>
 
             <p className="text-xs text-muted-foreground">
-              Classification, change matrices, and multi-event analysis are disabled until they use measured inputs.
+              Classification, pixel-wise change matrices, multi-event analysis, and forecast projections are unavailable in this build; no results are generated for them.
             </p>
 
             <Button className="w-full bg-gradient-ocean hover:opacity-90" onClick={runAnalysis} disabled={isAnalyzing}>
@@ -609,7 +632,7 @@ export function GeoWitnessPanel({ initialLocation }: { initialLocation?: Geocode
                       </Badge>
                     </div>
                     <div className="space-y-2">
-                      {results.recommendations.map((rec: any, idx: number) => (
+                      {results.recommendations.map((rec, idx: number) => (
                         <div key={idx} className="flex items-start gap-2 text-[13px] text-gray-700 dark:text-v2-secondary">
                           <span className="h-1.5 w-1.5 rounded-full bg-brand mt-1.5 flex-shrink-0" />
                           <p>{typeof rec === "string" ? rec : rec.detail || rec.action || JSON.stringify(rec)}</p>

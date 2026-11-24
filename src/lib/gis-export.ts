@@ -21,7 +21,7 @@ export interface AnalysisFeature {
 
 export interface GeoJSONFeature {
   type: "Feature";
-  properties: Record<string, any>;
+  properties: Record<string, unknown>;
   geometry: {
     type: "Point" | "Polygon";
     coordinates: number[] | number[][][];
@@ -400,7 +400,12 @@ export async function exportAsShapefileZip(
 
   // shp-write expects DBF field names <= 10 chars (ESRI restriction). The properties
   // in toGeoJSON are already short and ASCII-safe, so they survive the round-trip.
-  (shpwrite as any).download(
+  (shpwrite as unknown as {
+    download: (
+      geoJSON: GeoJSONCollection,
+      options: Record<string, unknown>,
+    ) => void;
+  }).download(
     geoJSON,
     {
       folder: filename,
@@ -420,7 +425,7 @@ export async function exportAsShapefileZip(
 /**
  * Convert database analysis result to AnalysisFeature format
  */
-export function dbResultToFeature(result: any): AnalysisFeature | null {
+export function dbResultToFeature(result: Record<string, unknown>): AnalysisFeature | null {
   // Handle coordinates in various formats
   let coords = result.coordinates;
   if (typeof coords === "string") {
@@ -431,23 +436,38 @@ export function dbResultToFeature(result: any): AnalysisFeature | null {
     }
   }
 
-  if (!coords || (typeof coords.lat !== "number" && typeof coords.latitude !== "number")) {
+  if (!coords || typeof coords !== "object") {
     return null;
   }
 
+  const coordinateMap = coords as Record<string, unknown>;
+  const lat = typeof coordinateMap.lat === "number"
+    ? coordinateMap.lat
+    : typeof coordinateMap.latitude === "number"
+      ? coordinateMap.latitude
+      : null;
+  const lng = typeof coordinateMap.lng === "number"
+    ? coordinateMap.lng
+    : typeof coordinateMap.longitude === "number"
+      ? coordinateMap.longitude
+      : typeof coordinateMap.lon === "number"
+        ? coordinateMap.lon
+        : null;
+  if (lat === null || lng === null) return null;
+
+  const stringOr = (...values: unknown[]): string =>
+    values.find((value): value is string => typeof value === "string") ?? "";
+
   return {
-    id: result.id,
-    name: result.region || result.location_name || "Unknown Location",
-    coordinates: {
-      lat: coords.lat || coords.latitude,
-      lng: coords.lng || coords.longitude || coords.lon,
-    },
-    eventType: result.event_type,
-    changePercent: result.change_percent,
-    startDate: result.start_date,
-    endDate: result.end_date,
-    summary: result.summary,
-    areaAnalyzed: result.area_analyzed,
-    createdAt: result.created_at,
+    id: stringOr(result.id),
+    name: stringOr(result.region, result.location_name, "Unknown Location"),
+    coordinates: { lat, lng },
+    eventType: stringOr(result.event_type),
+    changePercent: typeof result.change_percent === "number" ? result.change_percent : undefined,
+    startDate: stringOr(result.start_date),
+    endDate: stringOr(result.end_date),
+    summary: typeof result.summary === "string" ? result.summary : undefined,
+    areaAnalyzed: typeof result.area_analyzed === "string" ? result.area_analyzed : undefined,
+    createdAt: stringOr(result.created_at),
   };
 }

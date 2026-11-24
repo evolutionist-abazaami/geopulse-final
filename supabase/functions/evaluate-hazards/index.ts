@@ -2,7 +2,11 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { authorizeUserOrCron } from "../_shared/auth.ts";
 import { MAX_HAZARD_OBSERVATION_DISTANCE_KM } from "../_shared/analysis-constants.ts";
-import { determineHazardSeverity, distanceKilometers } from "../_shared/hazard-severity.ts";
+import {
+  determineHazardSeverity,
+  distanceKilometers,
+  getProviderObservationTime,
+} from "../_shared/hazard-severity.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -237,6 +241,9 @@ serve(async (req) => {
         threshold.region_name
       );
 
+      const observationSource = typeof obs.data_source === "string" ? obs.data_source : "unknown";
+      const providerTime = getProviderObservationTime(obs) ?? "unavailable";
+      const ingestedAt = typeof obs.observation_date === "string" ? obs.observation_date : "unavailable";
       const alert = {
         user_id: threshold.user_id,
         threshold_id: threshold.id,
@@ -246,7 +253,12 @@ serve(async (req) => {
         hazard_type: threshold.hazard_type,
         severity,
         title: `${threshold.hazard_type.charAt(0).toUpperCase() + threshold.hazard_type.slice(1)} Warning: ${threshold.region_name}`,
-        description: `${threshold.metric} reading of ${metricValue} has exceeded the threshold of ${threshold.threshold_value} (${threshold.operator}).`,
+        description: [
+          `${threshold.metric} reading of ${metricValue} has exceeded the threshold of ${threshold.threshold_value} (${threshold.operator}).`,
+          `Source: ${observationSource}.`,
+          `Provider time: ${providerTime}.`,
+          `Record ingested: ${ingestedAt}.`,
+        ].join(" "),
         metric_name: threshold.metric,
         metric_value: metricValue,
         threshold_value: threshold.threshold_value,

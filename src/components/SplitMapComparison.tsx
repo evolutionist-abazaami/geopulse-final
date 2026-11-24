@@ -112,7 +112,7 @@ const SplitMapComparison = ({
       rightMapInstance.current = null;
       setMapsLoaded({ left: false, right: false });
     };
-  }, []);
+  }, [center, syncMaps, zoom]);
 
   // Update map centers when center prop changes
   useEffect(() => {
